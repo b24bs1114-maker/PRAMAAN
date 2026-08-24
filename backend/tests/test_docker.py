@@ -149,8 +149,8 @@ def test_every_copy_source_exists_and_survives_dockerignore():
             )
             copied += 1
 
-    # requirements, app, tests, conftest.py, pytest.ini
-    assert copied >= 5
+    # requirements, app
+    assert copied >= 2
 
 
 def test_dockerignore_keeps_host_state_out_of_the_image():

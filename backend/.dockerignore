@@ -15,6 +15,9 @@ reports/*
 !reports/.gitkeep
 
 # Python caches and test artefacts
+tests/
+conftest.py
+pytest.ini
 __pycache__/
 *.py[cod]
 *.egg-info/

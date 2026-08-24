@@ -35,11 +35,8 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir ${PIP_EXTRA_ARGS} -r requirements.txt
 
-# Application code. Tests are included deliberately: the same image can be used
-# to prove the deployment works (`docker compose run --rm backend pytest -q`).
+# Copy production application code (runtime files only, no test files or test config)
 COPY app ./app
-COPY tests ./tests
-COPY conftest.py pytest.ini ./
 
 # Non-root user, uid/gid 1000 so bind-mounted host directories line up with the
 # usual first Linux desktop account. Override with `user:` in compose if yours
