@@ -1,5 +1,4 @@
 # Keep the build context small and keep host state out of the image.
-# Anything the container needs at runtime arrives on a volume, not in a layer.
 
 # Local environment / virtualenvs
 .venv/

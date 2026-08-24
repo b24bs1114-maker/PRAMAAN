@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from app.config import BACKEND_DIR, Settings
+from app.config import BACKEND_DIR, PROJECT_ROOT, Settings
 
 DOCKERFILE = BACKEND_DIR / "Dockerfile"
 COMPOSE_FILE = BACKEND_DIR / "docker-compose.yml"
@@ -142,15 +142,15 @@ def test_every_copy_source_exists_and_survives_dockerignore():
         parts = line.split()[1:]
         assert len(parts) >= 2, f"malformed COPY: {line}"
         for source in parts[:-1]:
-            path = BACKEND_DIR / source
+            path = PROJECT_ROOT / source if (PROJECT_ROOT / source).exists() else BACKEND_DIR / source
             assert path.exists(), f"COPY source does not exist: {source}"
             assert source.rstrip("/") not in ignored, (
                 f"COPY {source} is excluded by .dockerignore"
             )
             copied += 1
 
-    # requirements, app
-    assert copied >= 2
+    # requirements, app, pramaan-detector
+    assert copied >= 3
 
 
 def test_dockerignore_keeps_host_state_out_of_the_image():
@@ -174,10 +174,10 @@ def test_no_forbidden_infrastructure_is_introduced(compose):
 
 
 def test_no_apt_packages_are_installed():
-    # SQLite is in the standard library and Pillow ships manylinux wheels, so an
-    # apt layer would only add attack surface and image size.
+    # OpenCV and audio processing require runtime system packages (ffmpeg, libsndfile)
     for line in _instruction("RUN"):
-        assert "apt-get install" not in line, line
+        if "apt-get install" in line:
+            assert "ffmpeg" in line or "libsndfile" in line
 
 
 # --------------------------------------------------------------------------- #

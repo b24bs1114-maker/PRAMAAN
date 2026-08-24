@@ -1,0 +1,38 @@
+# Repository Root .dockerignore for Render & Docker Build Context
+
+# Exclude Git & IDE metadata
+.git/
+.gitignore
+.agents/
+.claude/
+.impeccable/
+.tmp-ruflo/
+
+# Exclude virtual environments & node_modules
+.venv/
+venv/
+node_modules/
+frontend/
+
+# Exclude Python build & test caches
+backend/tests/
+backend/conftest.py
+backend/pytest.ini
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Exclude temporary deployment zips and local files
+PRAMAAN_DEPLOY/
+*.zip
+.DS_Store
+*.log
+
+# Keep runtime components:
+# backend/requirements.txt
+# backend/app/
+# pramaan-detector/
