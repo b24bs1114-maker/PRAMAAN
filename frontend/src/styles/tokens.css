@@ -1,0 +1,177 @@
+/*
+ * PRAMAAN Digital Forensics Platform — Design System Tokens
+ * Day Theme: Full White Enterprise Palette
+ * Night Theme: Sophisticated Graphite/Navy Palette
+ */
+
+:root {
+  /* --- Surfaces: Full White Ramp (Clean Enterprise Light Theme) ---------- */
+  --bg: #ffffff;            /* Pure white main canvas */
+  --sidebar-bg: #f8fafc;    /* Clean crisp slate-50 sidebar */
+  --surface: #ffffff;       /* Pure white workstation cards */
+  --surface-2: #f1f5f9;     /* Subtle elevated section / hover */
+  --surface-3: #e2e8f0;     /* Control inset / active element */
+  --navy-surface: #0f172a;   /* Midnight dark navy focal block */
+  --navy-border: #1e293b;
+
+  --border: #e2e8f0;        /* Light clean border */
+  --border-strong: #cbd5e1; /* Prominent clean border */
+
+  /* --- Typography & Text Contrast (Deep Graphite / Navy) ----------------- */
+  --text: #1e293b;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+  --text-strong: #0f172a;
+
+  /* --- Accents & Platform Colors ----------------------------------------- */
+  --accent: #2563eb;
+  --accent-deep: #1d4ed8;
+  --accent-bright: #3b82f6;
+  --accent-wash: rgba(37, 99, 235, 0.06);
+  --accent-soft: rgba(37, 99, 235, 0.12);
+  --accent-line: rgba(37, 99, 235, 0.22);
+
+  --telegram: #0284c7;
+  --whatsapp: #16a34a;
+  --twitter: #0f172a;
+
+  /* --- Semantic Status Indicators --------------------------------------- */
+  --ok: #15803d;
+  --warn: #b45309;
+  --danger: #b91c1c;
+  --bar: #475569;
+  --info: #0369a1;
+
+  --ok-wash: #f0fdf4;
+  --ok-line: #bbf7d0;
+  --warn-wash: #fffbeb;
+  --warn-line: #fde68a;
+  --danger-wash: #fef2f2;
+  --danger-line: #fecaca;
+  --info-wash: #f0f9ff;
+  --info-line: #bae6fd;
+
+  --state-strong-authentic-bg: #f0fdf4;
+  --state-strong-authentic-fg: #15803d;
+  --state-weak-authentic-bg: #f0fdf4;
+  --state-weak-authentic-fg: #15803d;
+  --state-neutral-bg: #f8fafc;
+  --state-neutral-fg: #64748b;
+  --state-weak-manipulated-bg: #fffbeb;
+  --state-weak-manipulated-fg: #b45309;
+  --state-strong-manipulated-bg: #fef2f2;
+  --state-strong-manipulated-fg: #b91c1c;
+  --state-unavailable-bg: #f8fafc;
+  --state-unavailable-fg: #64748b;
+  --state-unavailable-border: #cbd5e1;
+
+  /* --- Typography Stacks ------------------------------------------------ */
+  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, 'SF Pro Text', 'SF Pro Display', Roboto, Helvetica, Arial, sans-serif;
+
+  --radius: 8px;
+  --radius-sm: 4px;
+  --radius-lg: 12px;
+
+  /* --- Spacing Scale ---------------------------------------------------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* --- Type Scale ------------------------------------------------------- */
+  --text-2xs: 10px;
+  --text-xs: 11.5px;
+  --text-sm: 13px;
+  --text-base: 14.5px;
+  --text-md: 16.5px;
+  --text-lg: 19px;
+  --text-xl: 23px;
+  --text-2xl: 29px;
+  --text-display: 38px;
+  --text-hero: 46px;
+
+  --leading-tight: 1.15;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.62;
+
+  --label-size: 10.5px;
+  --label-tracking: 0.12em;
+
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  /* --- Compatibility aliases --------------------------------------------
+   * Some components/screens reference these older names. They resolve, via
+   * lazy var() substitution, to the canonical token in the current theme
+   * scope (so dark mode is honoured). New code should prefer the canonical
+   * names on the right. */
+  --primary: var(--accent);
+  --primary-deep: var(--accent-deep);
+  --font-mono: var(--mono);
+  --font-sans: var(--sans);
+  --bg-subtle: var(--surface-2);
+  --radius-md: var(--radius);
+}
+
+/* --- Night Theme Tokens (Dark Graphite & Navy) -------------------------- */
+[data-theme="dark"] {
+  --bg: #0d1117;
+  --sidebar-bg: #161b22;
+  --surface: #161b22;
+  --surface-2: #21262d;
+  --surface-3: #30363d;
+  --navy-surface: #090d13;
+  --navy-border: #30363d;
+
+  --border: #30363d;
+  --border-strong: #484f58;
+
+  --text: #c9d1d9;
+  --text-muted: #8b949e;
+  --text-faint: #6e7681;
+  --text-strong: #f0f6fc;
+
+  --accent: #388bfd;
+  --accent-deep: #1f6beb;
+  --accent-bright: #58a6ff;
+  --accent-wash: rgba(56, 139, 253, 0.15);
+  --accent-soft: rgba(56, 139, 253, 0.25);
+  --accent-line: rgba(56, 139, 253, 0.4);
+
+  --telegram: #38bdf8;
+  --whatsapp: #4ade80;
+  --twitter: #94a3b8;
+
+  --ok: #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
+  --bar: #8b949e;
+  --info: #58a6ff;
+
+  --ok-wash: rgba(63, 185, 80, 0.15);
+  --ok-line: rgba(63, 185, 80, 0.4);
+  --warn-wash: rgba(210, 153, 34, 0.15);
+  --warn-line: rgba(210, 153, 34, 0.4);
+  --danger-wash: rgba(248, 81, 73, 0.15);
+  --danger-line: rgba(248, 81, 73, 0.4);
+  --info-wash: rgba(88, 166, 255, 0.15);
+  --info-line: rgba(88, 166, 255, 0.4);
+
+  --state-strong-authentic-bg: rgba(63, 185, 80, 0.15);
+  --state-strong-authentic-fg: #3fb950;
+  --state-weak-authentic-bg: rgba(63, 185, 80, 0.15);
+  --state-weak-authentic-fg: #3fb950;
+  --state-neutral-bg: rgba(139, 148, 158, 0.15);
+  --state-neutral-fg: #8b949e;
+  --state-weak-manipulated-bg: rgba(210, 153, 34, 0.15);
+  --state-weak-manipulated-fg: #d29922;
+  --state-strong-manipulated-bg: rgba(248, 81, 73, 0.15);
+  --state-strong-manipulated-fg: #f85149;
+  --state-unavailable-bg: rgba(110, 118, 129, 0.15);
+  --state-unavailable-fg: #8b949e;
+  --state-unavailable-border: #30363d;
+}

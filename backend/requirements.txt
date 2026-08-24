@@ -1,0 +1,69 @@
+# PRAMAAN backend dependencies -- Python 3.12
+#
+# Everything below is REQUIRED and is what the running system was tested with.
+# Optional accelerators/renderers are listed at the bottom: the backend detects
+# them at import time and falls back to a pure-Python equivalent when absent, so
+# a deployment without them is fully functional (see README "Optional
+# dependencies and fallbacks").
+#
+# Version ranges are capped at the next incompatible release. After installing,
+# freeze exact versions for reproducible offline deployment:
+#     pip freeze > requirements.lock.txt
+
+# --- Web framework ---
+fastapi>=0.115,<0.120
+uvicorn[standard]>=0.34,<0.40      # [standard] provides the --reload watcher
+python-multipart>=0.0.18,<0.1      # multipart/form-data evidence uploads
+
+# --- Configuration ---
+pydantic>=2.9,<3.0
+pydantic-settings>=2.6,<3.0        # env / .env driven Settings
+
+# --- Persistence ---
+SQLAlchemy>=2.0.36,<2.1            # ORM over SQLite (stdlib sqlite3 driver)
+
+# --- Imaging, hashing, forensics ---
+pillow>=11.0,<13.0                 # decode, EXIF/XMP/ICC, JPEG quantisation tables
+numpy>=2.0,<3.0                    # pHash/dHash DCT maths, flat index vectors
+
+# --- Tests ---
+pytest>=8.3,<9.0
+httpx>=0.28,<1.0                   # required by fastapi.testclient
+
+
+# ---------------------------------------------------------------------------
+# OPTIONAL -- each has a working in-tree fallback; none is needed to run
+# ---------------------------------------------------------------------------
+# None of these could be installed in the environment this build was developed
+# in (the PyPI proxy refused CONNECT), so every one of them has a tested
+# fallback path. Install them to replace the fallback; nothing else changes.
+#
+# faiss-cpu>=1.8,<2.0     Vector search. Fallback: numpy flat index. Both are
+#                         exhaustive exact Hamming search -- identical results,
+#                         only speed differs. GET /api/index/status reports
+#                         which backend is live.
+# reportlab>=4.2,<5.0     PDF rendering. Fallback: app/utils/pdf.py, a minimal
+#                         PDF 1.4 writer (base-14 fonts). The report content is
+#                         identical; the ReportLab file is typographically
+#                         nicer. The report names the renderer it used.
+# imagehash>=4.3,<5.0     Perceptual hashing. Fallback: app/services/hashing.py
+#                         implements pHash/dHash/aHash directly on numpy, and
+#                         tests assert the values match the reference
+#                         definition. No behavioural difference.
+# c2pa-python>=0.6,<1.0   C2PA/CAI manifest verification. Fallback: the
+#                         provenance stage reports UNAVAILABLE (a missing
+#                         signal, excluded from fusion) after scanning for
+#                         embedded manifest markers. It never fabricates a
+#                         provenance finding.
+# onnxruntime>=1.19,<2.0  Runtime for a local AI-manipulation detector model,
+#                         plus a model file at PRAMAAN_DETECTOR_MODEL_PATH.
+#                         Fallback: NullDetector, which abstains with
+#                         score: null and status: UNAVAILABLE. It never invents
+#                         a score, and a missing score is never read as 0.0.
+# torch>=2.4,<3.0         Alternative detector runtime, for a TorchScript
+#                         (.pt/.pth/.torchscript) model instead of .onnx. Same
+#                         adapter contract, same fallback.
+# Rahul AI detector engine (pramaan-detector):
+#                         torch>=2.0.0, torchvision>=0.15.0, opencv-python-headless>=4.8.0,
+#                         librosa>=0.10.0, soundfile>=0.12.0, scipy>=1.10.0
+#                         Install via: pip install -e ./pramaan-detector

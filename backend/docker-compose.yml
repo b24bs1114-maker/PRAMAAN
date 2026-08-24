@@ -1,0 +1,107 @@
+# PRAMAAN backend -- single-service, offline, on-premise deployment.
+#
+#   docker compose up --build          start the API on http://localhost:8000
+#   docker compose ps                  see the health check state
+#   docker compose run --rm backend pytest -q     run the test suite in-image
+#   docker compose down                stop (volumes and reports are kept)
+#
+# Deliberately absent: PostgreSQL, Redis, a message broker, a reverse proxy, any
+# orchestrator. The backend is one process with a SQLite file; adding services
+# would add failure modes without adding capability.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pramaan-backend:0.1.0
+    container_name: pramaan-backend
+    restart: unless-stopped
+
+    # Bind to the loopback interface of the host: this is an evidence-handling
+    # service and must not be published to a LAN by accident. Change to
+    # "8000:8000" only on a network you control.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    environment:
+      # Storage (absolute, matching the volumes below).
+      PRAMAAN_DATA_DIR: /data
+      PRAMAAN_REPORTS_DIR: /reports
+      PRAMAAN_CORPUS_DIR: /corpus
+      # Runtime posture.
+      PRAMAAN_ENVIRONMENT: production
+      PRAMAAN_DEBUG: "false"
+      PRAMAAN_LOG_LEVEL: INFO
+      # Interactive docs are off in production; set ENVIRONMENT=development to
+      # get /docs and /redoc back.
+      #
+      # The frontend Rahul is building runs on the host, so the browser origin is
+      # a host origin, not a container one.
+      PRAMAAN_CORS_ALLOW_ORIGINS: >-
+        http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000
+      # The detector abstains unless a local model is mounted in and named here.
+      # It never invents a score.
+      PRAMAAN_DETECTOR_BACKEND: auto
+      # PRAMAAN_DETECTOR_MODEL_PATH: /models/detector.onnx
+
+    # uid:gid the container process runs as. 1000:1000 matches the image's
+    # `pramaan` user. On Linux, set these to your own `id -u`:`id -g` if the
+    # bind-mounted ./reports or ../corpus directories are owned by another user,
+    # otherwise the container cannot write into them.
+    user: "${PRAMAAN_UID:-1000}:${PRAMAAN_GID:-1000}"
+
+    volumes:
+      # Named volume: the case database, the evidence store and the perceptual
+      # index. Survives `docker compose down` and image rebuilds; removed only by
+      # an explicit `docker compose down -v`.
+      - pramaan-data:/data
+      # Bind mounts: reports must be readable by the examiner on the host, and
+      # the reference corpus is generated on the host by
+      # scripts/generate_corpus.py.
+      - ./reports:/reports
+      - ../corpus:/corpus
+      # A local detector model, if this deployment has one:
+      # - ./models:/models:ro
+
+    # Same check as the image's HEALTHCHECK, declared here so `docker compose ps`
+    # and any dependent service see it even if the image is replaced.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json, sys, urllib.request
+          r = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=4)
+          sys.exit(0 if r.status == 200 and json.load(r).get("status") == "ok" else 1)
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+    # No egress is required or wanted at runtime. Uncomment to prove it: the
+    # container gets an internal-only network and the API keeps working.
+    # networks:
+    #   - pramaan-internal
+
+    # Modest, explicit limits -- image decoding and DCT hashing are the only
+    # heavy operations, and both are bounded by PRAMAAN_MAX_UPLOAD_BYTES.
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  pramaan-data:
+    name: pramaan-data
+
+# networks:
+#   pramaan-internal:
+#     internal: true

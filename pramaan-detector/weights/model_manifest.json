@@ -1,0 +1,77 @@
+{
+  "manifest_version": "1.0.0",
+  "project": "PRAMAAN Multi-Modal Deepfake Detector",
+  "updated_at": "2026-08-24T17:00:00Z",
+  "models": {
+    "image": {
+      "model_name": "SwinB-AI-Image-Detector",
+      "model_version": "3.0.0",
+      "source_repo": "https://github.com/truebees-ai/Image-Deepfake-Detectors-Public-Library",
+      "hf_hub_model": "umm-maybe/AI-image-detector",
+      "checkpoint_filename": "image_detector.pt",
+      "weights_sha256": "4b68e9860b0ff1bc557e4e1dfecf530ad6ec4a0280ebdbed1d0ef618e474581f",
+      "license": "MIT",
+      "architecture": "Swin-B (SwinForImageClassification) Vision Transformer backbone fine-tuned for general AI-generated image vs real photo classification",
+      "input_preprocessing": {
+        "format": "RGB",
+        "resize": [224, 224],
+        "normalization": {
+          "mean": [0.485, 0.456, 0.406],
+          "std": [0.229, 0.224, 0.225]
+        }
+      },
+      "label_mapping": {
+        "0": "MANIPULATED / SYNTHETIC (AI-generated image)",
+        "1": "AUTHENTIC (Real human photo)"
+      },
+      "explanation": "Outputs manipulation score from class 0 ('artificial') softmax probability. Swin final block Grad-CAM computes 7x7 spatial patch grid activation maps.",
+      "known_limitations": "Evaluates structural texture and spatial patch artifacts from diffusion and GAN generators; heavily recompressed low-res web images may reduce confidence."
+    },
+    "video": {
+      "model_name": "VideoDetector-EfficientNetB0",
+      "model_version": "3.0.0",
+      "source_repo": "https://github.com/TRahulsingh/DeepfakeDetector",
+      "checkpoint_filename": "image_detector.pt",
+      "weights_sha256": "4b68e9860b0ff1bc557e4e1dfecf530ad6ec4a0280ebdbed1d0ef618e474581f",
+      "license": "MIT",
+      "architecture": "Frame-sampled EfficientNet-B0 + OpenCV face detection + temporal variance score aggregation",
+      "input_preprocessing": {
+        "sampling_fps": 1,
+        "max_frames": 60,
+        "frame_resize": [224, 224],
+        "normalization": {
+          "mean": [0.485, 0.456, 0.406],
+          "std": [0.229, 0.224, 0.225]
+        }
+      },
+      "label_mapping": {
+        "0": "AUTHENTIC (Real video)",
+        "1": "MANIPULATED (AI-generated video or face swap)"
+      },
+      "explanation": "Combines 70% mean frame manipulation score and 30% inter-frame temporal inconsistency score. Detects suspicious frame timestamps.",
+      "known_limitations": "Frame-based temporal aggregation model; not a 3D spatiotemporal convolution model. Rapid camera cuts can increase temporal variance."
+    },
+    "audio": {
+      "model_name": "Wav2Vec2-GaryStafford-DeepfakeVoiceDetector",
+      "model_version": "2.0.0",
+      "source_repo": "https://github.com/garystafford/deepfake-voice-detection-public",
+      "hf_hub_model": "garystafford/wav2vec2-deepfake-voice-detector",
+      "checkpoint_filename": "audio_detector.pt",
+      "weights_sha256": "02eb060768e1a46cf7e4fe33ec36780c102a7b2cb6df4e3d7a8d56b3e6c0c5bd",
+      "license": "Apache-2.0",
+      "architecture": "Wav2Vec2 sequence classification model fine-tuned for real-vs-AI voice detection",
+      "input_preprocessing": {
+        "target_sample_rate_hz": 16000,
+        "channels": 1,
+        "window_duration_s": 3.0,
+        "minimum_duration_s": 0.5
+      },
+      "label_mapping": {
+        "0": "AUTHENTIC (Real human speech)",
+        "1": "MANIPULATED (Synthetic / cloned AI voice)"
+      },
+      "explanation": "Evaluates audio in 3-second windows, computes STFT spectrogram evidence, and flags suspicious voice segments.",
+      "known_limitations": "Targeted specifically at human speech and voice cloning anti-spoofing; background music or non-speech ambient audio is outside training domain."
+    }
+  }
+}

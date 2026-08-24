@@ -1,0 +1,6 @@
+{
+  "model_name": "SwinB-AI-Image-Detector",
+  "model_version": "3.0.0",
+  "input_size": [224, 224],
+  "positive_index": 0
+}

@@ -1,0 +1,6 @@
+{
+  "model_name": "Wav2Vec2-GaryStafford-DeepfakeVoiceDetector",
+  "model_version": "2.0.0",
+  "input_size": [1, 16000],
+  "positive_index": 1
+}

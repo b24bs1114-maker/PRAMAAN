@@ -1,0 +1,38 @@
+# Keep the build context small and keep host state out of the image.
+# Anything the container needs at runtime arrives on a volume, not in a layer.
+
+# Local environment / virtualenvs
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Host working state -- must never be baked into an image
+data/
+reports/*
+!reports/.gitkeep
+
+# Python caches and test artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors, OS, VCS
+.git/
+.gitignore
+.idea/
+.vscode/
+.claude/
+.DS_Store
+
+# Docker's own files
+Dockerfile
+docker-compose.yml
+.dockerignore

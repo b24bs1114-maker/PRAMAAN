@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pramaan-detector"
+version = "1.0.0"
+description = "Multi-modal deepfake / manipulation detector (image, video, audio)"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "Pillow>=9.0.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+audio = ["librosa>=0.10.0", "soundfile>=0.12.0", "transformers>=4.35.0"]
+video = ["opencv-python>=4.8.0"]
+eval  = ["scikit-learn>=1.3.0"]
+export = ["onnx>=1.15.0"]
+all   = [
+    "librosa>=0.10.0", "soundfile>=0.12.0", "transformers>=4.35.0",
+    "opencv-python>=4.8.0", "scikit-learn>=1.3.0", "onnx>=1.15.0",
+]
+dev = ["pytest>=7.4.0"]
+
+[project.scripts]
+pramaan-detect    = "scripts.detect:main"
+pramaan-benchmark = "scripts.benchmark:main"
+pramaan-export    = "scripts.export_onnx:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pramaan*"]

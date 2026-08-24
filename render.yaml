@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: pramaan-backend
+    env: python
+    region: singapore
+    plan: free
+    buildCommand: "bash scripts/render_build.sh"
+    startCommand: "PYTHONPATH=backend gunicorn -w 2 -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT"
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.13
+      - key: PRAMAAN_ENVIRONMENT
+        value: production
+      - key: PRAMAAN_HOST
+        value: 0.0.0.0
+      - key: PRAMAAN_CORS_ALLOW_ORIGINS
+        value: "https://*.vercel.app,http://localhost:5173,*"
+      - key: PRAMAAN_CORS_ALLOW_METHODS
+        value: "*"
+      - key: PRAMAAN_CORS_ALLOW_HEADERS
+        value: "*"
+      - key: PRAMAAN_IMAGE_MODEL_PATH
+        value: "pramaan-detector/weights/image_detector.pt"
+      - key: PRAMAAN_AUDIO_MODEL_PATH
+        value: "pramaan-detector/weights/audio_detector.pt"
