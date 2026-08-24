@@ -59,6 +59,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 r=urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4);\
 sys.exit(0 if r.status==200 and json.load(r).get('status')=='ok' else 1)"]
 
-CMD ["python", "-m", "uvicorn", "app.main:app", \
-     "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "1", "--no-server-header"]
+CMD ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --no-server-header"]
