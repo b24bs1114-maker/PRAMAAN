@@ -454,6 +454,7 @@ def analyse_case(
     warnings: list[str] = []
 
     evidence_rows = analysis_store.case_evidence(session, case.id)
+    logger.info("ANALYSE_SERVICE_ENTERED case_id=%s evidence_count=%d", case.id, len(evidence_rows))
     if not evidence_rows:
         warnings.append(
             "No evidence has been ingested for this case, so no analysis could "
@@ -468,12 +469,14 @@ def analyse_case(
             "this deployment's coverage, not a finding about the evidence."
         )
 
+    logger.info("ANALYSE_FUSION_STARTED case_id=%s", case.id)
     verdicts = [
         run_fusion(
             session, evidence=evidence, settings=settings, actor=actor, refresh=refresh
         )
         for evidence in evidence_rows
     ]
+    logger.info("ANALYSE_FUSION_COMPLETED case_id=%s count=%d", case.id, len(verdicts))
 
     matches = matching.search_case(
         session, case=case, settings=settings, actor=actor
@@ -482,7 +485,9 @@ def analyse_case(
         session, case=case, settings=settings, actor=actor, refresh=False
     )
 
+    logger.info("ANALYSE_DETECTOR_STARTED case_id=%s", case.id)
     detector_status = detector_service.status(settings)
+    logger.info("ANALYSE_DETECTOR_COMPLETED case_id=%s available=%s", case.id, detector_status.get("available"))
     if not detector_status.get("available"):
         warnings.append(
             "No AI-manipulation detector is installed, so the ai_detection "
@@ -496,8 +501,10 @@ def analyse_case(
 
     # The trail is read before the completion entry is appended -- an entry
     # cannot contain the hash of a chain that already includes it.
+    logger.info("ANALYSE_AUDIT_STARTED case_id=%s", case.id)
     trail = audit.trail(session, case.id, limit=audit_limit)
     verification = audit.verify_chain(session, case.id)
+    logger.info("ANALYSE_AUDIT_COMPLETED case_id=%s valid=%s", case.id, verification.get("valid"))
     audit_block = {
         **trail,
         "chain_valid": verification["valid"],

@@ -496,15 +496,22 @@ def analyse_case(
     verdict and empty collections, and an unavailable stage is reported as
     unavailable rather than scored.
     """
-    result = pipeline.analyse_case(
-        db,
-        case=case,
-        settings=settings,
-        actor="api",
-        refresh=refresh,
-        audit_limit=audit_limit,
-    )
-    return AnalysisResponse(**result)
+    logger.info("ANALYSE_REQUEST_RECEIVED case_id=%s refresh=%s", case.id, refresh)
+    try:
+        logger.info("ANALYSE_CASE_LOADED case_id=%s", case.id)
+        result = pipeline.analyse_case(
+            db,
+            case=case,
+            settings=settings,
+            actor="api",
+            refresh=refresh,
+            audit_limit=audit_limit,
+        )
+        logger.info("ANALYSE_RESPONSE_RETURNING case_id=%s ms=%s", case.id, result.get("processing_time_ms"))
+        return AnalysisResponse(**result)
+    except Exception as exc:
+        logger.exception("ANALYSE_REQUEST_FAILED case_id=%s exc=%s", case.id, exc)
+        raise
 
 
 @router.get(
