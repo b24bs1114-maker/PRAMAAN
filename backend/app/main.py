@@ -75,17 +75,6 @@ def _error_response(
 
 
 def _register_middleware(app: FastAPI, settings: Settings) -> None:
-    # CORS first so the browser-facing preflight is answered even for errors.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_origin_regex=settings.cors_origin_regex,
-        allow_methods=settings.cors_methods,
-        allow_headers=settings.cors_headers,
-        allow_credentials=settings.cors_allow_credentials,
-        expose_headers=[REQUEST_ID_HEADER],
-    )
-
     @app.middleware("http")
     async def request_context(
         request: Request,
@@ -126,6 +115,18 @@ def _register_middleware(app: FastAPI, settings: Settings) -> None:
                 request_id,
             )
         return response
+
+    # CORSMiddleware registered LAST so Starlette's build_middleware_stack()
+    # places it as the OUTERMOST user middleware on the final ASGI pipeline.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_origin_regex=settings.cors_origin_regex,
+        allow_methods=settings.cors_methods,
+        allow_headers=settings.cors_headers,
+        allow_credentials=settings.cors_allow_credentials,
+        expose_headers=[REQUEST_ID_HEADER],
+    )
 
 
 def _register_exception_handlers(app: FastAPI) -> None:

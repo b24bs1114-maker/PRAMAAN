@@ -53,3 +53,30 @@ def test_unknown_route_returns_error_envelope(client: TestClient) -> None:
     body = response.json()
     assert body["error"]["type"] == "http_error"
     assert "request_id" in body
+
+
+def test_cors_headers_on_health_get(client: TestClient) -> None:
+    origin = "https://frontendeploy-sigma.vercel.app"
+    response = client.get("/health", headers={"Origin": origin})
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == origin
+
+
+def test_cors_headers_on_dashboard_summary_get(client: TestClient) -> None:
+    origin = "https://frontendeploy-sigma.vercel.app"
+    response = client.get("/api/dashboard/summary", headers={"Origin": origin})
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == origin
+
+
+def test_cors_headers_on_health_options_preflight(client: TestClient) -> None:
+    origin = "https://frontendeploy-sigma.vercel.app"
+    response = client.options(
+        "/health",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == origin
