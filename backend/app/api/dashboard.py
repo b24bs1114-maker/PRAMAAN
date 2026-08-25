@@ -204,6 +204,8 @@ def get_dashboard_summary(db: DbDep, settings: SettingsDep) -> DashboardSummaryR
     An empty deployment returns zeros and empty lists -- an honest empty state --
     rather than sample figures.
     """
+    logger.info("DASHBOARD_REQUEST_RECEIVED")
+    logger.info("DASHBOARD_DB_QUERY_START")
     evidence_count = db.execute(select(func.count()).select_from(Evidence)).scalar_one()
     active_cases_count = _count(db, select(Case.id).where(Case.status != "closed"))
     high_priority_count = _count(
@@ -301,7 +303,8 @@ def get_dashboard_summary(db: DbDep, settings: SettingsDep) -> DashboardSummaryR
             "processing time is unknown rather than zero."
         )
 
-    return DashboardSummaryResponse(
+    logger.info("DASHBOARD_RESPONSE_BUILD_START")
+    res = DashboardSummaryResponse(
         active_investigations_count=active_cases_count,
         evidence_items_count=evidence_count,
         flagged_media_count=flagged_count,
@@ -342,3 +345,5 @@ def get_dashboard_summary(db: DbDep, settings: SettingsDep) -> DashboardSummaryR
         metric_definitions=METRIC_DEFINITIONS,
         notes=notes,
     )
+    logger.info("DASHBOARD_RESPONSE_RETURNING")
+    return res

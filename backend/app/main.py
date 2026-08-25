@@ -232,6 +232,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.corpus_dir,
         )
         logger.info("CORS allowed origins: %s", ", ".join(settings.cors_origins))
+        try:
+            detector_service.get_detector(settings)
+            logger.info("Detector singleton pre-warmed on app boot.")
+        except Exception as exc:
+            logger.warning("Detector pre-warm deferred: %s", exc)
         yield
         logger.info("%s shutting down", settings.app_name)
 

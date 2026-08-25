@@ -67,8 +67,11 @@ def _sqlite_pragmas(dbapi_connection, connection_record) -> None:  # noqa: ANN00
 
 @event.listens_for(Engine, "begin")
 def _sqlite_begin_immediate(connection: Connection) -> None:
-    """Start every transaction as a writer."""
-    connection.exec_driver_sql("BEGIN IMMEDIATE")
+    """Start write transactions as IMMEDIATE."""
+    try:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+    except Exception:
+        pass
 
 
 _engine: Engine | None = None
