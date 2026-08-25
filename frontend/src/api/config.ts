@@ -28,7 +28,7 @@ if (typeof window !== 'undefined') {
   console.info(
     '[PRAMAAN API] Configured Base URL:',
     API_BASE_URL,
-    API_BASE_URL_IS_EXPLICIT ? '(from VITE_API_URL)' : '(default 127.0.0.1:8000)',
+    API_BASE_URL_IS_EXPLICIT ? '(from VITE_API_URL)' : '(default /api/backend)',
   )
 }
 

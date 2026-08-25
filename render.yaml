@@ -15,7 +15,7 @@ services:
       - key: PRAMAAN_HOST
         value: 0.0.0.0
       - key: PRAMAAN_CORS_ALLOW_ORIGINS
-        value: "https://*.vercel.app,http://localhost:5173,*"
+        value: "https://pramaan-77hs.vercel.app,https://frontendeploy-sigma.vercel.app,http://localhost:5173,http://127.0.0.1:5173"
       - key: PRAMAAN_CORS_ALLOW_METHODS
         value: "*"
       - key: PRAMAAN_CORS_ALLOW_HEADERS
