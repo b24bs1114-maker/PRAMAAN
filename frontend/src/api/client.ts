@@ -57,9 +57,8 @@ import type {
 
 /** Liveness probe. Fixed contract: { status: "ok" }. */
 export function health(signal?: AbortSignal): Promise<{ status: string }> {
-  // Short timeout: this drives the "backend unavailable" banner, so it must
-  // fail fast rather than leaving the UI in a pending state.
-  return request<{ status: string }>('/health', { signal, timeoutMs: 5_000 })
+  // 30s timeout to tolerate Render free-tier cold starts gracefully.
+  return request<{ status: string }>('/health', { signal, timeoutMs: 30_000 })
 }
 
 export function indexStatus(signal?: AbortSignal): Promise<IndexStatus> {

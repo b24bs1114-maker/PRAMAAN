@@ -132,6 +132,10 @@ def _measured_analysis_time(db: Any) -> tuple[float | None, int]:
         ).one()
     except Exception:  # noqa: BLE001 - a metric must never break the dashboard
         logger.warning("Could not read recorded analysis times", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
         return None, 0
     if average is None or not samples:
         return None, 0

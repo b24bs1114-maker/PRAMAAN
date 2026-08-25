@@ -175,3 +175,22 @@ def test_missing_file_field_is_a_validation_error(client: TestClient) -> None:
     body = response.json()
     assert body["error"]["type"] == "validation_error"
     assert body["error"]["details"]
+
+
+def test_large_multipart_upload_6mb(client: TestClient) -> None:
+    """Ingest a 6.1 MiB image file through multipart upload."""
+    payload = jpeg_bytes(seed=999)
+    target_bytes = int(6.1 * 1024 * 1024)
+    if len(payload) < target_bytes:
+        payload += b"\x00" * (target_bytes - len(payload))
+
+    response = client.post(
+        "/api/cases/upload",
+        files={"file": ("large_6mb.jpg", payload, "image/jpeg")},
+        data={"title": "6MB Upload Test", "examiner": "LargeFileTester"},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["duplicate"] is False
+    assert body["evidence"]["size_bytes"] == len(payload)
+    assert body["case"]["title"] == "6MB Upload Test"

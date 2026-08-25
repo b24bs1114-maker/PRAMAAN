@@ -164,6 +164,11 @@ def record(
     timestamp = iso(utcnow()) or ""
 
     with _append_lock:
+        if not session.in_transaction():
+            try:
+                session.exec_driver_sql("BEGIN IMMEDIATE")
+            except Exception:
+                pass
         previous = head_hash(session)
         payload = row_payload(
             audit_id=audit_id,

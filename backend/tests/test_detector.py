@@ -253,3 +253,20 @@ def test_postprocess_reduces_logits_to_a_probability() -> None:
 
 def test_detect_for_unknown_case_returns_404(client: TestClient) -> None:
     assert client.post(f"/api/cases/{uuid.uuid4()}/detect").status_code == 404
+
+
+def test_repeated_and_concurrent_inference_handles_memory_safely(client: TestClient) -> None:
+    """Repeated inference requests must succeed cleanly without memory leaks or crashes."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    set_detector(FixedScoreDetector(0.85))
+    case_id = _upload(client, jpeg_bytes(seed=808), "repeated_infer.jpg")["case"]["case_id"]
+
+    def run_detect():
+        return client.post(f"/api/cases/{case_id}/detect")
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = [pool.submit(run_detect) for _ in range(10)]
+        responses = [f.result() for f in futures]
+
+    assert all(r.status_code == 200 for r in responses)

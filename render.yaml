@@ -5,7 +5,7 @@ services:
     region: singapore
     plan: free
     buildCommand: "bash scripts/render_build.sh"
-    startCommand: "PYTHONPATH=backend gunicorn -w 2 -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT"
+    startCommand: "PYTHONPATH=backend gunicorn -w 1 -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT"
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION

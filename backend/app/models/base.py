@@ -41,7 +41,7 @@ class Base(DeclarativeBase):
 #: How long a writer waits for the write lock before giving up. Appends are
 #: milliseconds long, so anything that waits longer than this is a stuck
 #: transaction rather than ordinary contention.
-BUSY_TIMEOUT_MS = 10_000
+BUSY_TIMEOUT_MS = 60_000
 
 
 @event.listens_for(Engine, "connect")
@@ -60,21 +60,14 @@ def _sqlite_pragmas(dbapi_connection, connection_record) -> None:  # noqa: ANN00
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA wal_autocheckpoint=1000")
     finally:
         cursor.close()
 
 
 @event.listens_for(Engine, "begin")
 def _sqlite_begin_immediate(connection: Connection) -> None:
-    """Start every transaction as a writer.
-
-    Single-writer semantics for the whole request. The alternative -- promoting
-    only the audit append to a write lock -- cannot work, because by the time
-    ``audit.record()`` runs the request's DEFERRED transaction has already begun
-    and SQLite has no statement that upgrades a read transaction to a write one
-    without re-reading. Serialising at ``begin`` is what makes the chain append
-    atomic with respect to other requests.
-    """
+    """Start every transaction as a writer."""
     connection.exec_driver_sql("BEGIN IMMEDIATE")
 
 
@@ -93,7 +86,8 @@ def get_engine(settings: Settings | None = None) -> Engine:
             echo=settings.db_echo,
             future=True,
             # FastAPI serves requests from a threadpool; sessions are per-request.
-            connect_args={"check_same_thread": False},
+            connect_args={"check_same_thread": False, "timeout": 60.0},
+            pool_pre_ping=True,
         )
         logger.info("SQLite engine bound to %s", settings.db_path)
     return _engine
