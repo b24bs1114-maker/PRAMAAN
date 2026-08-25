@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import logging.config
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -129,7 +130,8 @@ class Settings(BaseSettings):
     # Defaults cover Vite (5173) and Create React App / Next.js (3000).
     cors_allow_origins: str = (
         "http://localhost:5173,http://127.0.0.1:5173,"
-        "http://localhost:3000,http://127.0.0.1:3000"
+        "http://localhost:3000,http://127.0.0.1:3000,"
+        "https://frontendeploy-sigma.vercel.app,https://*.vercel.app"
     )
     cors_allow_methods: str = "*"
     cors_allow_headers: str = "*"
@@ -215,6 +217,18 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return _split_csv(self.cors_allow_origins)
+
+    @property
+    def cors_origin_regex(self) -> str | None:
+        """Compile wildcard domain patterns (e.g. 'https://*.vercel.app') into a regex for CORSMiddleware."""
+        patterns = [
+            origin for origin in self.cors_origins
+            if "*" in origin and origin != "*"
+        ]
+        if not patterns:
+            return None
+        regex_parts = [f"^{re.escape(p).replace(r'\\*', r'.*')}$" for p in patterns]
+        return "|".join(regex_parts)
 
     @property
     def cors_methods(self) -> list[str]:
