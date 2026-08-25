@@ -235,8 +235,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             current_settings.corpus_dir,
         )
         logger.info("CORS allowed origins: %s", ", ".join(current_settings.cors_origins))
-        detector_service.get_detector(current_settings)
-        logger.info("Detector pre-warm completed")
+        if not current_settings.enable_ai_detector:
+            logger.info("AI detector disabled for demo/stability mode")
+        else:
+            detector_service.get_detector(current_settings)
+            logger.info("Detector pre-warm completed")
         yield
         logger.info("%s shutting down", current_settings.app_name)
 

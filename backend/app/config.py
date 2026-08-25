@@ -107,8 +107,11 @@ class Settings(BaseSettings):
     fusion_min_effective_weight: float = 0.30
 
     # --- AI detector ----------------------------------------------------------
+    # enable_ai_detector: master toggle for AI detection models. Set PRAMAAN_ENABLE_AI_DETECTOR=false
+    # for emergency demo stability mode (Render free tier RAM/CPU protection).
     # auto: use a local pretrained detector if one is installed, else report
     # UNAVAILABLE. null: always report UNAVAILABLE (never invents a score).
+    enable_ai_detector: bool = True
     detector_backend: Literal["auto", "null"] = "auto"
     detector_model_path: str = ""
     image_model_path: str = ""

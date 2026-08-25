@@ -12,6 +12,8 @@ services:
         value: 3.12.13
       - key: PRAMAAN_ENVIRONMENT
         value: production
+      - key: PRAMAAN_ENABLE_AI_DETECTOR
+        value: "false"
       - key: PRAMAAN_HOST
         value: 0.0.0.0
       - key: PRAMAAN_CORS_ALLOW_ORIGINS

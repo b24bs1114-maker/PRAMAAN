@@ -1148,8 +1148,13 @@ def get_detector(settings: Settings) -> DetectorAdapter:
     global _instance
     with _lock:
         if _instance is None:
-            if settings.detector_backend == "null":
-                _instance = NullDetector("generic", DISABLED_REASON)
+            if not settings.enable_ai_detector or settings.detector_backend == "null":
+                reason = (
+                    "AI detector disabled for demo/stability mode"
+                    if not settings.enable_ai_detector
+                    else DISABLED_REASON
+                )
+                _instance = NullDetector("generic", reason)
             else:
                 _instance = MultiModalDetectorService(settings)
         return _instance
@@ -1209,6 +1214,46 @@ def status(settings: Settings) -> dict[str, Any]:
             cached_time, cached_val = _status_cache
             if now - cached_time < _STATUS_CACHE_TTL:
                 return cached_val
+
+    if not settings.enable_ai_detector:
+        reason = "AI detector disabled for demo/stability mode"
+        disabled_detail = f"{reason} {UNAVAILABLE_EXPLANATION}"
+        res = {
+            "adapter": "null",
+            "model": "none",
+            "model_version": "0",
+            "interface_version": INTERFACE_VERSION,
+            "score_semantics": SCORE_SEMANTICS,
+            "available": False,
+            "reason": disabled_detail,
+            "unavailable_because": reason,
+            "interpretation": UNAVAILABLE_EXPLANATION,
+            "configured_backend": settings.detector_backend,
+            "configured_model_path": None,
+            "image_model_path": None,
+            "video_model_path": None,
+            "audio_model_path": None,
+            "entrypoints": {name: None for name in MODALITIES},
+            "registered_inference": {name: None for name in MODALITIES},
+            "candidate_adapters": [],
+            "modalities": {
+                name: {
+                    "adapter": "null",
+                    "modality": name,
+                    "available": False,
+                    "reason": reason,
+                }
+                for name in MODALITIES
+            },
+            "notes": (
+                "AI detector is disabled for demo/stability mode, so AI-detection results are "
+                "reported as UNAVAILABLE and excluded from fusion. Missing detection "
+                "is not evidence of authenticity."
+            ),
+        }
+        with _status_cache_lock:
+            _status_cache = (now, res)
+        return res
     detector = get_detector(settings)
     usable, reason = detector.available()
 
