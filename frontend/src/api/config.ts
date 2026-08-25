@@ -14,7 +14,7 @@
  * never accidentally point a developer's browser at production.
  */
 const RAW_BASE: string =
-  (import.meta.env.VITE_API_URL as string | undefined)?.trim() || 'http://127.0.0.1:8000'
+  (import.meta.env.VITE_API_URL as string | undefined)?.trim() || '/api/backend'
 
 /** Base URL with any trailing slash removed, so path joining is unambiguous. */
 export const API_BASE_URL: string = RAW_BASE.replace(/\/+$/, '')
@@ -23,6 +23,14 @@ export const API_BASE_URL: string = RAW_BASE.replace(/\/+$/, '')
 export const API_BASE_URL_IS_EXPLICIT: boolean = Boolean(
   (import.meta.env.VITE_API_URL as string | undefined)?.trim(),
 )
+
+if (typeof window !== 'undefined') {
+  console.info(
+    '[PRAMAAN API] Configured Base URL:',
+    API_BASE_URL,
+    API_BASE_URL_IS_EXPLICIT ? '(from VITE_API_URL)' : '(default 127.0.0.1:8000)',
+  )
+}
 
 /**
  * Join a backend-relative path onto the base URL.
