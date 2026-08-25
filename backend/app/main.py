@@ -39,6 +39,7 @@ from app.api import (
 )
 from app.config import Settings, configure_logging, get_settings
 from app.models import init_db
+from app.services import detector as detector_service
 
 logger = logging.getLogger("pramaan.app")
 access_logger = logging.getLogger("pramaan.access")
@@ -216,29 +217,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        settings.ensure_directories()
-        init_db(settings)
+        current_settings = get_settings()
+        app.state.settings = current_settings
+        current_settings.ensure_directories()
+        init_db(current_settings)
         logger.info(
             "%s v%s starting (environment=%s, debug=%s)",
-            settings.app_name,
-            settings.app_version,
-            settings.environment,
-            settings.debug,
+            current_settings.app_name,
+            current_settings.app_version,
+            current_settings.environment,
+            current_settings.debug,
         )
         logger.info(
             "Paths: data=%s reports=%s corpus=%s",
-            settings.data_dir,
-            settings.reports_dir,
-            settings.corpus_dir,
+            current_settings.data_dir,
+            current_settings.reports_dir,
+            current_settings.corpus_dir,
         )
-        logger.info("CORS allowed origins: %s", ", ".join(settings.cors_origins))
-        try:
-            detector_service.get_detector(settings)
-            logger.info("Detector singleton pre-warmed on app boot.")
-        except Exception as exc:
-            logger.warning("Detector pre-warm deferred: %s", exc)
+        logger.info("CORS allowed origins: %s", ", ".join(current_settings.cors_origins))
+        detector_service.get_detector(current_settings)
+        logger.info("Detector pre-warm completed")
         yield
-        logger.info("%s shutting down", settings.app_name)
+        logger.info("%s shutting down", current_settings.app_name)
 
     app = FastAPI(
         title=settings.app_name,
