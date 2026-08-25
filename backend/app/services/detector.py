@@ -1155,10 +1155,22 @@ def get_detector(settings: Settings) -> DetectorAdapter:
         return _instance
 
 
+_status_cache: tuple[float, dict[str, Any]] | None = None
+_status_cache_lock = threading.Lock()
+_STATUS_CACHE_TTL = 10.0
+
+
+def clear_status_cache() -> None:
+    global _status_cache
+    with _status_cache_lock:
+        _status_cache = None
+
+
 def set_detector(adapter: Any | None) -> None:
     global _instance
     with _lock:
         _instance = adapter
+    clear_status_cache()
 
 
 def reset_detector_singleton() -> None:
@@ -1190,6 +1202,13 @@ def status(settings: Settings) -> dict[str, Any]:
     a configured model that cannot be loaded is unavailable, and the reason says
     which of the sockets failed and why.
     """
+    global _status_cache
+    now = time.monotonic()
+    with _status_cache_lock:
+        if _status_cache is not None:
+            cached_time, cached_val = _status_cache
+            if now - cached_time < _STATUS_CACHE_TTL:
+                return cached_val
     detector = get_detector(settings)
     usable, reason = detector.available()
 
@@ -1271,6 +1290,9 @@ def status(settings: Settings) -> dict[str, Any]:
             "is not evidence of authenticity."
         ),
     }
+    with _status_cache_lock:
+        _status_cache = (now, res)
+    return res
 
 
 __all__ = [

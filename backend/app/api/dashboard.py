@@ -21,6 +21,7 @@ unavailable detector or a stale index is visible instead of being averaged away.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter
@@ -193,95 +194,108 @@ def _case_out(db: Any, case: Case) -> CaseOut:
     return CaseOut(**payload)
 
 
+def _measure_step(step_name: str, callback: Any) -> Any:
+    t0 = time.perf_counter()
+    logger.info("DASHBOARD_COMPONENT_START name=%s", step_name)
+    try:
+        res = callback()
+        dt = (time.perf_counter() - t0) * 1000
+        logger.info("DASHBOARD_COMPONENT_END name=%s elapsed_ms=%.2f", step_name, dt)
+        if dt > 1000:
+            logger.warning("DASHBOARD_SLOW_COMPONENT name=%s elapsed=%.2fms", step_name, dt)
+        return res
+    except Exception as exc:
+        dt = (time.perf_counter() - t0) * 1000
+        logger.exception("DASHBOARD_COMPONENT_FAILED name=%s elapsed_ms=%.2f exc=%s", step_name, dt, exc)
+        raise
+
+
 @router.get(
     "/summary",
     response_model=DashboardSummaryResponse,
     summary="Dashboard aggregate metrics and recent activity",
 )
 def get_dashboard_summary(db: DbDep, settings: SettingsDep) -> DashboardSummaryResponse:
-    """Aggregate the case file for the investigator dashboard.
-
-    An empty deployment returns zeros and empty lists -- an honest empty state --
-    rather than sample figures.
-    """
+    """Aggregate the case file for the investigator dashboard."""
+    t_start = time.perf_counter()
     logger.info("DASHBOARD_REQUEST_RECEIVED")
     logger.info("DASHBOARD_DB_QUERY_START")
-    evidence_count = db.execute(select(func.count()).select_from(Evidence)).scalar_one()
-    active_cases_count = _count(db, select(Case.id).where(Case.status != "closed"))
-    high_priority_count = _count(
-        db, select(Case.id).where(Case.status != "closed", Case.priority == "high")
-    )
-    pending_review_count = _count(db, select(Case.id).where(Case.status == "pending_review"))
 
-    # Cases holding evidence that has never reached fusion. Real work queue, not
-    # a status label somebody has to remember to set.
+    evidence_count = _measure_step("evidence_count", lambda: db.execute(select(func.count()).select_from(Evidence)).scalar_one())
+    active_cases_count = _measure_step("active_cases_count", lambda: _count(db, select(Case.id).where(Case.status != "closed")))
+    high_priority_count = _measure_step("high_priority_count", lambda: _count(db, select(Case.id).where(Case.status != "closed", Case.priority == "high")))
+    pending_review_count = _measure_step("pending_review_count", lambda: _count(db, select(Case.id).where(Case.status == "pending_review")))
+
     fused_case_ids = select(AnalysisResult.case_id).where(
         AnalysisResult.kind == KIND_FUSION, AnalysisResult.case_id.is_not(None)
     )
-    unanalysed_case_count = _count(
+    unanalysed_case_count = _measure_step("unanalysed_case_count", lambda: _count(
         db,
         select(Case.id).where(
             Case.id.in_(select(Evidence.case_id).where(Evidence.case_id.is_not(None))),
             Case.id.not_in(fused_case_ids),
         ),
-    )
+    ))
 
-    # Flagged = fusion said MANIPULATED. No score re-thresholding here: fusion
-    # owns the verdict rule and duplicating it would let the dashboard disagree
-    # with the case verdict.
     flagged_stmt = select(AnalysisResult.evidence_id).where(
         AnalysisResult.kind == KIND_FUSION,
         AnalysisResult.verdict == fusion_service.VERDICT_MANIPULATED,
     )
-    flagged_count = _count(db, flagged_stmt.distinct())
-    flagged_preview_ids = [
-        row
-        for row in db.execute(
-            select(AnalysisResult.evidence_id)
-            .where(
-                AnalysisResult.kind == KIND_FUSION,
-                AnalysisResult.verdict == fusion_service.VERDICT_MANIPULATED,
-            )
-            .order_by(AnalysisResult.created_at.desc())
-            .limit(FLAGGED_PREVIEW_LIMIT)
-        ).scalars()
-    ]
-    flagged_media: list[EvidenceOut] = []
-    if flagged_preview_ids:
-        by_id = {
-            row.id: row
+    flagged_count = _measure_step("flagged_count", lambda: _count(db, flagged_stmt.distinct()))
+
+    def _fetch_flagged_media():
+        preview_ids = [
+            row
             for row in db.execute(
-                select(Evidence).where(Evidence.id.in_(flagged_preview_ids))
+                select(AnalysisResult.evidence_id)
+                .where(
+                    AnalysisResult.kind == KIND_FUSION,
+                    AnalysisResult.verdict == fusion_service.VERDICT_MANIPULATED,
+                )
+                .order_by(AnalysisResult.created_at.desc())
+                .limit(FLAGGED_PREVIEW_LIMIT)
             ).scalars()
-        }
-        flagged_media = [
-            EvidenceOut(**ingestion.evidence_to_dict(by_id[eid]))
-            for eid in flagged_preview_ids
-            if eid in by_id
         ]
+        media: list[EvidenceOut] = []
+        if preview_ids:
+            by_id = {
+                row.id: row
+                for row in db.execute(
+                    select(Evidence).where(Evidence.id.in_(preview_ids))
+                ).scalars()
+            }
+            media = [
+                EvidenceOut(**ingestion.evidence_to_dict(by_id[eid]))
+                for eid in preview_ids
+                if eid in by_id
+            ]
+        return preview_ids, media
 
-    analysed_evidence_count = _count(
+    flagged_preview_ids, flagged_media = _measure_step("flagged_media", _fetch_flagged_media)
+
+    analysed_evidence_count = _measure_step("analysed_evidence_count", lambda: _count(
         db, select(AnalysisResult.evidence_id).where(AnalysisResult.kind == KIND_FUSION).distinct()
-    )
-    avg_processing_time_ms, timed_runs = _measured_analysis_time(db)
+    ))
+    avg_processing_time_ms, timed_runs = _measure_step("measured_analysis_time", lambda: _measured_analysis_time(db))
 
-    recent_cases = [
+    recent_cases = _measure_step("recent_cases", lambda: [
         _case_out(db, case)
         for case in db.execute(
             select(Case).order_by(Case.updated_at.desc()).limit(RECENT_LIMIT)
         ).scalars()
-    ]
-    recent_evidence = [
+    ])
+    recent_evidence = _measure_step("recent_evidence", lambda: [
         EvidenceOut(**ingestion.evidence_to_dict(ev))
         for ev in db.execute(
             select(Evidence).order_by(Evidence.ingested_at.desc()).limit(RECENT_LIMIT)
         ).scalars()
-    ]
+    ])
 
-    detector_status = detector_service.status(settings)
-    validator = provenance_service.validator_status()
-    index_label, index_detail = _index_status_label(db, settings)
+    detector_status = _measure_step("detector_status", lambda: detector_service.status(settings))
+    validator = _measure_step("validator_status", lambda: provenance_service.validator_status())
+    index_label, index_detail = _measure_step("index_status", lambda: _index_status_label(db, settings))
 
+    logger.info("DASHBOARD_RESPONSE_BUILD_START")
     notes: list[str] = []
     if not detector_status.get("available"):
         notes.append(
@@ -303,7 +317,6 @@ def get_dashboard_summary(db: DbDep, settings: SettingsDep) -> DashboardSummaryR
             "processing time is unknown rather than zero."
         )
 
-    logger.info("DASHBOARD_RESPONSE_BUILD_START")
     res = DashboardSummaryResponse(
         active_investigations_count=active_cases_count,
         evidence_items_count=evidence_count,
@@ -345,5 +358,6 @@ def get_dashboard_summary(db: DbDep, settings: SettingsDep) -> DashboardSummaryR
         metric_definitions=METRIC_DEFINITIONS,
         notes=notes,
     )
-    logger.info("DASHBOARD_RESPONSE_RETURNING")
+    t_total = (time.perf_counter() - t_start) * 1000
+    logger.info("DASHBOARD_RESPONSE_RETURNING total_ms=%.2f", t_total)
     return res
