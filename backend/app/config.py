@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     image_model_path: str = ""
     video_model_path: str = ""
     audio_model_path: str = ""
+    image_weights_url: str = ""
 
     # Inference entrypoints, one per modality, as "module:callable".
     image_detector_entrypoint: str = ""

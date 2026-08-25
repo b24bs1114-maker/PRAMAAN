@@ -10,6 +10,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 ARG PIP_EXTRA_ARGS=""
+ARG PRAMAAN_IMAGE_WEIGHTS_URL=""
+ENV PRAMAAN_IMAGE_WEIGHTS_URL=${PRAMAAN_IMAGE_WEIGHTS_URL}
 
 # Install system runtime dependencies for OpenCV and audio processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -26,7 +28,11 @@ RUN python -m pip install --no-cache-dir ${PIP_EXTRA_ARGS} -r requirements.txt
 COPY pramaan-detector ./pramaan-detector
 RUN python -m pip install --no-cache-dir ${PIP_EXTRA_ARGS} -e ./pramaan-detector[all]
 
-# 3. Copy production backend application code (no test files or frontend)
+# 3. Provision image model weights if PRAMAAN_IMAGE_WEIGHTS_URL is provided or verify local weights
+COPY scripts/download_weights.py ./scripts/download_weights.py
+RUN python scripts/download_weights.py
+
+# 4. Copy production backend application code (no test files or frontend)
 COPY backend/app ./backend/app
 
 # Create non-root runtime user with volume storage directories
