@@ -5,16 +5,34 @@ Backbone : garystafford/wav2vec2-deepfake-voice-detector (Wav2Vec2 fine-tuned fo
 Task     : Binary — Real voice (0) vs Fake/Cloned voice (1)
 Evidence : Spectrogram STFT statistics + suspicious window extraction
 Supports : WAV, MP3, M4A/AAC
+
+Loading notes (measured)
+------------------------
+The local checkpoint is the complete fine-tune: 315.7 M fp32 parameters over 426
+tensors, which is the whole 1.26 GB file and not optimizer state. It matches the
+hub model key-for-key (0 missing, 0 unexpected).
+
+The architecture is therefore built from the model *config* alone, and every
+tensor comes from the local checkpoint. Calling ``from_pretrained`` first --
+which is what this module used to do -- downloaded 1.26 GB of hub weights only
+to overwrite all 426 of them, needed network access or a warm HF cache to get
+the architecture at all, and pushed peak RSS to 2.9 GB (measured).
+
+There is no untrained fallback. A previous ``except Exception`` branch swapped in
+a randomly-initialised CNN while the result still reported
+``Wav2Vec2-GaryStafford-DeepfakeVoiceDetector`` and the real checkpoint's hash,
+so a machine with no cached hub config would have produced confident,
+meaningless scores under the name of a real model. A checkpoint that cannot be
+loaded is now an abstention.
 """
 from __future__ import annotations
-import hashlib, time
+import hashlib, threading, time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
-import torch
-import torch.nn as nn
 
+from pramaan.detectors.image_detector import _load_torch
 from pramaan.schema import make_result, DetectionResult
 
 AUDIO_MODEL_VERSION = "2.0.0"
@@ -27,55 +45,97 @@ MIN_DURATION = 0.5         # seconds
 _DEFAULT_WEIGHTS_PATH = Path(__file__).resolve().parents[2] / "weights" / "audio_detector.pt"
 _HF_MODEL_NAME = "garystafford/wav2vec2-deepfake-voice-detector"
 
+NO_TRAINED_MODEL_EXPLANATION = (
+    "No trained audio detector could be loaded, so no voice-manipulation score "
+    "was produced. Set PRAMAAN_AUDIO_MODEL_PATH to the audio_detector.pt "
+    "checkpoint. This is NOT a finding of authenticity and NOT a finding of "
+    "manipulation -- the signal is missing and is excluded from fusion."
+)
 
-class AudioForensicNet(nn.Module):
+
+def _build_wav2vec2(checkpoint: Path) -> tuple[Any, str]:
+    """Build the classifier and fill it from ``checkpoint``. Raises on failure.
+
+    The config is read from the local HF cache if present and otherwise from the
+    hub; only ``config.json`` is ever fetched, never weights. ``assign=True``
+    adopts the checkpoint's storages rather than copying them into freshly
+    initialised parameters, so the process never holds two full copies.
     """
-    Wav2Vec2 model fine-tuned for deepfake voice classification.
+    torch = _load_torch()
+    from transformers import AutoConfig, AutoModelForAudioClassification
+
+    config = AutoConfig.from_pretrained(_HF_MODEL_NAME)
+    with torch.device("meta"):
+        model = AutoModelForAudioClassification.from_config(config)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    if isinstance(state, dict) and "state_dict" in state:
+        state = state["state_dict"]
+    try:
+        report = model.load_state_dict(state, strict=False, assign=True)
+        if report.missing_keys:
+            raise RuntimeError(
+                f"checkpoint is missing {len(report.missing_keys)} parameters, "
+                f"e.g. {report.missing_keys[0]}; those would stay on the meta "
+                "device and every forward pass would fail"
+            )
+    finally:
+        del state
+    return model, "checkpoint"
+
+
+class AudioForensicNet:
+    """Wav2Vec2 fine-tuned for deepfake voice classification.
+
+    A thin wrapper rather than an ``nn.Module`` subclass so that importing this
+    module does not import torch: the backend's status probe imports every
+    configured entrypoint just to ask whether a detector exists, and torch costs
+    ~370 MB of RSS to answer that question.
     """
 
     def __init__(self, weights_path: Optional[str] = None):
-        super().__init__()
-        self.hf_model = None
+        self.hf_model: Any = None
+        self.load_strategy = "none"
+        self.unavailable_reason = NO_TRAINED_MODEL_EXPLANATION
 
+        resolved_path = Path(weights_path) if weights_path else _DEFAULT_WEIGHTS_PATH
+        if not resolved_path.exists():
+            self.load_strategy = "no-checkpoint"
+            return
         try:
-            from transformers import AutoModelForAudioClassification
-            resolved_path = Path(weights_path) if weights_path else _DEFAULT_WEIGHTS_PATH
-            if resolved_path.exists():
-                try:
-                    self.hf_model = AutoModelForAudioClassification.from_pretrained(_HF_MODEL_NAME)
-                    state = torch.load(resolved_path, map_location="cpu")
-                    if isinstance(state, dict) and "state_dict" in state:
-                        state = state["state_dict"]
-                    self.hf_model.load_state_dict(state, strict=False)
-                except Exception:
-                    self.hf_model = AutoModelForAudioClassification.from_pretrained(_HF_MODEL_NAME)
-            else:
-                self.hf_model = AutoModelForAudioClassification.from_pretrained(_HF_MODEL_NAME)
-        except Exception:
-            self.fallback = _LightweightAudioCNN()
+            self.hf_model, self.load_strategy = _build_wav2vec2(resolved_path)
+        except Exception as exc:
+            self.load_strategy = f"checkpoint-unloadable:{resolved_path.name}"
+            self.unavailable_reason = (
+                f"The configured audio checkpoint {resolved_path.name} could not be "
+                f"loaded ({exc.__class__.__name__}: {exc}). "
+                f"{NO_TRAINED_MODEL_EXPLANATION}"
+            )
+            return
+        self.unavailable_reason = ""
 
-    def forward(self, waveform: torch.Tensor) -> torch.Tensor:
-        """waveform: (batch, samples) at 16 kHz"""
+    @property
+    def usable(self) -> bool:
+        return self.hf_model is not None
+
+    def to(self, device: Any) -> "AudioForensicNet":
         if self.hf_model is not None:
-            outputs = self.hf_model(waveform)
-            return outputs.logits   # (B, 2)
-        return self.fallback(waveform)
+            self.hf_model.to(device)
+        return self
 
+    def eval(self) -> "AudioForensicNet":
+        if self.hf_model is not None:
+            self.hf_model.eval()
+            for parameter in self.hf_model.parameters():
+                parameter.requires_grad_(False)
+        return self
 
-class _LightweightAudioCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv1d(1, 32, 64, stride=16), nn.ReLU(),
-            nn.Conv1d(32, 64, 32, stride=8), nn.ReLU(),
-            nn.Conv1d(64, 128, 16, stride=4), nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),
-        )
-        self.proj = nn.Linear(128, 2)
+    def __call__(self, waveform: Any) -> Any:
+        """waveform: (batch, samples) at 16 kHz"""
+        if self.hf_model is None:  # pragma: no cover - detect() gates this
+            raise RuntimeError(self.unavailable_reason)
+        return self.hf_model(waveform).logits   # (B, 2)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.net(x.unsqueeze(1)).squeeze(-1)
-        return self.proj(out)
+    forward = __call__
 
 
 class AudioDetector:
@@ -84,16 +144,22 @@ class AudioDetector:
     """
 
     def __init__(self, weights_path: Optional[str] = None, device: str = "cpu"):
+        torch = _load_torch()
         self.device = torch.device(device)
         self.model  = AudioForensicNet(weights_path=weights_path)
         self.model.to(self.device).eval()
-        self.weights_hash = "uninitialised"
+        self.load_strategy = self.model.load_strategy
+        self.usable = self.model.usable
+        self.unavailable_reason = self.model.unavailable_reason
 
         resolved_path = Path(weights_path) if weights_path else _DEFAULT_WEIGHTS_PATH
-        if resolved_path.exists():
+        # The hash names the bytes a report is derived from. With no loaded
+        # checkpoint there are none, so it must not name a file that was read
+        # and rejected.
+        if self.usable and resolved_path.exists():
             self.weights_hash = _file_hash(str(resolved_path))
         else:
-            self.weights_hash = "pretrained-hf-hub"
+            self.weights_hash = "none"
 
     def detect(self, audio_path: str) -> DetectionResult:
         t0   = time.perf_counter()
@@ -101,6 +167,19 @@ class AudioDetector:
 
         if path.suffix.lower() not in SUPPORTED_EXTS:
             return _unsupported(path.suffix, t0, self.weights_hash)
+
+        if not self.usable:
+            # Abstain before decoding: there is nothing to score the waveform
+            # with, and loading it would spend the time anyway.
+            return make_result(
+                media_type="audio", score=None, confidence=None,
+                model=AUDIO_MODEL_NAME, model_version=AUDIO_MODEL_VERSION,
+                weights_hash=self.weights_hash,
+                latency_ms=(time.perf_counter()-t0)*1000,
+                explanation=self.unavailable_reason,
+                evidence={"load_strategy": self.load_strategy,
+                          "trained_model_loaded": False},
+            )
 
         try:
             waveform, sr = _load_audio(audio_path)
@@ -140,6 +219,8 @@ class AudioDetector:
             evidence={
                 "chunk_scores": [round(s, 4) for s in chunk_scores],
                 "duration_s": round(duration, 2),
+                "load_strategy": self.load_strategy,
+                "trained_model_loaded": True,
                 **spec_evidence,
             },
             heatmap_available=bool(spec_evidence),
@@ -149,6 +230,7 @@ class AudioDetector:
     def _score_chunks(
         self, waveform: np.ndarray, sr: int
     ) -> tuple[list[float], list[float]]:
+        torch = _load_torch()
         chunk_len = int(CHUNK_SEC * sr)
         scores, times = [], []
         for start in range(0, len(waveform), chunk_len):
@@ -158,23 +240,48 @@ class AudioDetector:
             if len(chunk) < chunk_len:
                 chunk = np.pad(chunk, (0, chunk_len - len(chunk)))
             t = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                logits = self.model(t)
-                probs = torch.softmax(logits, dim=1)[0]
-                # Class 0 = real, Class 1 = fake
-                score = probs[1].item() if probs.shape[0] > 1 else torch.sigmoid(logits[0, 0]).item()
+            try:
+                with torch.inference_mode():
+                    logits = self.model(t)
+                    probs = torch.softmax(logits, dim=1)[0]
+                    # Class 0 = real, Class 1 = fake
+                    score = (
+                        probs[1].item() if probs.shape[0] > 1
+                        else torch.sigmoid(logits[0, 0]).item()
+                    )
+            finally:
+                # A long file otherwise keeps every 3-second activation set
+                # reachable until the loop ends.
+                del t
             scores.append(float(score))
             times.append(start / sr)
         return scores, times
 
 
 _global_audio_detector: Optional[AudioDetector] = None
+_audio_lock = threading.Lock()
+
 
 def get_audio_detector(weights_path: Optional[str] = None) -> AudioDetector:
+    """The process-wide audio detector. Built at most once per worker.
+
+    Double-checked under a lock: without it two concurrent analyses each build
+    their own 1.26 GB model.
+    """
     global _global_audio_detector
-    if _global_audio_detector is None or (weights_path and _global_audio_detector.weights_hash == "uninitialised"):
-        _global_audio_detector = AudioDetector(weights_path=weights_path)
-    return _global_audio_detector
+    if _global_audio_detector is not None:
+        return _global_audio_detector
+    with _audio_lock:
+        if _global_audio_detector is None:
+            _global_audio_detector = AudioDetector(weights_path=weights_path)
+        return _global_audio_detector
+
+
+def release_audio_detector() -> None:
+    """Drop the loaded model. Used by tests and by shutdown paths."""
+    global _global_audio_detector
+    with _audio_lock:
+        _global_audio_detector = None
 
 
 def detect_audio(path: str | Path, model_path: Optional[str] = None, **kwargs) -> dict:
