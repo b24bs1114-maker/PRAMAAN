@@ -1,7 +1,21 @@
 {
-  "manifest_version": "1.0.0",
+  "manifest_version": "2.0.0",
   "project": "PRAMAAN Multi-Modal Deepfake Detector",
-  "updated_at": "2026-08-24T17:00:00Z",
+  "updated_at": "2026-09-01T00:00:00Z",
+  "_comment": [
+    "Single source of truth for model assets. scripts/download_weights.py and",
+    "scripts/verify_model_assets.py both read this file: filenames, sizes and",
+    "SHA-256 digests here are what a build downloads and verifies. The digests",
+    "below were computed from the installed checkpoints -- do not edit them by",
+    "hand; re-run scripts/verify_model_assets.py --no-load after replacing a",
+    "checkpoint and copy the printed digest in."
+  ],
+  "release": {
+    "repo": "b24bs1114-maker/PRAMAAN",
+    "tag": "models-v1",
+    "asset_url_template": "https://github.com/{repo}/releases/download/{tag}/{asset}",
+    "note": "Per-asset URLs may be overridden with PRAMAAN_<MODALITY>_WEIGHTS_URL; the tag with PRAMAAN_WEIGHTS_RELEASE_TAG."
+  },
   "models": {
     "image": {
       "model_name": "SwinB-AI-Image-Detector",
@@ -9,7 +23,17 @@
       "source_repo": "https://github.com/truebees-ai/Image-Deepfake-Detectors-Public-Library",
       "hf_hub_model": "umm-maybe/AI-image-detector",
       "checkpoint_filename": "image_detector.pt",
-      "weights_sha256": "4b68e9860b0ff1bc557e4e1dfecf530ad6ec4a0280ebdbed1d0ef618e474581f",
+      "release_asset": "image_detector.pt",
+      "weights_size_bytes": 347151670,
+      "weights_sha256": "25edbe34eaa7168366e2c98c49e09c98ca1afd4ca4be0d21d6b84f2b9a24b83f",
+      "derived_safetensors": {
+        "directory": "image_detector_hf",
+        "weights_filename": "model.safetensors",
+        "weights_size_bytes": 347033424,
+        "weights_sha256": "5fabf04baec2fb50239320373d16970ea75bdae7ce92427078824296ae3d3320",
+        "produced_by": "scripts/convert_detector_weights.py",
+        "note": "Optional, build-time derived from image_detector.pt. Memory-mapped load path (peak 396 MB vs 1052 MB). Not a release asset -- regenerate it, never ship it."
+      },
       "license": "MIT",
       "architecture": "Swin-B (SwinForImageClassification) Vision Transformer backbone fine-tuned for general AI-generated image vs real photo classification",
       "input_preprocessing": {
@@ -32,7 +56,11 @@
       "model_version": "3.0.0",
       "source_repo": "https://github.com/TRahulsingh/DeepfakeDetector",
       "checkpoint_filename": "image_detector.pt",
-      "weights_sha256": "4b68e9860b0ff1bc557e4e1dfecf530ad6ec4a0280ebdbed1d0ef618e474581f",
+      "release_asset": "image_detector.pt",
+      "shares_checkpoint_with": "image",
+      "checkpoint_compatibility": "INCOMPATIBLE -- image_detector.pt holds Swin-B parameters, which do not fit this EfficientNet-B0 frame model. VideoDetector detects this, discards the checkpoint, and runs ImageNet-pretrained EfficientNet-B0 instead; it reports weights_hash='imagenet-efficientnet-b0' so a verdict is not attributed to weights that were never used. A purpose-trained video_detector.pt is still to be published.",
+      "weights_size_bytes": 347151670,
+      "weights_sha256": "25edbe34eaa7168366e2c98c49e09c98ca1afd4ca4be0d21d6b84f2b9a24b83f",
       "license": "MIT",
       "architecture": "Frame-sampled EfficientNet-B0 + OpenCV face detection + temporal variance score aggregation",
       "input_preprocessing": {
@@ -57,7 +85,9 @@
       "source_repo": "https://github.com/garystafford/deepfake-voice-detection-public",
       "hf_hub_model": "garystafford/wav2vec2-deepfake-voice-detector",
       "checkpoint_filename": "audio_detector.pt",
-      "weights_sha256": "02eb060768e1a46cf7e4fe33ec36780c102a7b2cb6df4e3d7a8d56b3e6c0c5bd",
+      "release_asset": "audio_detector.pt",
+      "weights_size_bytes": 1262977339,
+      "weights_sha256": "79945f599acb3e7c1cab547fb5223341bee0ccb7daf62b40f21da7a8bd431a69",
       "license": "Apache-2.0",
       "architecture": "Wav2Vec2 sequence classification model fine-tuned for real-vs-AI voice detection",
       "input_preprocessing": {

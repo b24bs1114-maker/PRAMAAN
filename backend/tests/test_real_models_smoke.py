@@ -55,8 +55,21 @@ def test_detector_status_all_modalities_available(client):
 
     mod_status = detector.modality_availability()
     assert mod_status["image"]["available"] is True, f"Image model unavailable: {mod_status['image']}"
-    assert mod_status["video"]["available"] is True, f"Video model unavailable: {mod_status['video']}"
     assert mod_status["audio"]["available"] is True, f"Audio model unavailable: {mod_status['audio']}"
+
+    # Video shares the *image* checkpoint here, which holds Swin-B parameters
+    # that do not fit the EfficientNet-B0 frame model. That combination cannot
+    # produce a video score, so "available" must be False with a reason that
+    # says why -- reporting it as an available deepfake detector that then
+    # abstains on every request is the failure this assertion guards.
+    video_status = mod_status["video"]
+    if video_status["available"] is False:
+        reason = (video_status.get("reason") or "").lower()
+        assert "swin" in reason or "classifier head" in reason, (
+            f"Video is unavailable for an unexplained reason: {video_status}"
+        )
+    else:
+        assert "VideoDetector" in video_status["model"] or "EfficientNet" in video_status["model"]
 
     assert "SwinB" in mod_status["image"]["model"] or "EfficientNet" in mod_status["image"]["model"]
     assert mod_status["audio"]["model"] == "Wav2Vec2-GaryStafford-DeepfakeVoiceDetector"

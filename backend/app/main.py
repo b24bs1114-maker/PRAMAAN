@@ -238,8 +238,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not current_settings.enable_ai_detector:
             logger.info("AI detector disabled for demo/stability mode")
         else:
-            detector_service.get_detector(current_settings)
-            logger.info("Detector pre-warm completed")
+            # Construct the adapter (cheap: resolves configuration, loads no
+            # model) so the first analysis does not pay for it.
+            adapter = detector_service.get_detector(current_settings)
+            usable, reason = adapter.available()
+            logger.info(
+                "Detector adapter ready: %s (available=%s)%s",
+                adapter.id,
+                usable,
+                "" if usable else f" reason={reason}",
+            )
+            if current_settings.detector_prewarm:
+                # Opt-in only. Loading 347 MB of weights before the first
+                # health check answers is how a slow startup becomes a failed
+                # deploy; off by default, the model loads on first analysis.
+                loaded = detector_service.prewarm(current_settings)
+                logger.info("Detector pre-warm: %s", loaded)
         yield
         logger.info("%s shutting down", current_settings.app_name)
 

@@ -70,9 +70,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.util
 import inspect
 import json
 import logging
+import sys
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -275,6 +277,29 @@ def registered_inference(
 ) -> tuple[Callable[..., Any], str | None, str | None] | None:
     with _registry_lock:
         return _registry.get((modality or "").lower().strip())
+
+
+_installed_cache: dict[str, bool] = {}
+
+
+def _module_installed(name: str) -> bool:
+    """Is ``name`` importable, *without* importing it?
+
+    ``available()`` is called on every status probe and on every dashboard
+    refresh, and it used to answer "is torch installed?" by importing torch --
+    154 MB of RSS (measured) to answer a yes/no question, in a process that may
+    never run a model. ``find_spec`` reads the module metadata only. Cached
+    because the answer cannot change within a process.
+    """
+    cached = _installed_cache.get(name)
+    if cached is not None:
+        return cached
+    try:
+        found = importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        found = False
+    _installed_cache[name] = found
+    return found
 
 
 def load_entrypoint(spec: str) -> tuple[Callable[..., Any] | None, str | None]:
@@ -604,6 +629,68 @@ class DetectorAdapter(ABC):
         )
 
 
+# --------------------------------------------------------------------------- #
+# Inference admission control
+# --------------------------------------------------------------------------- #
+#: A single Swin-B forward pass costs ~26 MB of activations, and a Grad-CAM pass
+#: ~206 MB, on top of 347 MB of resident weights (all measured -- see
+#: DETECTOR_DEPLOYMENT.md). Two analyses arriving together therefore add their
+#: peaks together, which is how a process that survives one request gets killed
+#: by the second. Inference is admitted through a bounded semaphore so the peak
+#: is a function of the configured limit rather than of client behaviour.
+#:
+#: A semaphore, not a job queue: the API contract is synchronous and the
+#: measurements do not show a need for anything more. Waiters are bounded by
+#: ``detector_queue_timeout_s`` so a backlog abstains instead of holding the
+#: worker until the proxy gives up on it.
+_inference_semaphore: threading.BoundedSemaphore | None = None
+_inference_semaphore_limit = 0
+_semaphore_lock = threading.Lock()
+
+QUEUE_TIMEOUT_EXPLANATION = (
+    "The detector was busy with another analysis and this request timed out "
+    "waiting for it, so no score was produced. This is NOT a finding of "
+    "authenticity and NOT a finding of manipulation -- the signal is missing and "
+    "is excluded from fusion. Retrying will produce a score."
+)
+
+
+def _semaphore_for(limit: int) -> threading.BoundedSemaphore:
+    global _inference_semaphore, _inference_semaphore_limit
+    with _semaphore_lock:
+        if _inference_semaphore is None or _inference_semaphore_limit != limit:
+            _inference_semaphore = threading.BoundedSemaphore(limit)
+            _inference_semaphore_limit = limit
+        return _inference_semaphore
+
+
+class InferenceBusy(RuntimeError):
+    """Raised when the bounded inference slot could not be acquired in time."""
+
+
+class _inference_slot:
+    """Context manager admitting one inference at a time (per configured limit)."""
+
+    def __init__(self, limit: int, timeout: float) -> None:
+        self._limit = max(1, int(limit or 1))
+        self._timeout = max(0.0, float(timeout or 0.0))
+        self._semaphore: threading.BoundedSemaphore | None = None
+
+    def __enter__(self) -> None:
+        semaphore = _semaphore_for(self._limit)
+        if not semaphore.acquire(timeout=self._timeout):
+            raise InferenceBusy(
+                f"No detector slot became available within {self._timeout:g}s "
+                f"(concurrency limit {self._limit})."
+            )
+        self._semaphore = semaphore
+
+    def __exit__(self, *exc_info: Any) -> None:
+        if self._semaphore is not None:
+            self._semaphore.release()
+            self._semaphore = None
+
+
 class NullDetector(DetectorAdapter):
     """Abstains. Used whenever no model is configured or installed for a modality."""
 
@@ -705,12 +792,10 @@ class OnnxDetector(DetectorAdapter):
                 f"{self.model_path.name} is not an .onnx file; this adapter loads "
                 "ONNX models."
             )
-        try:
-            import onnxruntime  # noqa: F401
-        except Exception as exc:  # noqa: BLE001
+        if not _module_installed("onnxruntime"):
             return False, (
-                "onnxruntime is not installed in this environment "
-                f"({exc.__class__.__name__}), so the ONNX detector cannot run."
+                "onnxruntime is not installed in this environment, so the ONNX "
+                "detector cannot run."
             )
         return True, None
 
@@ -767,12 +852,10 @@ class TorchScriptDetector(DetectorAdapter):
                 f"{self.model_path.name} is not a TorchScript file; this adapter "
                 "loads .pt/.pth models."
             )
-        try:
-            import torch  # noqa: F401
-        except Exception as exc:  # noqa: BLE001
+        if not _module_installed("torch"):
             return False, (
-                "torch is not installed in this environment "
-                f"({exc.__class__.__name__}), so the TorchScript detector cannot run."
+                "torch is not installed in this environment, so the TorchScript "
+                "detector cannot run."
             )
         return True, None
 
@@ -877,7 +960,51 @@ class PluginDetector(DetectorAdapter):
         fn, reason = self._inference()
         if fn is None:
             return False, reason
-        return True, None
+        return self._readiness(fn)
+
+    def describe(self) -> dict[str, Any]:
+        """As ``DetectorAdapter.describe``, minus any borrowed identity.
+
+        ``model_name`` and ``weights_hash`` are derived from whatever file is at
+        ``model_path``. When that file is not one this plug-in can use, naming it
+        makes the status page report the wrong model: the video slot advertised
+        "SwinB-AI-Image-Detector" and the image checkpoint's digest while being
+        unable to score a single frame. An unusable slot names no model.
+        """
+        described = super().describe()
+        if described["available"] is False:
+            described["model"] = "none"
+            described["weights_hash"] = ""
+        return described
+
+    def _readiness(self, fn: Callable[..., Any]) -> tuple[bool, str | None]:
+        """Ask the plug-in whether its checkpoint can actually produce a score.
+
+        A file that exists and a module that imports are not the same thing as a
+        working detector: the video plug-in was reported as available while
+        holding an image checkpoint it cannot use, so the dashboard showed a
+        deepfake detector that abstained on every request. A plug-in may export
+        ``checkpoint_readiness(model_path) -> (bool, reason)`` to answer that;
+        one that does not is treated as ready, exactly as before.
+
+        The hook is advisory. It must not load the model -- it runs on every
+        status probe -- and if it raises, that is not evidence about the
+        checkpoint, so the adapter stays available and the loader reports the
+        problem per request.
+        """
+        module = sys.modules.get(getattr(fn, "__module__", "") or "")
+        hook = getattr(module, "checkpoint_readiness", None)
+        if not callable(hook):
+            return True, None
+        try:
+            usable, reason = hook(str(self.model_path) if self.model_path else None)
+        except Exception:
+            return True, None
+        if usable:
+            return True, None
+        return False, reason or (
+            f"The configured {self.modality} detector cannot produce a score."
+        )
 
     def _infer(self, file_path: Path) -> tuple[Any, Any, dict[str, Any]]:
         fn, reason = self._inference()
@@ -916,6 +1043,106 @@ class AudioDetector(PluginDetector):
     def __init__(self, model_path: str | None = None, entrypoint: str | None = None) -> None:
         super().__init__("audio", model_path=model_path, entrypoint=entrypoint,
                          adapter_id="audio_classifier")
+
+
+class RemoteDetector(DetectorAdapter):
+    """Forwards inference to a separate detector service.
+
+    Exists because the model does not fit in the API container: Swin-B is 347 MB
+    of fp32 weights and the torch/transformers runtime is another ~355 MB, so a
+    512 MB instance cannot host it however carefully the loading is done (the
+    measurements are in DETECTOR_DEPLOYMENT.md). Moving the model out is the
+    only way to keep the API process small *and* run the real detector.
+
+    Nothing about the contract changes: the remote service returns the same
+    payload ``analyse()`` would have produced locally, and this adapter passes it
+    through. It never substitutes a score of its own -- a service that is down,
+    slow or malformed is an unavailable signal, reported as an abstention exactly
+    like an uninstalled model.
+    """
+
+    id = "remote"
+    modality = "multimodal"
+
+    def __init__(self, url: str, *, timeout: float = 120.0, token: str = "") -> None:
+        self.url = (url or "").strip()
+        self.timeout = max(1.0, float(timeout or 1.0))
+        self._token = (token or "").strip()
+        self.model_name = "remote"
+        self.model_version = "unknown"
+        self.model_path = None
+
+    def available(self) -> tuple[bool, str | None]:
+        if not self.url:
+            return False, (
+                "No remote detector service is configured (set "
+                "PRAMAAN_DETECTOR_REMOTE_URL to the /detect endpoint of a "
+                "detector service)."
+            )
+        if not self.url.lower().startswith(("http://", "https://")):
+            return False, (
+                f"PRAMAAN_DETECTOR_REMOTE_URL ({self.url!r}) is not an http(s) URL."
+            )
+        return True, None
+
+    def weights_hash(self) -> str:
+        # The weights live on the remote host; its response carries their hash.
+        return ""
+
+    def _post(self, file_path: Path, media_type: str) -> dict[str, Any]:
+        """Multipart POST of one file, using only the standard library."""
+        import mimetypes
+        import urllib.error
+        import urllib.request
+        import uuid as _uuid
+
+        boundary = f"----pramaan{_uuid.uuid4().hex}"
+        mime = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        prologue = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="media_type"\r\n\r\n{media_type}\r\n'
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{file_path.name}"\r\n'
+            f"Content-Type: {mime}\r\n\r\n"
+        ).encode("utf-8")
+        epilogue = f"\r\n--{boundary}--\r\n".encode()
+        body = prologue + file_path.read_bytes() + epilogue
+
+        headers = {
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+        }
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        request = urllib.request.Request(self.url, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"Remote detector returned {type(payload).__name__}, expected a JSON object."
+            )
+        return payload
+
+    def _infer(self, file_path: Path) -> tuple[Any, Any, dict[str, Any]]:
+        media_type = "image"
+        suffix = file_path.suffix.lower()
+        if suffix in VIDEO_EXTENSIONS:
+            media_type = "video"
+        elif suffix in AUDIO_EXTENSIONS:
+            media_type = "audio"
+
+        payload = self._post(file_path, media_type)
+        extras = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"score", "manipulation_score", "confidence"}
+        }
+        extras.setdefault("runtime", f"remote:{self.url}")
+        return (
+            payload.get("manipulation_score", payload.get("score")),
+            payload.get("confidence"),
+            extras,
+        )
 
 
 class ImageDetector(DetectorAdapter):
@@ -1120,7 +1347,23 @@ class MultiModalDetectorService(DetectorAdapter):
             )
 
         adapter = self.adapters[modality]
-        result = adapter.analyse(path, media_type=modality)
+        try:
+            with _inference_slot(
+                getattr(self.settings, "detector_max_concurrency", 1),
+                getattr(self.settings, "detector_queue_timeout_s", 120.0),
+            ):
+                result = adapter.analyse(path, media_type=modality)
+        except InferenceBusy as exc:
+            logger.warning("Detector admission control rejected a request: %s", exc)
+            # Abstain rather than 503: the caller asked what this deployment can
+            # measure about the file, and the honest answer is "nothing, right
+            # now" -- carried in the same shape as every other missing signal so
+            # fusion excludes it instead of scoring it.
+            return self._abstain(
+                media_type=modality,
+                status=STATUS_UNAVAILABLE,
+                detail=f"{exc} {QUEUE_TIMEOUT_EXPLANATION}",
+            )
         # Record which socket actually handled the file: the caller sees
         # "multimodal_dispatcher" as the adapter id, and that alone would not say
         # whether the image, video or audio detector produced this.
@@ -1133,6 +1376,14 @@ def build_detector(settings: Settings) -> DetectorAdapter:
     """Construct the detector for these settings, without touching the singleton."""
     if settings.detector_backend == "null":
         return NullDetector("generic", DISABLED_REASON)
+    remote_url = getattr(settings, "detector_remote_url", "") or ""
+    if remote_url.strip():
+        token = getattr(settings, "detector_remote_token", None)
+        return RemoteDetector(
+            remote_url,
+            timeout=getattr(settings, "detector_remote_timeout_s", 120.0),
+            token=token.get_secret_value() if token is not None else "",
+        )
     return MultiModalDetectorService(settings)
 
 
@@ -1156,7 +1407,7 @@ def get_detector(settings: Settings) -> DetectorAdapter:
                 )
                 _instance = NullDetector("generic", reason)
             else:
-                _instance = MultiModalDetectorService(settings)
+                _instance = build_detector(settings)
         return _instance
 
 
@@ -1198,6 +1449,31 @@ def _configured_candidates(settings: Settings) -> list[DetectorAdapter]:
         OnnxDetector(model_path),
         TorchScriptDetector(model_path),
     ]
+
+
+def prewarm(settings: Settings) -> str:
+    """Load the model now instead of on the first analysis. Never raises.
+
+    Explicitly opt-in (``PRAMAAN_DETECTOR_PREWARM``). It trades startup time for
+    first-request latency, and on a platform whose health check has a short
+    deadline that trade can cost the deployment, so the default is to load
+    lazily. Returns a human-readable outcome for the startup log.
+    """
+    if not settings.enable_ai_detector or settings.detector_backend == "null":
+        return "skipped (detector disabled)"
+    detector = get_detector(settings)
+    if isinstance(detector, RemoteDetector):
+        return "skipped (inference is remote; nothing to load locally)"
+    usable, reason = detector.available()
+    if not usable:
+        return f"skipped (no detector installed: {reason})"
+    entrypoint = getattr(settings, "image_detector_entrypoint", "") or ""
+    if not entrypoint:
+        return "skipped (no image entrypoint configured)"
+    fn, load_reason = load_entrypoint(entrypoint)
+    if fn is None:
+        return f"failed ({load_reason})"
+    return f"imported {entrypoint}; weights load on first inference"
 
 
 def status(settings: Settings) -> dict[str, Any]:
@@ -1307,7 +1583,7 @@ def status(settings: Settings) -> dict[str, Any]:
     if not usable:
         detail = f"{reason} {UNAVAILABLE_EXPLANATION}" if reason else UNAVAILABLE_EXPLANATION
 
-    return {
+    result = {
         "adapter": active_id,
         "model": str(getattr(identity_source, "model_name", "none")),
         "model_version": str(getattr(identity_source, "model_version", "0")),
@@ -1327,7 +1603,13 @@ def status(settings: Settings) -> dict[str, Any]:
             for name in MODALITIES
         },
         "registered_inference": registered,
-        "candidate_adapters": [c.describe() for c in _configured_candidates(settings)],
+        # Skipped when inference is remote: the local sockets are not what would
+        # run, and probing them would report "no model here" as if it mattered.
+        "candidate_adapters": (
+            []
+            if isinstance(detector, RemoteDetector)
+            else [c.describe() for c in _configured_candidates(settings)]
+        ),
         "modalities": modalities,
         "notes": None if usable else (
             "No pretrained detector is installed, so AI-detection results are "
@@ -1335,9 +1617,15 @@ def status(settings: Settings) -> dict[str, Any]:
             "is not evidence of authenticity."
         ),
     }
+    # This assignment used to sit after the ``return`` above, so nothing was
+    # ever cached on the enabled path: every status call -- and the dashboard
+    # calls it, and so does every analysis -- rebuilt three candidate adapters,
+    # re-read the model sidecar and re-resolved availability. Caching it is the
+    # difference between a status probe costing nothing and costing model file
+    # I/O on every dashboard refresh.
     with _status_cache_lock:
-        _status_cache = (now, res)
-    return res
+        _status_cache = (now, result)
+    return result
 
 
 __all__ = [
@@ -1356,8 +1644,11 @@ __all__ = [
     "MODALITIES",
     "MultiModalDetectorService",
     "NullDetector",
+    "InferenceBusy",
     "OnnxDetector",
     "PluginDetector",
+    "QUEUE_TIMEOUT_EXPLANATION",
+    "RemoteDetector",
     "SCORE_SEMANTICS",
     "STATUS_ERROR",
     "STATUS_OK",
@@ -1372,6 +1663,7 @@ __all__ = [
     "clear_inference_registry",
     "get_detector",
     "load_entrypoint",
+    "prewarm",
     "register_inference",
     "registered_inference",
     "reset_detector_singleton",

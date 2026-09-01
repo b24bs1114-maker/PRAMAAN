@@ -130,10 +130,18 @@ __pycache__/
 PRAMAAN_DEPLOY/
 *.zip
 
-# Large model weights
+# Large model weights -- provisioned by scripts/download_weights.py from a
+# GitHub Release and verified against pramaan-detector/weights/model_manifest.json.
+# The manifest and the sidecar *.pt.json specs ARE tracked; the binaries are not.
 *.pt
 *.pth
 *.onnx
+*.safetensors
+*.tflite
+*.pt.part
+pramaan-detector/weights/*_hf/
+!pramaan-detector/weights/model_manifest.json
+!pramaan-detector/weights/*.pt.json
 
 # Local tooling / OS
 .claude/

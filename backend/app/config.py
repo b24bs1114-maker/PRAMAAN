@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import logging
 import logging.config
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Anchor every default path to the repository layout rather than the process
@@ -119,10 +120,70 @@ class Settings(BaseSettings):
     audio_model_path: str = ""
     image_weights_url: str = ""
 
+    # --- Model asset provisioning --------------------------------------------
+    # These describe where checkpoints live and where they come from. They are
+    # consumed by scripts/download_weights.py and scripts/verify_model_assets.py
+    # at build time, and by the image detector's loader at runtime -- declared
+    # here so the deployment's PRAMAAN_* environment stays a single, validated
+    # surface rather than a set of undeclared os.getenv reads.
+    #: Destination directory for provisioned checkpoints. Empty means the
+    #: repository default, ``pramaan-detector/weights``.
+    weights_dir: str = ""
+    #: Memory-mapped safetensors directory produced by
+    #: ``scripts/convert_detector_weights.py``. Ignored when absent, or when its
+    #: ``source.json`` names a checkpoint other than the one configured.
+    image_model_hf_dir: str = ""
+    #: Which modalities a build provisions, as csv of image,video,audio.
+    weights_modalities: str = ""
+    #: GitHub Release the checkpoints are published under. Empty falls back to
+    #: the ``release`` block in ``model_manifest.json``.
+    weights_release_repo: str = ""
+    weights_release_tag: str = ""
+    video_weights_url: str = ""
+    audio_weights_url: str = ""
+    #: Build fails rather than producing a deployment with no detector weights.
+    fail_on_missing_weights: bool = False
+    #: Accept a checkpoint whose SHA-256 does not match the manifest. Off: a
+    #: truncated or wrong-revision model yields confident, wrong verdicts.
+    allow_unverified_weights: bool = False
+    #: Forbid the detector package from reaching a model hub at inference time.
+    #: On by default: the checkpoint is loaded from disk and verified against the
+    #: manifest, so a silent hub download would substitute an unpinned revision
+    #: for the weights a report names. Exported to the process environment by
+    #: :func:`get_settings` because ``transformers`` reads ``os.environ``, not
+    #: this object.
+    detector_offline: bool = True
+
     # Inference entrypoints, one per modality, as "module:callable".
     image_detector_entrypoint: str = ""
     video_detector_entrypoint: str = ""
     audio_detector_entrypoint: str = ""
+
+    # Inference is the most expensive thing this process does: one Swin-B
+    # forward pass costs ~26 MB of activations, and a Grad-CAM pass ~206 MB
+    # (measured). Two concurrent analyses therefore double the peak, so
+    # inference is serialised by default. Raise this only on an instance with
+    # measured headroom.
+    detector_max_concurrency: int = 1
+    #: Seconds a request will wait for the inference slot before abstaining.
+    #: Bounded so a queue of analyses cannot hold the worker past the proxy's
+    #: own timeout and turn into a 502.
+    detector_queue_timeout_s: float = 120.0
+
+    # Pre-load the model during startup. Loading on the first request instead
+    # keeps startup fast, which matters when the platform's health check has a
+    # short deadline; pre-loading makes the first analysis fast instead.
+    detector_prewarm: bool = False
+
+    # Remote inference service (see DETECTOR_DEPLOYMENT.md). When set, this
+    # process runs no model at all: it forwards the file to the URL below and
+    # returns whatever that service measured. Same adapter contract, same
+    # abstention semantics, no scores invented locally.
+    detector_remote_url: str = ""
+    detector_remote_timeout_s: float = 120.0
+    #: Shared bearer token for the remote detector service. SecretStr so it can
+    #: never be printed by an accidental repr of Settings.
+    detector_remote_token: SecretStr = SecretStr("")
 
     # --- Reporting ------------------------------------------------------------
     report_examiner: str = ""
@@ -262,7 +323,32 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Return the process-wide settings instance (cached)."""
-    return Settings()
+    settings = Settings()
+    _export_model_pipeline_env(settings)
+    return settings
+
+
+def _export_model_pipeline_env(settings: Settings) -> None:
+    """Publish the model-asset settings that are read via ``os.getenv``.
+
+    ``pydantic-settings`` parses ``.env`` into this object; it does not put the
+    values into ``os.environ``. Two consumers only ever see ``os.environ``:
+
+    * the detector package's loader, which reads ``PRAMAAN_IMAGE_MODEL_HF_DIR``
+      to find the memory-mapped weights directory, and
+    * ``transformers`` / ``huggingface_hub``, whose offline switches are the
+      thing standing between "load the verified checkpoint from disk" and
+      "quietly download an unpinned revision from the hub".
+
+    So a ``.env`` that set either of those had no effect at all. Bridging them
+    here keeps one configuration surface. An explicit process-level environment
+    variable always wins -- this only fills in what the environment left unset.
+    """
+    if settings.image_model_hf_dir:
+        os.environ.setdefault("PRAMAAN_IMAGE_MODEL_HF_DIR", settings.image_model_hf_dir)
+    if settings.detector_offline:
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
 def configure_logging(settings: Settings) -> None:

@@ -32,7 +32,22 @@ PRAMAAN_DEPLOY/
 .DS_Store
 *.log
 
+# Exclude model binaries from the build context.
+# 1.6 GB of checkpoints in the context makes every build slow even when the
+# layers are cached, and `COPY pramaan-detector` would bake whichever
+# checkpoints happened to be on the developer's disk into the image. Weights are
+# provisioned inside the build by scripts/download_weights.py from a pinned
+# GitHub Release asset and verified against the manifest, so the image contents
+# do not depend on the machine that built it. The manifest and sidecar specs are
+# text and must stay in the context.
+pramaan-detector/weights/**
+!pramaan-detector/weights/model_manifest.json
+!pramaan-detector/weights/*.pt.json
+!pramaan-detector/weights/README.txt
+
 # Keep runtime components:
 # backend/requirements.txt
 # backend/app/
 # pramaan-detector/
+# scripts/download_weights.py
+# scripts/verify_model_assets.py
