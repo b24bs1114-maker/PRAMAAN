@@ -7,8 +7,7 @@ const STORAGE_KEY = 'pramaan_theme'
 function readStoredMode(): ThemeMode {
   const saved = localStorage.getItem(STORAGE_KEY)
   if (saved === 'light' || saved === 'dark' || saved === 'system') return saved
-  // Fresh install (or a legacy value we no longer recognise): follow the OS.
-  return 'system'
+  return 'dark'
 }
 
 function systemPrefersDark(): boolean {

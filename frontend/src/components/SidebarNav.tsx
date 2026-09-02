@@ -2,17 +2,13 @@ import { Icon, type IconName } from './Icon'
 import type { ThemeController } from '../state/useTheme'
 
 /**
- * Workstation destinations grouped into 4 sections:
- * INVESTIGATE, FORENSICS, OUTPUT, SYSTEM.
+ * Workstation destinations grouped into global sections:
+ * INVESTIGATE, OUTPUT, and footer-level SETTINGS.
  */
 export type NavSection =
   | 'dashboard'
   | 'cases'
-  | 'evidence'
-  | 'analysis'
-  | 'provenance'
   | 'reports'
-  | 'audit'
   | 'settings'
 
 const SECTIONS: { title: string; items: { id: NavSection; label: string; icon: IconName }[] }[] = [
@@ -21,70 +17,77 @@ const SECTIONS: { title: string; items: { id: NavSection; label: string; icon: I
     items: [
       { id: 'dashboard', label: 'Dashboard', icon: 'shield' },
       { id: 'cases', label: 'Cases', icon: 'document' },
-      { id: 'evidence', label: 'Evidence', icon: 'upload' },
-    ],
-  },
-  {
-    title: 'FORENSICS',
-    items: [
-      { id: 'analysis', label: 'Analysis', icon: 'search' },
-      { id: 'provenance', label: 'Provenance', icon: 'external' },
     ],
   },
   {
     title: 'OUTPUT',
     items: [
       { id: 'reports', label: 'Reports', icon: 'download' },
-      { id: 'audit', label: 'Audit', icon: 'lock' },
-    ],
-  },
-  {
-    title: 'SYSTEM',
-    items: [
-      { id: 'settings', label: 'Settings', icon: 'settings' },
     ],
   },
 ]
 
-function ThemeSegmentedControl({ theme }: { theme: ThemeController }) {
-  const current = theme.resolved // 'light' | 'dark'
-
+function SidebarSystemStatus() {
   return (
-    <div className="sidebar-theme-toggle" role="radiogroup" aria-label="Theme selection">
-      <button
-        type="button"
-        className={`sidebar-theme-toggle__btn${current === 'light' ? ' sidebar-theme-toggle__btn--active' : ''}`}
-        onClick={() => theme.setMode('light')}
-        role="radio"
-        aria-checked={current === 'light'}
-        title="Switch to Light mode"
-      >
-        <span className="sidebar-theme-toggle__icon" aria-hidden="true">☀</span>
-        <span>LIGHT</span>
-      </button>
-      <button
-        type="button"
-        className={`sidebar-theme-toggle__btn${current === 'dark' ? ' sidebar-theme-toggle__btn--active' : ''}`}
-        onClick={() => theme.setMode('dark')}
-        role="radio"
-        aria-checked={current === 'dark'}
-        title="Switch to Dark mode"
-      >
-        <span className="sidebar-theme-toggle__icon" aria-hidden="true">☾</span>
-        <span>DARK</span>
-      </button>
+    <div className="sidebar-status-card">
+      <div className="sidebar-status-card__header">
+        <span className="sidebar-status-card__dot" />
+        <span className="sidebar-status-card__title">SYSTEM STATUS</span>
+      </div>
+      <div className="sidebar-status-card__main">
+        <span>○ All Systems Operational</span>
+      </div>
+      <div className="sidebar-status-card__sub">
+        AI Models • 11/11 Loaded
+      </div>
+      <div className="sidebar-status-card__sub">
+        Storage • 245 GB Free
+      </div>
     </div>
   )
 }
 
-function SidebarHealthBadge() {
+function SidebarUserProfile() {
   return (
-    <div className="sidebar-health">
-      <div className="sidebar-health__head">
-        <span className="sidebar-health__dot" />
-        <span className="sidebar-health__title">SYSTEM ONLINE</span>
+    <div className="sidebar-user-pill">
+      <div className="sidebar-user-pill__avatar">
+        <img
+          src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' fill='%231e293b'/%3E%3Ccircle cx='20' cy='15' r='7' fill='%23f87171'/%3E%3Cpath d='M8 35 c0-7 6-11 12-11 s12 4 12 11' fill='%23f87171'/%3E%3C/svg%3E"
+          alt="Analyst"
+          className="sidebar-user-pill__img"
+        />
       </div>
-      <span className="sidebar-health__sub">AI 3/3 · INDEX READY · AUDIT VALID</span>
+      <div className="sidebar-user-pill__info">
+        <span className="sidebar-user-pill__name">Analyst</span>
+        <span className="sidebar-user-pill__role">Forensic Team</span>
+      </div>
+      <span className="sidebar-user-pill__chevron">⌵</span>
+    </div>
+  )
+}
+
+function SidebarThemeSegmented({ theme }: { theme: ThemeController }) {
+  const isDark = theme.resolved === 'dark'
+
+  return (
+    <div className="sidebar-theme-segmented">
+      <button
+        type="button"
+        className={`sidebar-theme-tab${!isDark ? ' sidebar-theme-tab--active' : ''}`}
+        onClick={() => theme.setMode('light')}
+      >
+        <span style={{ fontSize: 13, color: !isDark ? '#2563eb' : 'var(--text-muted)' }}>☀</span>
+        <span>Light</span>
+      </button>
+
+      <button
+        type="button"
+        className={`sidebar-theme-tab${isDark ? ' sidebar-theme-tab--active' : ''}`}
+        onClick={() => theme.setMode('dark')}
+      >
+        <span style={{ fontSize: 13, color: isDark ? '#93c5fd' : 'var(--text-muted)' }}>☾</span>
+        <span>Dark</span>
+      </button>
     </div>
   )
 }
@@ -114,7 +117,7 @@ export function SidebarNav({
                   onClick={() => onSelectSection(item.id)}
                   aria-current={active ? 'page' : undefined}
                 >
-                  <Icon name={item.icon} size={14} />
+                  <Icon name={item.icon} size={15} />
                   <span>{item.label}</span>
                 </button>
               )
@@ -124,15 +127,17 @@ export function SidebarNav({
       </div>
 
       <div className="sidebar-nav__footer">
-        <SidebarHealthBadge />
-        <ThemeSegmentedControl theme={theme} />
+        <SidebarSystemStatus />
+        <SidebarUserProfile />
+        <SidebarThemeSegmented theme={theme} />
         <button
           type="button"
           className={`sidebar-nav__item${activeSection === 'settings' ? ' sidebar-nav__item--active' : ''}`}
           onClick={() => onSelectSection('settings')}
           aria-current={activeSection === 'settings' ? 'page' : undefined}
+          style={{ width: '100%', marginTop: 'var(--space-1)' }}
         >
-          <Icon name="settings" size={14} />
+          <Icon name="settings" size={15} />
           <span>Settings</span>
         </button>
       </div>

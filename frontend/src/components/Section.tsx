@@ -1,12 +1,12 @@
 import type { ReactNode } from 'react'
 
 /**
- * A flat titled region — the default way content is grouped on every screen.
+ * A flat titled region - the default way content is grouped on every screen.
  *
  * This deliberately replaces the old bordered "panel". The console stacked
  * same-weight boxes, which flattened the hierarchy: an operator could not tell
  * the verdict from the detector build string at a glance. A Section is just a
- * heading with a hairline under it and a body beneath — proximity and the type
+ * heading with a hairline under it and a body beneath - proximity and the type
  * scale carry the grouping, not a container. Elevation (`.card`, the verdict
  * hero) is reserved for the few surfaces that actually carry a decision.
  */

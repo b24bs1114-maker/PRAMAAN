@@ -4,7 +4,7 @@ import { Icon } from './Icon'
 
 /**
  * Right-side slide-in panel for RAW / DETAILS content that would otherwise
- * clutter the primary view — signal internals, per-detector metadata. The
+ * clutter the primary view - signal internals, per-detector metadata. The
  * primary view answers "what did PRAMAAN find?"; the drawer holds the
  * "how do you know?" for the operator who asks.
  *

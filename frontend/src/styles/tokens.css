@@ -1,24 +1,27 @@
 /*
- * PRAMAAN Digital Forensics Platform — Design System Tokens
- * Day Theme: Full White Enterprise Palette
- * Night Theme: Sophisticated Graphite/Navy Palette
+ * PRAMAAN Digital Forensics Platform - Design System Tokens
+ * Pixel-accurate Light and Dark modes matching the provided UI specifications.
  */
 
-:root {
-  /* --- Surfaces: Full White Ramp (Clean Enterprise Light Theme) ---------- */
-  --bg: #ffffff;            /* Pure white main canvas */
-  --sidebar-bg: #f8fafc;    /* Clean crisp slate-50 sidebar */
-  --surface: #ffffff;       /* Pure white workstation cards */
-  --surface-2: #f1f5f9;     /* Subtle elevated section / hover */
-  --surface-3: #e2e8f0;     /* Control inset / active element */
-  --navy-surface: #0f172a;   /* Midnight dark navy focal block */
-  --navy-border: #1e293b;
+:root,
+[data-theme="light"] {
+  /* --- Surfaces: Clean Enterprise Light Palette --------------------------- */
+  --bg: #f5f7fb;
+  --sidebar-bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f1f5f9;
+  --surface-3: #e2e8f0;
+  --navy-surface: #0f172a;
+  --navy-border: #e2e8f0;
 
-  --border: #e2e8f0;        /* Light clean border */
-  --border-strong: #cbd5e1; /* Prominent clean border */
+  --border: #e6ecf5;
+  --border-strong: #cbd5e1;
+  --border-accent: rgba(37, 99, 235, 0.4);
+  --card-highlight: inset 0 1px 0 rgba(255, 255, 255, 1);
+  --card-glow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.02);
 
-  /* --- Typography & Text Contrast (Deep Graphite / Navy) ----------------- */
-  --text: #1e293b;
+  /* --- Typography & Text Contrast ---------------------------------------- */
+  --text: #334155;
   --text-muted: #64748b;
   --text-faint: #94a3b8;
   --text-strong: #0f172a;
@@ -27,20 +30,64 @@
   --accent: #2563eb;
   --accent-deep: #1d4ed8;
   --accent-bright: #3b82f6;
-  --accent-wash: rgba(37, 99, 235, 0.06);
-  --accent-soft: rgba(37, 99, 235, 0.12);
-  --accent-line: rgba(37, 99, 235, 0.22);
+  --accent-wash: rgba(37, 99, 235, 0.08);
+  --accent-soft: rgba(37, 99, 235, 0.14);
+  --accent-line: rgba(37, 99, 235, 0.35);
 
-  --telegram: #0284c7;
-  --whatsapp: #16a34a;
-  --twitter: #0f172a;
+  --btn-cta-bg: #2563eb;
+  --btn-cta-border: #1d4ed8;
+  --btn-cta-color: #ffffff;
+  --btn-cta-hover: #1d4ed8;
 
-  /* --- Semantic Status Indicators --------------------------------------- */
-  --ok: #15803d;
-  --warn: #b45309;
-  --danger: #b91c1c;
-  --bar: #475569;
-  --info: #0369a1;
+  --nav-active-bg: rgba(37, 99, 235, 0.08);
+  --nav-active-border: rgba(37, 99, 235, 0.5);
+  --nav-active-color: #2563eb;
+  --nav-active-shadow: 0 0 12px -2px rgba(37, 99, 235, 0.15);
+
+  --stepper-active-bg: #2563eb;
+  --stepper-active-color: #ffffff;
+
+  --integrity-bg: linear-gradient(90deg, #f0f9ff 0%, #f5f3ff 50%, #f0fdf4 100%);
+  --integrity-border: #e0f2fe;
+  --integrity-badge-bg: #ffffff;
+  --integrity-badge-border: #e2e8f0;
+  --integrity-title-color: #0284c7;
+
+  --status-card-bg: #f0fdf4;
+  --status-card-border: #bbf7d0;
+
+  --stat-active-cases-border: #e2e8f0;
+  --stat-active-cases-trend: #2563eb;
+  --stat-active-cases-icon-bg: #eff6ff;
+  --stat-active-cases-icon-color: #2563eb;
+  --stat-active-cases-icon-border: #bfdbfe;
+
+  --stat-evidence-border: #e2e8f0;
+  --stat-evidence-trend: #16a34a;
+  --stat-evidence-icon-bg: #f0fdf4;
+  --stat-evidence-icon-color: #10b981;
+  --stat-evidence-icon-border: #bbf7d0;
+
+  --stat-flagged-border: #e2e8f0;
+  --stat-flagged-trend: #dc2626;
+  --stat-flagged-icon-bg: #fef2f2;
+  --stat-flagged-icon-color: #ef4444;
+  --stat-flagged-icon-border: #fecaca;
+
+  --stat-pending-border: #e2e8f0;
+  --stat-pending-trend: #d97706;
+  --stat-pending-icon-bg: #fffbeb;
+  --stat-pending-icon-color: #f59e0b;
+  --stat-pending-icon-border: #fde68a;
+
+  --ok: #16a34a;
+  --ok-bright: #10b981;
+  --warn: #d97706;
+  --warn-bright: #f59e0b;
+  --danger: #dc2626;
+  --danger-bright: #ef4444;
+  --bar: #64748b;
+  --info: #2563eb;
 
   --ok-wash: #f0fdf4;
   --ok-line: #bbf7d0;
@@ -48,32 +95,30 @@
   --warn-line: #fde68a;
   --danger-wash: #fef2f2;
   --danger-line: #fecaca;
-  --info-wash: #f0f9ff;
-  --info-line: #bae6fd;
+  --info-wash: #eff6ff;
+  --info-line: #bfdbfe;
 
   --state-strong-authentic-bg: #f0fdf4;
-  --state-strong-authentic-fg: #15803d;
+  --state-strong-authentic-fg: #16a34a;
   --state-weak-authentic-bg: #f0fdf4;
-  --state-weak-authentic-fg: #15803d;
-  --state-neutral-bg: #f8fafc;
+  --state-weak-authentic-fg: #16a34a;
+  --state-neutral-bg: #f1f5f9;
   --state-neutral-fg: #64748b;
   --state-weak-manipulated-bg: #fffbeb;
-  --state-weak-manipulated-fg: #b45309;
+  --state-weak-manipulated-fg: #d97706;
   --state-strong-manipulated-bg: #fef2f2;
-  --state-strong-manipulated-fg: #b91c1c;
-  --state-unavailable-bg: #f8fafc;
+  --state-strong-manipulated-fg: #dc2626;
+  --state-unavailable-bg: #f1f5f9;
   --state-unavailable-fg: #64748b;
   --state-unavailable-border: #cbd5e1;
 
-  /* --- Typography Stacks ------------------------------------------------ */
-  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
-  --sans: system-ui, -apple-system, 'SF Pro Text', 'SF Pro Display', Roboto, Helvetica, Arial, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Text', system-ui, Roboto, sans-serif;
 
   --radius: 8px;
-  --radius-sm: 4px;
+  --radius-sm: 5px;
   --radius-lg: 12px;
 
-  /* --- Spacing Scale ---------------------------------------------------- */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -83,95 +128,139 @@
   --space-7: 48px;
   --space-8: 64px;
 
-  /* --- Type Scale ------------------------------------------------------- */
   --text-2xs: 10px;
   --text-xs: 11.5px;
   --text-sm: 13px;
-  --text-base: 14.5px;
-  --text-md: 16.5px;
-  --text-lg: 19px;
-  --text-xl: 23px;
-  --text-2xl: 29px;
-  --text-display: 38px;
-  --text-hero: 46px;
+  --text-base: 14px;
+  --text-md: 16px;
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-2xl: 26px;
 
   --leading-tight: 1.15;
   --leading-normal: 1.5;
   --leading-relaxed: 1.62;
 
   --label-size: 10.5px;
-  --label-tracking: 0.12em;
-
+  --label-tracking: 0.1em;
   --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
 
-  /* --- Compatibility aliases --------------------------------------------
-   * Some components/screens reference these older names. They resolve, via
-   * lazy var() substitution, to the canonical token in the current theme
-   * scope (so dark mode is honoured). New code should prefer the canonical
-   * names on the right. */
-  --primary: var(--accent);
-  --primary-deep: var(--accent-deep);
-  --font-mono: var(--mono);
-  --font-sans: var(--sans);
-  --bg-subtle: var(--surface-2);
-  --radius-md: var(--radius);
+  --brand-subtitle-color: #64748b;
+  --kpi-hover-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.08), 0 2px 6px -1px rgba(0, 0, 0, 0.04);
+  --integrity-scan-color: rgba(37, 99, 235, 0.12);
+  --stepper-done-bg: #16a34a;
+  --stepper-done-color: #ffffff;
 }
 
-/* --- Night Theme Tokens (Dark Graphite & Navy) -------------------------- */
+/* --- Forensic Command Center Dark Theme ---------------------------------- */
 [data-theme="dark"] {
-  --bg: #0d1117;
-  --sidebar-bg: #161b22;
-  --surface: #161b22;
-  --surface-2: #21262d;
-  --surface-3: #30363d;
-  --navy-surface: #090d13;
-  --navy-border: #30363d;
+  --bg: #090c14;
+  --sidebar-bg: #0a0d16;
+  --surface: #0f1422;
+  --surface-2: #141b2d;
+  --surface-3: #1a233a;
+  --navy-surface: #07090e;
+  --navy-border: #161e31;
 
-  --border: #30363d;
-  --border-strong: #484f58;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --border-accent: rgba(239, 68, 68, 0.4);
+  --card-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --card-glow: 0 4px 16px -2px rgba(0, 0, 0, 0.35);
 
-  --text: #c9d1d9;
-  --text-muted: #8b949e;
-  --text-faint: #6e7681;
-  --text-strong: #f0f6fc;
+  --text: #cbd5e1;
+  --text-muted: #8493a8;
+  --text-faint: #4e5d73;
+  --text-strong: #f8fafc;
 
-  --accent: #388bfd;
-  --accent-deep: #1f6beb;
-  --accent-bright: #58a6ff;
-  --accent-wash: rgba(56, 139, 253, 0.15);
-  --accent-soft: rgba(56, 139, 253, 0.25);
-  --accent-line: rgba(56, 139, 253, 0.4);
+  --accent: #ef4444;
+  --accent-deep: #dc2626;
+  --accent-bright: #f87171;
+  --accent-wash: rgba(239, 68, 68, 0.12);
+  --accent-soft: rgba(239, 68, 68, 0.2);
+  --accent-line: rgba(239, 68, 68, 0.35);
 
-  --telegram: #38bdf8;
-  --whatsapp: #4ade80;
-  --twitter: #94a3b8;
+  --btn-cta-bg: rgba(239, 68, 68, 0.15);
+  --btn-cta-border: #ef4444;
+  --btn-cta-color: #f87171;
+  --btn-cta-hover: #ef4444;
 
-  --ok: #3fb950;
-  --warn: #d29922;
-  --danger: #f85149;
-  --bar: #8b949e;
-  --info: #58a6ff;
+  --nav-active-bg: rgba(239, 68, 68, 0.12);
+  --nav-active-border: rgba(239, 68, 68, 0.4);
+  --nav-active-color: #f87171;
+  --nav-active-shadow: 0 0 12px -2px rgba(239, 68, 68, 0.18);
 
-  --ok-wash: rgba(63, 185, 80, 0.15);
-  --ok-line: rgba(63, 185, 80, 0.4);
-  --warn-wash: rgba(210, 153, 34, 0.15);
-  --warn-line: rgba(210, 153, 34, 0.4);
-  --danger-wash: rgba(248, 81, 73, 0.15);
-  --danger-line: rgba(248, 81, 73, 0.4);
-  --info-wash: rgba(88, 166, 255, 0.15);
-  --info-line: rgba(88, 166, 255, 0.4);
+  --stepper-active-bg: #ef4444;
+  --stepper-active-color: #ffffff;
 
-  --state-strong-authentic-bg: rgba(63, 185, 80, 0.15);
-  --state-strong-authentic-fg: #3fb950;
-  --state-weak-authentic-bg: rgba(63, 185, 80, 0.15);
-  --state-weak-authentic-fg: #3fb950;
-  --state-neutral-bg: rgba(139, 148, 158, 0.15);
-  --state-neutral-fg: #8b949e;
-  --state-weak-manipulated-bg: rgba(210, 153, 34, 0.15);
-  --state-weak-manipulated-fg: #d29922;
-  --state-strong-manipulated-bg: rgba(248, 81, 73, 0.15);
-  --state-strong-manipulated-fg: #f85149;
-  --state-unavailable-bg: rgba(110, 118, 129, 0.15);
-  --state-unavailable-fg: #8b949e;
-  --state-unavailable-border: #30363d;
+  --integrity-bg: radial-gradient(circle at 50% 50%, #0d1a33 0%, #080c16 100%);
+  --integrity-border: rgba(56, 189, 248, 0.25);
+  --integrity-badge-bg: rgba(0, 0, 0, 0.35);
+  --integrity-badge-border: rgba(255, 255, 255, 0.08);
+  --integrity-title-color: #38bdf8;
+
+  --status-card-bg: #0d121f;
+  --status-card-border: rgba(16, 185, 129, 0.2);
+
+  --stat-active-cases-border: rgba(239, 68, 68, 0.3);
+  --stat-active-cases-trend: #f87171;
+  --stat-active-cases-icon-bg: rgba(239, 68, 68, 0.12);
+  --stat-active-cases-icon-color: #ef4444;
+  --stat-active-cases-icon-border: rgba(239, 68, 68, 0.4);
+
+  --stat-evidence-border: rgba(56, 189, 248, 0.25);
+  --stat-evidence-trend: #38bdf8;
+  --stat-evidence-icon-bg: rgba(56, 189, 248, 0.1);
+  --stat-evidence-icon-color: #38bdf8;
+  --stat-evidence-icon-border: rgba(56, 189, 248, 0.4);
+
+  --stat-flagged-border: rgba(245, 158, 11, 0.3);
+  --stat-flagged-trend: #fbbf24;
+  --stat-flagged-icon-bg: rgba(245, 158, 11, 0.12);
+  --stat-flagged-icon-color: #f59e0b;
+  --stat-flagged-icon-border: rgba(245, 158, 11, 0.4);
+
+  --stat-pending-border: rgba(168, 85, 247, 0.3);
+  --stat-pending-trend: #c084fc;
+  --stat-pending-icon-bg: rgba(168, 85, 247, 0.12);
+  --stat-pending-icon-color: #a855f7;
+  --stat-pending-icon-border: rgba(168, 85, 247, 0.4);
+
+  --ok: #10b981;
+  --ok-bright: #34d399;
+  --warn: #f59e0b;
+  --warn-bright: #fbbf24;
+  --danger: #ef4444;
+  --danger-bright: #f87171;
+  --bar: #64748b;
+  --info: #38bdf8;
+
+  --ok-wash: rgba(16, 185, 129, 0.14);
+  --ok-line: rgba(16, 185, 129, 0.3);
+  --warn-wash: rgba(245, 158, 11, 0.14);
+  --warn-line: rgba(245, 158, 11, 0.3);
+  --danger-wash: rgba(239, 68, 68, 0.14);
+  --danger-line: rgba(239, 68, 68, 0.3);
+  --info-wash: rgba(56, 189, 248, 0.14);
+  --info-line: rgba(56, 189, 248, 0.3);
+
+  --state-strong-authentic-bg: rgba(16, 185, 129, 0.16);
+  --state-strong-authentic-fg: #34d399;
+  --state-weak-authentic-bg: rgba(16, 185, 129, 0.12);
+  --state-weak-authentic-fg: #34d399;
+  --state-neutral-bg: rgba(255, 255, 255, 0.05);
+  --state-neutral-fg: #94a3b8;
+  --state-weak-manipulated-bg: rgba(245, 158, 11, 0.14);
+  --state-weak-manipulated-fg: #fbbf24;
+  --state-strong-manipulated-bg: rgba(239, 68, 68, 0.16);
+  --state-strong-manipulated-fg: #f87171;
+  --state-unavailable-bg: rgba(255, 255, 255, 0.04);
+  --state-unavailable-fg: #64748b;
+  --state-unavailable-border: rgba(255, 255, 255, 0.1);
+
+  --brand-subtitle-color: #4e5d73;
+  --kpi-hover-shadow: 0 8px 20px -4px rgba(0, 0, 0, 0.45), 0 2px 6px -2px rgba(0, 0, 0, 0.25);
+  --integrity-scan-color: rgba(239, 68, 68, 0.12);
+  --stepper-done-bg: #10b981;
+  --stepper-done-color: #ffffff;
 }

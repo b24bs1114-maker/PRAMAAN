@@ -107,10 +107,11 @@ export function PropagationGraph({
             // A recorded-metadata link is dashed; a hash-verified link is solid.
             // The distinction matters: one is a claim, the other is a measurement.
             strokeDasharray={edge.verified_by_pramaan ? undefined : '3 3'}
+            style={{ animation: 'edgeDraw 300ms cubic-bezier(0.16, 1, 0.3, 1) backwards', animationDelay: `${i * 25}ms` }}
           />
         ))}
 
-        {placed.map(({ node, x, y }) => {
+        {placed.map(({ node, x, y }, idx) => {
           const isEarliest = node.evidence_id === earliestEvidenceId
           const isSubject = node.is_case_evidence
           const cls = `graph__node${
@@ -122,9 +123,13 @@ export function PropagationGraph({
               ? 'evidence under examination'
               : 'indexed instance'
           return (
-            <g key={node.evidence_id} className="graph__group">
+            <g
+              key={node.evidence_id}
+              className="graph__group"
+              style={{ animation: 'nodePop 240ms cubic-bezier(0.16, 1, 0.3, 1) backwards', animationDelay: `${idx * 35}ms` }}
+            >
               {/* Hover/focus tooltip; the table remains the accessible equivalent. */}
-              <title>{`${node.filename} — ${role} · ${orPlaceholder(node.platform)} · gen ${orPlaceholder(
+              <title>{`${node.filename} - ${role} · ${orPlaceholder(node.platform)} · gen ${orPlaceholder(
                 node.generation,
               )}`}</title>
               {isEarliest ? (

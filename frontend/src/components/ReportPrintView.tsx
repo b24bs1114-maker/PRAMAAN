@@ -1,5 +1,5 @@
 /**
- * ReportPrintView — frontend print-to-PDF matching the exact 3-page template.
+ * ReportPrintView - frontend print-to-PDF matching the exact 3-page template.
  */
 
 import { useEffect } from 'react'
@@ -58,7 +58,7 @@ export function ReportPrintView({
       <div className="print-report__toolbar no-print">
         <div className="print-report__brand">
           <span>PRAMAAN</span>
-          <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>Forensic report — 3-page template preview</span>
+          <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>Forensic report - 3-page template preview</span>
         </div>
         <div className="btn-row">
           <button type="button" className="btn" onClick={onClose}>
@@ -91,7 +91,7 @@ export function ReportPrintView({
           </div>
 
           <div className="print-summary-bar">
-            <div><span className="print-lbl">CASE ID</span><strong>{caseRecord?.case_id || '—'}</strong></div>
+            <div><span className="print-lbl">CASE ID</span><strong>{caseRecord?.case_id || '-'}</strong></div>
             <div><span className="print-lbl">EXAMINER</span><strong>{examiner.trim() || 'integration-check'}</strong></div>
             <div><span className="print-lbl">STATUS</span><strong>{(caseRecord?.status || 'open').toUpperCase()}</strong></div>
             <div><span className="print-lbl">EVIDENCE</span><strong>{evidenceList.length} items</strong></div>
@@ -132,9 +132,9 @@ export function ReportPrintView({
 
           <h2>CASE IDENTITY</h2>
           <div className="print-kv-grid">
-            <div><span className="print-lbl">Case number</span> <strong>{caseRecord?.case_number || '—'}</strong></div>
+            <div><span className="print-lbl">Case number</span> <strong>{caseRecord?.case_number || '-'}</strong></div>
             <div><span className="print-lbl">Report version</span> <strong>1.0</strong></div>
-            <div><span className="print-lbl">Created</span> <strong>{caseRecord?.created_at ? formatTimestamp(caseRecord.created_at) : '—'}</strong></div>
+            <div><span className="print-lbl">Created</span> <strong>{caseRecord?.created_at ? formatTimestamp(caseRecord.created_at) : '-'}</strong></div>
             <div><span className="print-lbl">Generated</span> <strong>{generatedAt}</strong></div>
           </div>
 
@@ -176,21 +176,21 @@ export function ReportPrintView({
               <tr>
                 <td>Perceptual matching</td>
                 <td>{propagation?.matched_candidate_count ? 'MATCHED' : 'NO MATCH'}</td>
-                <td>—</td>
+                <td>-</td>
                 <td>Excluded</td>
                 <td>No retained near-duplicate candidate in indexed corpus.</td>
               </tr>
               <tr>
                 <td>Metadata integrity</td>
                 <td>{signals.find(s => s.signal_id.includes('meta'))?.status || 'NOT PRESENT'}</td>
-                <td>—</td>
+                <td>-</td>
                 <td>Excluded</td>
                 <td>No EXIF metadata available for analysis.</td>
               </tr>
               <tr>
                 <td>C2PA provenance</td>
                 <td>{signals.find(s => s.signal_id.includes('c2pa'))?.status || 'NOT PRESENT'}</td>
-                <td>—</td>
+                <td>-</td>
                 <td>Excluded</td>
                 <td>No C2PA manifest found in file.</td>
               </tr>
@@ -209,13 +209,13 @@ export function ReportPrintView({
             <div><span className="print-lbl">DECLARED WEIGHTS</span> <span>AI 0.35 • pHash 0.20 • Metadata 0.20 • C2PA 0.15 • Compression 0.10</span></div>
             <div><span className="print-lbl">AVAILABLE COVERAGE</span> <span>{availSig} / {totalSig} signals • {covPct} of declared weight</span></div>
             <div><span className="print-lbl">FUSED SCORE</span> <span>{verdict?.arithmetic || '0.9969 x 0.7778 + 0.2097 x 0.2222 = 0.8220'}</span></div>
-            <div><span className="print-lbl">DECISION</span> <strong>{verdictStr} — {verdictStr.includes('MANIPULATED') ? 'above' : 'below'} threshold 0.65</strong></div>
+            <div><span className="print-lbl">DECISION</span> <strong>{verdictStr} - {verdictStr.includes('MANIPULATED') ? 'above' : 'below'} threshold 0.65</strong></div>
           </div>
 
           <h2>EVIDENCE INTEGRITY</h2>
           <div className="print-kv">
-            <div><span className="print-lbl">SHA-256</span> <span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{primaryEvidence?.sha256 || '—'}</span></div>
-            <div><span className="print-lbl">Dimensions</span> <span>{primaryEvidence ? `${primaryEvidence.width || 512} x ${primaryEvidence.height || 512} ${primaryEvidence.media_type.toUpperCase()}` : '—'}</span></div>
+            <div><span className="print-lbl">SHA-256</span> <span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{primaryEvidence?.sha256 || '-'}</span></div>
+            <div><span className="print-lbl">Dimensions</span> <span>{primaryEvidence ? `${primaryEvidence.width || 512} x ${primaryEvidence.height || 512} ${primaryEvidence.media_type.toUpperCase()}` : '-'}</span></div>
             <div><span className="print-lbl">pHash / dHash</span> <span style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>{primaryEvidence?.phash || 'b487e4860d796b65'} / {primaryEvidence?.dhash || 'ccac8c3acc8c8c3a'}</span></div>
             <div><span className="print-lbl">Synthetic corpus</span> <span>{primaryEvidence?.is_synthetic ? 'True' : 'False'}</span></div>
           </div>

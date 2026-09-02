@@ -11,7 +11,7 @@ import type { CSSProperties } from 'react'
  * built" tell a forensic tool cannot afford.
  *
  * Icons take colour from `currentColor`, so a caller sets the hue by setting
- * `color` on the icon or its container. Shape — never colour alone — carries
+ * `color` on the icon or its container. Shape - never colour alone - carries
  * the meaning, so a greyscale print or a colour-blind reader loses nothing.
  */
 
@@ -26,6 +26,7 @@ export type IconName =
   | 'upload'
   | 'download'
   | 'arrow-right'
+  | 'arrow-left'
   | 'refresh'
   | 'external'
   | 'lock'
@@ -47,6 +48,7 @@ const PATHS: Partial<Record<IconName, string>> = {
   upload: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12',
   download: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3',
   'arrow-right': 'M5 12h14M13 6l6 6-6 6',
+  'arrow-left': 'M19 12H5M11 18l-6-6 6-6',
   refresh: 'M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6',
   external: 'M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6',
   lock: 'M7 10V7a5 5 0 0 1 10 0v3M12 15v2',
@@ -108,7 +110,7 @@ export function Icon({
     )
   }
 
-  // The inconclusive mark: an outlined circle with its left half filled — the
+  // The inconclusive mark: an outlined circle with its left half filled - the
   // half-tone reads as "partial / undecided" in any colour or in greyscale.
   if (name === 'inconclusive') {
     return (

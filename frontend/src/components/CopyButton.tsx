@@ -5,7 +5,7 @@ import { Icon } from './Icon'
  * Copy-to-clipboard control.
  *
  * The workstation shows hashes and IDs in a shortened form for legibility; the
- * full value is never lost — it is one click away here. Briefly confirms the
+ * full value is never lost - it is one click away here. Briefly confirms the
  * copy so the operator knows the whole value (not the truncated display) landed
  * on the clipboard.
  */
@@ -46,9 +46,12 @@ export function CopyButton({
       onClick={copy}
       title={title ?? `Copy ${value}`}
       aria-label={title ?? `Copy full value`}
+      style={copied ? { color: 'var(--ok-bright)', borderColor: 'var(--ok-line)', background: 'var(--ok-wash)' } : undefined}
     >
-      <Icon name={copied ? 'check' : 'document'} size={13} />
-      {copied ? 'Copied' : label}
+      <span style={copied ? { animation: 'popCheck 200ms cubic-bezier(0.16, 1, 0.3, 1)', display: 'inline-flex' } : undefined}>
+        <Icon name={copied ? 'check' : 'document'} size={13} />
+      </span>
+      <span>{copied ? 'Copied' : label}</span>
     </button>
   )
 }

@@ -15,7 +15,7 @@
  *   - audit
  *   - settings
  *
- * Propagation, Multimodal and Alerts are no longer top-level routes — they now
+ * Propagation, Multimodal and Alerts are no longer top-level routes - they now
  * live inside Provenance, Analysis and the Dashboard respectively.
  */
 

@@ -1,10 +1,10 @@
 /**
- * ErrorBoundary — the app's last line of defence against a blank screen.
+ * ErrorBoundary - the app's last line of defence against a blank screen.
  *
  * A render-time exception in any screen would otherwise unmount the whole React
  * tree and leave an empty page with no explanation. This boundary catches it,
  * keeps the surrounding shell (header + sidebar) intact, and shows the actual
- * error plus a way to recover — because an honest error state is always better
+ * error plus a way to recover - because an honest error state is always better
  * than a blank one.
  *
  * It is deliberately generic: it wraps the routed screen in App, so every page
@@ -45,7 +45,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <div className="screen__head">
             <h1 className="screen__title">This screen hit an error</h1>
             <p className="screen__lead">
-              The page failed to render. Your case data is intact — nothing was written or lost.
+              The page failed to render. Your case data is intact - nothing was written or lost.
               Retry, or switch to another screen from the sidebar.
             </p>
           </div>

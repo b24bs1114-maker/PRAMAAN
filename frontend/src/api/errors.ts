@@ -84,7 +84,7 @@ export class ApiError extends Error {
       case 'validation':
         return this.details?.length
           ? `Request rejected: ${this.details
-              .map((d) => `${d.location.slice(-1).join('') || 'field'} — ${d.message}`)
+              .map((d) => `${d.location.slice(-1).join('') || 'field'} - ${d.message}`)
               .join('; ')}`
           : 'The backend rejected the request as invalid.'
       case 'server':

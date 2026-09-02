@@ -74,18 +74,18 @@ export function statusLabel(status: SignalStatus | string): string {
 export function exclusionSummary(status: SignalStatus | string): string {
   switch (status) {
     case 'NO_MATCH':
-      return 'No similar item found in index — excluded from the score.'
+      return 'No similar item found in index - excluded from the score.'
     case 'NOT_PRESENT':
     case 'NOT_FOUND':
-      return 'No metadata or C2PA manifest present — excluded from the score.'
+      return 'No metadata or C2PA manifest present - excluded from the score.'
     case 'UNAVAILABLE':
-      return 'Could not run in this deployment — excluded from the score.'
+      return 'Could not run in this deployment - excluded from the score.'
     case 'INCONCLUSIVE':
-      return 'Ran but could not decide — excluded from the score.'
+      return 'Ran but could not decide - excluded from the score.'
     case 'ERROR':
-      return 'Failed during analysis — excluded from the score.'
+      return 'Failed during analysis - excluded from the score.'
     case 'UNSUPPORTED_MEDIA':
-      return 'Does not apply to this media type — excluded from the score.'
+      return 'Does not apply to this media type - excluded from the score.'
     default:
       return 'Excluded from the score.'
   }
@@ -212,5 +212,5 @@ export function coverageLine(verdict: Verdict): string {
 /** Longer form, spelling out the fraction of the evidence base. */
 export function coverageSentence(verdict: Verdict): string {
   const pct = Math.round((verdict.signal_coverage ?? 0) * 100)
-  return `Verdict computed on ${verdict.signals_available} of ${verdict.signals_total} signals — ${pct}% of the evidence base by weight.`
+  return `Verdict computed on ${verdict.signals_available} of ${verdict.signals_total} signals - ${pct}% of the evidence base by weight.`
 }

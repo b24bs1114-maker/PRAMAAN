@@ -7,7 +7,7 @@
  */
 
 /** Placeholder for a value the backend did not measure. */
-export const NOT_MEASURED = '—'
+export const NOT_MEASURED = '-'
 
 export function formatBytes(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return NOT_MEASURED

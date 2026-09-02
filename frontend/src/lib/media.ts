@@ -4,7 +4,7 @@
  * The backend streams the stored bytes of one evidence item from
  * `GET /api/evidence/{id}/file` (append `?download=true` to force a download
  * rather than an inline preview). This is the only correct source for a preview
- * — never the JSON list endpoint. Reads here are plain GETs and write no audit
+ * - never the JSON list endpoint. Reads here are plain GETs and write no audit
  * rows.
  */
 import { apiUrl } from '../api'
