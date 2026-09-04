@@ -26,60 +26,66 @@ import { Icon } from '../components/Icon'
 import { Pill, type PillTone } from '../components/Pill'
 import { ProgressStrips } from '../components/ProgressStrips'
 import { Tabs } from '../components/Tabs'
-import { formatBytes, formatScore, formatWeight, shortHash } from '../lib/format'
+import { NOT_MEASURED, formatBytes, formatScore, formatWeight, shortHash } from '../lib/format'
 import { evidenceFileUrl, isImageMedia } from '../lib/media'
-import { isExcluded, signalPillVariant, statusLabel, verdictBandLabel, verdictTone } from '../lib/signals'
+import {
+  confidenceBandLabel,
+  confidenceBandNote,
+  isExcluded,
+  signalPillVariant,
+  statusLabel,
+  verdictBandLabel,
+  verdictTone,
+} from '../lib/signals'
 import { isReady, type Investigation } from '../state/useInvestigation'
 
+/**
+ * Contribution cell text.
+ *
+ * An excluded signal reads `- (excluded)`, never `0.0000 (Excluded)`. A
+ * four-decimal zero is a measurement, and printing one for a signal that was
+ * never measured is the single most common way a forensic UI lies: it puts a
+ * number in the evidence column that no detector produced.
+ */
 function formatContribution(contrib: number | null, excluded: boolean): string {
-  if (excluded) return '0.0000 (Excluded)'
-  if (contrib === null) return '-'
+  if (excluded) return `${NOT_MEASURED} (excluded)`
+  if (contrib === null) return NOT_MEASURED
   return `${contrib >= 0 ? '+' : ''}${formatScore(contrib, 4)}`
 }
 
-/** Evidence preview supporting Original vs Localization Heatmap Layer */
+/**
+ * Evidence preview.
+ *
+ * Shows the stored bytes as they are. There is no "Localization Heatmap Layer"
+ * toggle: this build has no endpoint that serves a heatmap. The previous version
+ * simulated one with `filter: hue-rotate(180deg) saturate(2.5)`, which recolours
+ * the whole frame uniformly and localizes nothing -- a false claim that a model
+ * had identified which regions were manipulated. The detector package can
+ * produce a real Grad-CAM (`ImageDetector.get_heatmap`), but until the backend
+ * exposes it there is nothing honest to display.
+ */
 function AnalysisMediaPreview({
   evidence,
 }: {
   evidence: Evidence
 }) {
   const [failed, setFailed] = useState(false)
-  const [viewMode, setViewMode] = useState<'original' | 'heatmap'>('original')
   const canShowImage = isImageMedia(evidence.media_type) && !failed
 
   return (
     <div className="stack" style={{ gap: 'var(--space-3)' }}>
-      {/* Segmented View Switcher */}
-      {canShowImage ? (
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-          <span className="label">EVIDENCE INSPECTION VIEWPORT</span>
-          <div className="heatmap-segmented">
-            <button
-              type="button"
-              className={`heatmap-segmented__btn${viewMode === 'original' ? ' heatmap-segmented__btn--active' : ''}`}
-              onClick={() => setViewMode('original')}
-            >
-              <Icon name="document" size={13} />
-              Original Evidence
-            </button>
-            <button
-              type="button"
-              className={`heatmap-segmented__btn${viewMode === 'heatmap' ? ' heatmap-segmented__btn--active' : ''}`}
-              onClick={() => setViewMode('heatmap')}
-            >
-              <Icon name="search" size={13} />
-              Localization Heatmap Layer
-            </button>
-          </div>
-        </div>
-      ) : null}
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+        <span className="label">EVIDENCE INSPECTION VIEWPORT</span>
+        <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-faint)', fontFamily: 'var(--mono)' }}>
+          STORED BYTES · NO LOCALIZATION OVERLAY AVAILABLE
+        </span>
+      </div>
 
       <div className="forensic-inspection-frame">
         {canShowImage ? (
           <img
             src={evidenceFileUrl(evidence.evidence_id)}
             alt={evidence.filename}
-            style={viewMode === 'heatmap' ? { filter: 'hue-rotate(180deg) saturate(2.5) contrast(1.2)' } : undefined}
             onError={() => setFailed(true)}
           />
         ) : (
@@ -97,6 +103,11 @@ function AnalysisMediaPreview({
           <span>{evidence.filename} · {formatBytes(evidence.size_bytes)}</span>
         </div>
       </div>
+
+      <p className="note" style={{ margin: 0 }}>
+        This build serves the original stored file only. It does not render a manipulation
+        localization map, so no region of this image is being marked as altered.
+      </p>
     </div>
   )
 }
@@ -144,7 +155,14 @@ export function Screen2Analysis({
     }
   }
 
-  const activeCaseNumber = caseRecord?.case_number || (result ? result.case.case_number : 'CAS-ACTIVE')
+  /**
+   * The case number as the backend recorded it.
+   *
+   * `NOT_MEASURED` when no case is loaded. The previous build synthesised
+   * `'CAS-ACTIVE'` here, which put a case-number-shaped string that belongs to no
+   * record at the top of a forensic assessment.
+   */
+  const activeCaseNumber = caseRecord?.case_number ?? result?.case.case_number ?? NOT_MEASURED
   const vTone = verdict ? verdictTone(verdict.verdict) : 'warn'
 
   return (
@@ -257,23 +275,29 @@ export function Screen2Analysis({
               >
                 {verdictBandLabel(verdict.verdict)}
               </div>
+              {/*
+                Decision-aid wording. "Verified authentic" is not available to
+                this build: the AUTHENTIC band means the assessed signals did not
+                support manipulation, which is a different and weaker statement.
+                An unavailable detector is not evidence of authenticity.
+              */}
               <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', lineHeight: 'var(--leading-normal)' }}>
                 {vTone === 'manipulated'
-                  ? 'The evidence shows strong digital manipulation.'
+                  ? 'The assessed signals support manipulation. Decision aid, not a legal conclusion.'
                   : vTone === 'authentic'
-                    ? 'The evidence is verified authentic across evaluated signals.'
-                    : 'Insufficient signal coverage to reach a definitive verdict.'}
+                    ? 'The assessed signals did not support manipulation. This is not a verification of authenticity.'
+                    : 'Insufficient signal coverage to conclude. Not a finding of authenticity or of manipulation.'}
               </span>
             </div>
 
-            {/* Box 2: CONFIDENCE */}
+            {/* Box 2: CONFIDENCE BAND (a word from the backend, never a percentage) */}
             <div className="card stack" style={{ padding: 'var(--space-4)', gap: 6, background: 'var(--surface-2)' }}>
-              <span className="label" style={{ color: 'var(--text-muted)' }}>CONFIDENCE</span>
+              <span className="label" style={{ color: 'var(--text-muted)' }}>CONFIDENCE BAND</span>
               <div style={{ fontSize: 'var(--text-xl)', fontWeight: 900, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
-                {verdict.confidence ? `${(Number(verdict.confidence) * 100).toFixed(0)}%` : '82%'}
+                {confidenceBandLabel(verdict.confidence)}
               </div>
-              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-                High Confidence
+              <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', lineHeight: 'var(--leading-normal)' }}>
+                {confidenceBandNote(verdict.confidence)}
               </span>
             </div>
 
@@ -281,10 +305,10 @@ export function Screen2Analysis({
             <div className="card stack" style={{ padding: 'var(--space-4)', gap: 6, background: 'var(--surface-2)' }}>
               <span className="label" style={{ color: 'var(--text-muted)' }}>SIGNAL COVERAGE</span>
               <div style={{ fontSize: 'var(--text-xl)', fontWeight: 900, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
-                {available} / {total || 14}
+                {available} / {total}
               </div>
               <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-                Signals Evaluated
+                Signals scored of signals considered
               </span>
             </div>
 
@@ -299,6 +323,12 @@ export function Screen2Analysis({
                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                     onError={(e) => { (e.currentTarget as HTMLElement).style.display = 'none' }}
                   />
+                  {/*
+                    The badge carries the media type and stored size, both from
+                    the evidence record. It used to read "0:00 / 1:45" -- a
+                    playback duration for a file whose duration this build never
+                    measured, on an image as readily as on a video.
+                  */}
                   <div
                     style={{
                       position: 'absolute',
@@ -312,7 +342,7 @@ export function Screen2Analysis({
                       color: '#ffffff',
                     }}
                   >
-                    0:00 / 1:45
+                    {primaryEvidence.media_type.toUpperCase()} · {formatBytes(primaryEvidence.size_bytes)}
                   </div>
                 </div>
               ) : (
@@ -396,18 +426,36 @@ export function Screen2Analysis({
                 WHY THIS VERDICT?
               </span>
 
-              <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-strong)', lineHeight: 'var(--leading-relaxed)', margin: 0 }}>
-                {verdict.rationale || 'Independent forensic models identified spatial-temporal face inconsistencies and neural synthesis artifacts with high confidence.'}
-              </p>
+              {/*
+                The rationale and the arithmetic are printed only if the backend
+                produced them. They used to fall back to hardcoded strings: a
+                rationale describing "spatial-temporal face inconsistencies ...
+                with high confidence" for evidence no face model had run on, and
+                a formula `Score = (0.35 * Face + 0.30 * Audio + 0.20 * Freq)`
+                that is not this system's fusion and whose weights sum to 0.85.
+              */}
+              {verdict.rationale ? (
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-strong)', lineHeight: 'var(--leading-relaxed)', margin: 0 }}>
+                  {verdict.rationale}
+                </p>
+              ) : (
+                <p className="note" style={{ margin: 0 }}>
+                  The backend did not return a rationale for this verdict.
+                </p>
+              )}
 
               <div style={{ background: 'var(--surface-3)', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
                 <span style={{ fontSize: '10px', textTransform: 'uppercase', fontFamily: 'var(--mono)', color: 'var(--text-faint)' }}>
                   Fusion Arithmetic
                 </span>
                 <div className="mono break-all" style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: 2 }}>
-                  {verdict.arithmetic || 'Score = (0.35 * Face + 0.30 * Audio + 0.20 * Freq)'}
+                  {verdict.arithmetic || 'Not reported by the backend for this verdict.'}
                 </div>
               </div>
+
+              {verdict.score_semantics ? (
+                <p className="note" style={{ margin: 0 }}>{verdict.score_semantics}</p>
+              ) : null}
 
               <div className="stack" style={{ gap: 8, marginTop: 'var(--space-2)' }}>
                 <button
@@ -514,15 +562,48 @@ export function Screen2Analysis({
                     <code className="mono break-all">{verdict.sha256}</code>
                     <CopyButton value={verdict.sha256} title="Copy SHA-256" />
                   </dd>
+                  <dt>Fused Manipulation Score</dt>
+                  <dd className="mono">
+                    {verdict.manipulation_score === null
+                      ? `${NOT_MEASURED} (no signal could be scored)`
+                      : `${formatScore(verdict.manipulation_score, 4)} on a 0-1 scale`}
+                  </dd>
+                  <dt>Confidence Band</dt>
+                  <dd className="mono">{confidenceBandLabel(verdict.confidence)}</dd>
                   <dt>Declared Weights Total</dt>
                   <dd className="mono">{verdict.declared_weight_total}</dd>
                   <dt>Available Weight Sum</dt>
                   <dd className="mono">{verdict.available_weight.toFixed(4)}</dd>
+                  <dt>Signal Coverage by Weight</dt>
+                  <dd className="mono">
+                    {typeof verdict.signal_coverage === 'number'
+                      ? verdict.signal_coverage.toFixed(4)
+                      : NOT_MEASURED}
+                  </dd>
+                  <dt>Primary Signal Available</dt>
+                  <dd>{verdict.primary_signal_available ? 'Yes' : 'No'}</dd>
                   <dt>Fusion Method</dt>
                   <dd>{verdict.method} ({verdict.fusion_version})</dd>
+                  {/*
+                    The gate is printed only when the backend published it. The
+                    previous `?? 0.4` fallback stated a coverage gate this system
+                    does not use -- the configured minimum is 0.30 -- so a reader
+                    checking the arithmetic against the printed gate would have
+                    reached the wrong conclusion about whether the verdict passed.
+                  */}
                   <dt>Gate Minimum Coverage</dt>
-                  <dd className="mono">{verdict.thresholds?.minimum_signal_coverage ?? 0.4}</dd>
+                  <dd className="mono">
+                    {typeof verdict.thresholds?.minimum_signal_coverage === 'number'
+                      ? verdict.thresholds.minimum_signal_coverage
+                      : `${NOT_MEASURED} (not published by the backend)`}
+                  </dd>
                 </dl>
+
+                {verdict.caveat ? (
+                  <p className="note" style={{ marginTop: 'var(--space-2)', marginBottom: 0 }}>
+                    {verdict.caveat}
+                  </p>
+                ) : null}
               </div>
             </details>
 
@@ -830,14 +911,23 @@ function DetectorPanel({ evidence }: { evidence: Evidence[] }) {
             <dd className="mono">
               {result.manipulation_score === null
                 ? result.abstained
-                  ? '- (abstained)'
-                  : '-'
+                  ? `${NOT_MEASURED} (model ran and abstained)`
+                  : `${NOT_MEASURED} (no score returned)`
                 : formatScore(result.manipulation_score, 4)}
             </dd>
-            <dt>Confidence</dt>
+            {/*
+              Confidence is shown only when the MODEL reported one. These
+              detectors do not: a confidence derived from the score carries no
+              extra information, and none of them ship with a calibration set.
+            */}
+            <dt>Model-reported Confidence</dt>
             <dd className="mono">
-              {result.confidence === null ? '-' : `${(result.confidence * 100).toFixed(1)}%`}
+              {result.confidence === null
+                ? `${NOT_MEASURED} (this model reports no calibrated confidence)`
+                : `${(result.confidence * 100).toFixed(1)}%`}
             </dd>
+            <dt>Status</dt>
+            <dd className="mono">{result.status}</dd>
             <dt>Model</dt>
             <dd>
               {result.model} <span className="muted">({result.model_version})</span>

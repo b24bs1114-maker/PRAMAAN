@@ -1296,6 +1296,20 @@ code,
   border: 1px solid rgba(245, 158, 11, 0.3);
 }
 
+/*
+ * `priority` is a free-text column on the case row (String(32), default
+ * "medium"), so a value other than high/medium can legitimately arrive. `--low`
+ * is styled here, and anything else falls back to the neutral `.badge-risk`
+ * base: an unrecognised priority is rendered verbatim in a colourless badge
+ * rather than being remapped onto one of the two tiers that happen to have a
+ * colour.
+ */
+.badge-risk--low {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-muted);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
 .flagged-item__time {
   font-family: var(--mono);
   font-size: 9.5px;

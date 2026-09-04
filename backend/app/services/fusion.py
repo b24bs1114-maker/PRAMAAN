@@ -32,6 +32,7 @@ own.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from app.config import Settings
@@ -141,6 +142,62 @@ def _signal(
 # --------------------------------------------------------------------------- #
 # Signal 1: AI detection
 # --------------------------------------------------------------------------- #
+def _detector_availability(
+    payload: dict[str, Any], status: str, abstained: bool | None
+) -> str:
+    """Which of the five detector outcomes this payload represents.
+
+    The API vocabulary for ``status`` has four tokens, and two genuinely
+    different situations share ``UNAVAILABLE``: no detector is installed, and a
+    detector that ran and declined to answer. Collapsing them loses the fact that
+    a model was actually applied to the evidence. The distinction is recoverable
+    from fields the payload already carries -- a declined run has a measured
+    inference time and the declined explanation -- so it is derived here and
+    published in ``evidence_basis`` rather than by adding a status token.
+
+    ``abstained`` is ``None`` when the payload did not declare the field at all.
+    An explicit ``True`` blocks inclusion (abstention is a valid outcome and the
+    detector's own word on it is final); absence does not, because absence is not
+    an abstention and inventing one would discard a real measurement.
+
+    Returns one of: ``scored``, ``ran_and_declined``, ``disabled_by_config``,
+    ``not_installed``, ``errored``, ``unsupported_media``.
+    """
+    if status == detector_service.STATUS_ERROR:
+        return "errored"
+    if status == detector_service.STATUS_UNSUPPORTED:
+        return "unsupported_media"
+    if status == detector_service.STATUS_OK and abstained is not True:
+        return "scored"
+    if status == detector_service.STATUS_OK and abstained is True:
+        # The detector reported success and an abstention in the same breath.
+        # It ran, so say so, and exclude it.
+        return "ran_and_declined"
+
+    detail = str(payload.get("detail") or payload.get("reason") or "")
+    if "disabled" in detail.lower():
+        return "disabled_by_config"
+    if detector_service.DECLINED_EXPLANATION[:60] in detail:
+        return "ran_and_declined"
+    # A measured inference time means the model was loaded and applied, whatever
+    # else went wrong afterwards.
+    if payload.get("inference_ms") is not None or payload.get("latency_ms") is not None:
+        return "ran_and_declined"
+    return "not_installed"
+
+
+#: How each availability outcome maps onto the fusion signal vocabulary. Every
+#: one of them is excluded from the fused score; the difference is what the
+#: record says happened, which is what a reader needs to judge the verdict.
+_AVAILABILITY_TO_SIGNAL_STATUS = {
+    "ran_and_declined": SIGNAL_INCONCLUSIVE,
+    "errored": SIGNAL_ERROR,
+    "unsupported_media": SIGNAL_UNSUPPORTED,
+    "disabled_by_config": SIGNAL_UNAVAILABLE,
+    "not_installed": SIGNAL_UNAVAILABLE,
+}
+
+
 def ai_detection_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
     """Wrap the detector adapter's output as a fusion signal."""
     if not payload:
@@ -152,45 +209,91 @@ def ai_detection_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
                 "The AI detector stage did not run for this item, so no score is "
                 "available. " + detector_service.UNAVAILABLE_EXPLANATION
             ),
+            basis={"availability": "not_installed", "detector_status": None},
         )
 
     status = str(payload.get("status", detector_service.STATUS_UNAVAILABLE))
     score = payload.get("score") if payload.get("score") is not None else payload.get("manipulation_score")
-    abstained = payload.get("abstained", False)
+    # Tri-state on purpose: True, False, or "the payload never said". An explicit
+    # abstention is decisive; silence is not turned into one. The previous code
+    # read `payload.get("abstained", False)`, which combined with the `or` below
+    # meant an ERROR payload carrying a leftover number was admitted to the fused
+    # score as a valid measurement.
+    declared = payload.get("abstained")
+    abstained = bool(declared) if declared is not None else None
+    availability = _detector_availability(payload, status, abstained)
     basis = {
         "model": payload.get("model"),
         "model_version": payload.get("model_version"),
         "adapter": payload.get("adapter"),
         "detector_status": status,
+        "availability": availability,
         "interface_version": payload.get("interface_version"),
         "inference_ms": payload.get("inference_ms") or payload.get("latency_ms"),
+        # Kept distinct from inference: a cold worker pays the checkpoint load,
+        # and folding that into the per-file time overstates it. ``None`` means
+        # either no load happened on this call or the adapter cannot split them.
+        "model_load_ms": payload.get("model_load_ms"),
     }
 
-    if (status == detector_service.STATUS_OK or not abstained) and isinstance(score, (int, float)):
+    # Inclusion requires BOTH a genuinely OK status AND a usable score. The
+    # previous condition was `(status == STATUS_OK or not abstained)`, whose `or`
+    # let any payload that merely failed to declare an abstention in as OK --
+    # including STATUS_ERROR and STATUS_UNSUPPORTED_MEDIA payloads that still
+    # carried a number. A score is usable only if it is a real, finite number in
+    # the 0..1 range the semantics declare; bools are rejected because `True`
+    # passes `isinstance(x, int)`.
+    score_is_valid = (
+        isinstance(score, (int, float))
+        and not isinstance(score, bool)
+        and math.isfinite(float(score))
+        and 0.0 <= float(score) <= 1.0
+    )
+    if availability == "scored" and score_is_valid:
         return _signal(
             "ai_detection",
-            score=float(score),
+            score=float(score),  # type: ignore[arg-type]
             status=SIGNAL_OK,
             explanation=(
                 f"Model {payload.get('model')} v{payload.get('model_version')} "
-                f"returned {float(score):.4f} for "
+                f"returned {float(score):.4f} for "  # type: ignore[arg-type]
                 f"{payload.get('label', 'ai_manipulation_likelihood')}. "
                 + detector_service.SCORE_SEMANTICS
             ),
             basis=basis,
         )
 
-    mapped = {
-        detector_service.STATUS_UNAVAILABLE: SIGNAL_UNAVAILABLE,
-        detector_service.STATUS_ERROR: SIGNAL_ERROR,
-        detector_service.STATUS_UNSUPPORTED: SIGNAL_UNSUPPORTED,
-    }.get(status, SIGNAL_UNAVAILABLE)
+    if availability == "scored" and not score_is_valid:
+        # The detector reported success and then handed over something that is
+        # not a score. That is a detector fault, recorded as one.
+        basis["rejected_score"] = repr(score)
+        return _signal(
+            "ai_detection",
+            score=None,
+            status=SIGNAL_ERROR,
+            explanation=(
+                "The detector reported success but returned no usable score "
+                f"({score!r} is not a finite number in 0..1), so the AI-detection "
+                "signal is excluded from fusion. This is NOT a finding of "
+                "authenticity and NOT a finding of manipulation."
+            ),
+            basis=basis,
+        )
+
+    mapped = _AVAILABILITY_TO_SIGNAL_STATUS.get(availability, SIGNAL_UNAVAILABLE)
     detail = payload.get("detail") or detector_service.UNAVAILABLE_EXPLANATION
+    prefix = {
+        "ran_and_declined": "The detector ran and returned no score",
+        "disabled_by_config": "The detector is disabled by configuration",
+        "not_installed": "No detector is installed in this deployment",
+        "errored": "The detector failed during analysis",
+        "unsupported_media": "The detector does not handle this media type",
+    }.get(availability, "No detector score")
     return _signal(
         "ai_detection",
         score=None,
         status=mapped,
-        explanation=f"No detector score ({status}). {detail}",
+        explanation=f"{prefix} ({status}). {detail}",
         basis=basis,
     )
 

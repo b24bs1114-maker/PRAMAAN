@@ -479,20 +479,42 @@ export interface ApiErrorEnvelope {
   request_id: string
 }
 
+/**
+ * `GET /api/dashboard/summary`.
+ *
+ * Mirrors `backend/app/schemas/api.py::DashboardSummaryResponse`. Several fields
+ * the backend has always returned were missing from this interface, which is why
+ * the dashboard invented substitutes for them: `verdict_breakdown` (real counts
+ * per verdict token) was replaced by `evidence_items_count * 0.17`, and
+ * `analysed_evidence_count` by nothing at all.
+ *
+ * `avg_processing_time_ms` is `null` when no run has been timed. An unmeasured
+ * pipeline is unknown, not instantaneous.
+ */
 export interface DashboardSummary {
   active_investigations_count: number
   evidence_items_count: number
   flagged_media_count: number
   pending_review_count: number
+  unanalysed_case_count?: number
   high_priority_count?: number
   evidence_breakdown?: { video: number; image: number; audio: number }
+  /** Count of evidence rows that have a fused verdict on record. */
+  analysed_evidence_count?: number
+  /** Real per-verdict counts, keyed by the backend's own verdict token. */
+  verdict_breakdown?: Record<string, number>
   avg_processing_time_ms: number | null
+  avg_processing_time_basis?: string | null
+  timed_analysis_runs?: number
   recent_investigations: CaseRecord[]
   recent_evidence: Evidence[]
   flagged_media?: Evidence[]
+  flagged_media_truncated?: boolean
   current_case_summary: CaseRecord | null
   system_status: string
   system_status_details?: Record<string, string>
+  metric_definitions?: Record<string, string>
+  notes?: string[]
 }
 
 export interface DetectResult {

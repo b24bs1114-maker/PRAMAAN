@@ -119,14 +119,55 @@ def test_image_is_built_on_python_312():
 
 
 def test_container_runs_as_a_non_root_user():
-    users = [line.split()[1] for line in _instruction("USER")]
-    assert users, "no USER instruction: the container would run as root"
-    assert users[-1] != "root"
+    """No ``USER`` directive: privileges are dropped by the entrypoint instead.
+
+    A ``USER`` line cannot be used here, because the process that has to prepare
+    the mounted disk (a Render disk or a ``docker run -v`` volume is root-owned at
+    first mount, and the evidence store, case database and audit chain all live on
+    it) must still be root when the container starts. So the image starts as root
+    and ``backend/docker-entrypoint.py`` chowns the storage, setuid()s to the
+    unprivileged account and execs the CMD. The guarantee is the same -- the
+    server process is unprivileged -- and it is asserted here against the
+    mechanism that actually provides it.
+    """
+    assert not _instruction("USER"), (
+        "a USER directive would run the entrypoint unprivileged, and it could then "
+        "not prepare a root-owned mount; the entrypoint drops privileges itself"
+    )
+
+    entrypoints = _instruction("ENTRYPOINT")
+    assert len(entrypoints) == 1, entrypoints
+    argv = _json_array(entrypoints[0])
+    assert argv[:1] == ["python"], argv
+    assert argv[-1].endswith("docker-entrypoint.py"), argv
+
+    source = (BACKEND_DIR / "docker-entrypoint.py").read_text(encoding="utf-8")
+    # setgid before setuid (the reverse is already forbidden), and exec rather
+    # than spawn, so the unprivileged server inherits PID 1 and Render's SIGTERM.
+    assert source.index("os.setgid(") < source.index("os.setuid("), source
+    assert "os.execvp(" in source
+    assert "subprocess" not in source, "the CMD must be exec'd, not spawned"
 
     lines = _dockerfile_lines()
-    user_at = max(i for i, line in enumerate(lines) if line.startswith("USER "))
+    entrypoint_at = max(i for i, line in enumerate(lines) if line.startswith("ENTRYPOINT "))
     cmd_at = max(i for i, line in enumerate(lines) if line.startswith("CMD "))
-    assert user_at < cmd_at, "USER must be dropped before CMD"
+    assert entrypoint_at < cmd_at, "the privilege-dropping ENTRYPOINT precedes CMD"
+
+
+def test_the_runtime_account_exists_and_owns_the_storage_paths():
+    """``useradd`` and the ``chown`` that makes the baked directories writable."""
+    body = DOCKERFILE.read_text(encoding="utf-8")
+    assert re.search(r"useradd\s+--uid\s+1000\s+--gid\s+1000", body), (
+        "the runtime account must be created with a fixed uid so a bind-mounted "
+        "host directory can be chowned to match it"
+    )
+    assert re.search(r"chown\s+-R\s+pramaan:pramaan", body), body
+    env = _dockerfile_env()
+    assert env.get("PRAMAAN_DATA_DIR") == "/data"
+    # The entrypoint prepares exactly the directories the settings name.
+    source = (BACKEND_DIR / "docker-entrypoint.py").read_text(encoding="utf-8")
+    for name in ("PRAMAAN_DATA_DIR", "PRAMAAN_REPORTS_DIR", "PRAMAAN_CORPUS_DIR"):
+        assert name in source, f"{name} is set in the image but never prepared"
 
 
 def test_every_copy_source_exists_and_survives_dockerignore():

@@ -1,26 +1,34 @@
 /**
- * Screen: Case Detail (Screen 3).
+ * Screen: Case Detail.
  *
- * Visual reproduction of Panel 3 from visual collage:
- * 1. Top bar: "← Back to Cases" · "Edit Case"
- * 2. Meta bar: CASE ID | TITLE / SUBJECT | PRIORITY | STATUS | CREATED | ASSIGNED TO
- * 3. 6-Phase Stepper: Case → Evidence → Analysis → Provenance → Audit → Report
- * 4. 3-Column Grid:
- *    - CASE SUMMARY (Description, Context, Platform, Language, Region, "View full details →")
- *    - EVIDENCE SUMMARY (Large icon, Total Evidence, Videos / Images / Docs, "View evidence →")
- *    - CASE NOTES (Bullet points of chronological logs, "View notes →")
- * 5. Bottom Banner: NEXT ACTION (Contextual guidance + Red CTA button)
+ * The dossier header for one case: identifiers, workflow position, evidence
+ * counts and the recorded custody events.
+ *
+ * Every field here is a column on the case row, a count over the real evidence
+ * list, or an audit event fetched from the backend. The previous build filled
+ * the same layout with a fictional case when a field was absent -- title
+ * "Deepfake Video - Telegram Channel", priority "high", status "Analysis
+ * Complete", examiner "Analyst", a description about a Telegram
+ * misinformation channel, and a CASE NOTES column of four invented log lines
+ * ("Video received from Cyber Cell", "Multiple reuploads identified"). It also
+ * showed `Platform: Telegram / Language: Hindi / Region: India` as though they
+ * were case attributes; the backend stores none of those three on a case, and
+ * `platform` exists only per evidence item, where it may be null.
+ *
+ * A case with an unset field now reads as unset. That is the difference between
+ * a dossier and a mock-up.
  */
 
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import type { CaseRecord, Evidence } from '../api/types'
+import type { AuditEvent, CaseRecord, Evidence } from '../api/types'
 import { ErrorBanner } from '../components/Banner'
 import { Empty, Spinner } from '../components/Feedback'
 import { Icon } from '../components/Icon'
 import { Pill, type PillTone } from '../components/Pill'
-import { formatTimestampShort } from '../lib/format'
+import { NOT_MEASURED, formatTimestampShort, orPlaceholder, shortHash } from '../lib/format'
 import type { RoutePath } from '../lib/router'
+import { verdictBandLabel } from '../lib/signals'
 import { isReady, type Investigation } from '../state/useInvestigation'
 
 function priorityTone(priority: string | undefined): PillTone {
@@ -51,6 +59,15 @@ export function ScreenCaseDetail({
   const [caseEvidence, setCaseEvidence] = useState<Evidence[]>(evidence)
   const [loading, setLoading] = useState(!caseRecord && Boolean(caseId))
   const [error, setError] = useState<unknown>(null)
+  /**
+   * Recorded custody events for the third column.
+   *
+   * Held separately from `error` on purpose: the audit read is supplementary, so
+   * a failure there must not blank out a case dossier that loaded fine. It is
+   * still surfaced in the column rather than swallowed.
+   */
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[] | null>(null)
+  const [auditError, setAuditError] = useState<unknown>(null)
 
   const currentCaseId = caseId || caseRecord?.case_id || null
 
@@ -77,18 +94,59 @@ export function ScreenCaseDetail({
     }
   }, [currentCaseId])
 
+  useEffect(() => {
+    if (!currentCaseId) return
+    let active = true
+    setAuditEvents(null)
+    setAuditError(null)
+    api
+      .auditTrail(currentCaseId)
+      .then((trail) => {
+        if (active) setAuditEvents(trail.events)
+      })
+      .catch((err) => {
+        if (active) setAuditError(err)
+      })
+    return () => {
+      active = false
+    }
+  }, [currentCaseId])
+
   const c = activeCase
-  const activeCaseNumber = c?.case_number || (currentCaseId ? `CAS-${currentCaseId.slice(0, 8)}` : 'CAS-ACTIVE')
+  /**
+   * The case number as issued by the backend.
+   *
+   * No synthesised alternative: the old fallback chain minted
+   * `CAS-${case_id.slice(0, 8)}` and finally the literal `CAS-ACTIVE`, both of
+   * which look exactly like a real case number and are not one. If the row has
+   * no `case_number`, the internal id is shown under its own label instead.
+   */
+  const activeCaseNumber = c?.case_number || null
 
   const analysisData =
     isReady(analysis) && analysis.data.case.case_id === currentCaseId ? analysis.data : null
   const isPropTraced = isReady(propagation) && (propagation.data.instance_count > 0 || propagation.data.matched_candidate_count > 0)
   const isAuditVerified = isReady(auditVerification) && auditVerification.data.valid
 
-  // Media breakdown counts
-  const videoCount = caseEvidence.filter((e) => e.media_type.toLowerCase().includes('video')).length || 1
-  const imageCount = caseEvidence.filter((e) => e.media_type.toLowerCase().includes('image')).length || 0
-  const docCount = caseEvidence.filter((e) => !e.media_type.toLowerCase().includes('video') && !e.media_type.toLowerCase().includes('image')).length || 0
+  // Media breakdown. Counts are counts -- a case with no video has no video, and
+  // the old `|| 1` reported one anyway on every single case.
+  const videoCount = caseEvidence.filter((e) => e.media_type.toLowerCase().includes('video')).length
+  const imageCount = caseEvidence.filter((e) => e.media_type.toLowerCase().includes('image')).length
+  const audioCount = caseEvidence.filter((e) => e.media_type.toLowerCase().includes('audio')).length
+  const otherCount = caseEvidence.length - videoCount - imageCount - audioCount
+
+  /** Platforms actually recorded against this case's evidence rows. */
+  const platforms = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          caseEvidence
+            .map((e) => e.platform)
+            .filter((p): p is string => Boolean(p && p.trim())),
+        ),
+      ),
+    [caseEvidence],
+  )
 
   // 6-step workflow states
   const isCaseDone = true
@@ -118,20 +176,20 @@ export function ScreenCaseDetail({
     }
     if (!isProvenanceDone) {
       return {
-        text: 'Trace provenance to identify earliest known instance of this video.',
+        text: 'Trace propagation to find the earliest known instance of this media in the indexed evidence corpus.',
         btn: 'Trace Provenance →',
         action: () => onNavigate('provenance', { caseId: currentCaseId! }),
       }
     }
     if (!isAuditDone) {
       return {
-        text: 'Verify cryptographic audit chain before generating formal report.',
+        text: 'Verify the custody hash chain before generating the formal report.',
         btn: 'Verify Audit →',
         action: () => onNavigate('audit', { caseId: currentCaseId! }),
       }
     }
     return {
-      text: 'Generate court-admissible forensic examination report.',
+      text: 'Generate the backend-rendered forensic examination report for this case.',
       btn: 'Generate Report →',
       action: () => onNavigate('reports', { caseId: currentCaseId! }),
     }
@@ -203,10 +261,10 @@ export function ScreenCaseDetail({
         <div className="row row--wrap" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 16 }}>
           <div className="stack" style={{ gap: 2 }}>
             <span style={{ fontSize: '10px', textTransform: 'uppercase', color: 'var(--text-faint)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
-              CASE ID
+              {activeCaseNumber ? 'CASE NUMBER' : 'INTERNAL CASE ID'}
             </span>
             <code style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: 'var(--accent-bright)' }}>
-              #{activeCaseNumber}
+              {activeCaseNumber ? `#${activeCaseNumber}` : shortHash(currentCaseId, 12)}
             </code>
           </div>
 
@@ -215,7 +273,7 @@ export function ScreenCaseDetail({
               TITLE / SUBJECT
             </span>
             <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--text-strong)' }}>
-              {c?.title || 'Deepfake Video - Telegram Channel'}
+              {c?.title?.trim() ? c.title : <span style={{ color: 'var(--text-faint)', fontWeight: 500 }}>No title recorded</span>}
             </span>
           </div>
 
@@ -224,7 +282,11 @@ export function ScreenCaseDetail({
               PRIORITY
             </span>
             <div>
-              <Pill variant={priorityTone(c?.priority)}>{(c?.priority || 'high').toUpperCase()}</Pill>
+              {c?.priority ? (
+                <Pill variant={priorityTone(c.priority)}>{c.priority.toUpperCase()}</Pill>
+              ) : (
+                <Pill variant="neutral">{NOT_MEASURED}</Pill>
+              )}
             </div>
           </div>
 
@@ -233,7 +295,11 @@ export function ScreenCaseDetail({
               STATUS
             </span>
             <div>
-              <Pill variant={statusTone(c?.status)}>{(c?.status || 'Analysis Complete').toUpperCase()}</Pill>
+              {c?.status ? (
+                <Pill variant={statusTone(c.status)}>{c.status.toUpperCase()}</Pill>
+              ) : (
+                <Pill variant="neutral">{NOT_MEASURED}</Pill>
+              )}
             </div>
           </div>
 
@@ -242,16 +308,17 @@ export function ScreenCaseDetail({
               CREATED
             </span>
             <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
-              {formatTimestampShort(c?.created_at ?? new Date().toISOString())}
+              {/* Not `?? new Date()`: an unrecorded creation time is not now. */}
+              {formatTimestampShort(c?.created_at ?? null)}
             </span>
           </div>
 
           <div className="stack" style={{ gap: 2 }}>
             <span style={{ fontSize: '10px', textTransform: 'uppercase', color: 'var(--text-faint)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
-              ASSIGNED TO
+              EXAMINER
             </span>
             <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-strong)', fontWeight: 600 }}>
-              {c?.examiner || 'Analyst'}
+              {c?.examiner?.trim() ? c.examiner : 'Not specified'}
             </span>
           </div>
         </div>
@@ -342,25 +409,46 @@ export function ScreenCaseDetail({
               CASE SUMMARY
             </span>
             <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', lineHeight: 'var(--leading-normal)', margin: 0 }}>
-              {c?.description || 'Investigation regarding deepfake video circulating on Telegram channel with potential misinformation impact.'}
+              {c?.description?.trim() ? (
+                c.description
+              ) : (
+                <span style={{ color: 'var(--text-faint)' }}>
+                  No description was recorded when this case was opened.
+                </span>
+              )}
             </p>
 
+            {/*
+              Only fields the case row or the evidence rows actually carry.
+              `Language` and `Region` are gone entirely -- the backend has no such
+              columns, so the previous "Hindi" and "India" were not defaults, they
+              were assertions about a case nobody had entered. `Platform` is a
+              per-evidence field and is reported as observed, never inferred.
+            */}
             <div className="stack" style={{ gap: 6, fontSize: 'var(--text-xs)', borderTop: '1px solid var(--border)', paddingTop: 10 }}>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-faint)' }}>Context:</span>
-                <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>Unknown</span>
+              <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
+                <span style={{ color: 'var(--text-faint)' }}>Complaint ref:</span>
+                <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>
+                  {orPlaceholder(c?.complaint_reference)}
+                </span>
               </div>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-faint)' }}>Platform:</span>
-                <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>Telegram</span>
+              <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
+                <span style={{ color: 'var(--text-faint)' }}>Platforms observed:</span>
+                <span style={{ color: 'var(--text-strong)', fontWeight: 600, textAlign: 'right' }}>
+                  {platforms.length > 0 ? platforms.join(', ') : 'None recorded'}
+                </span>
               </div>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-faint)' }}>Language:</span>
-                <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>Hindi</span>
+              <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
+                <span style={{ color: 'var(--text-faint)' }}>Latest verdict:</span>
+                <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>
+                  {c?.latest_verdict ? verdictBandLabel(c.latest_verdict) : 'Not analysed'}
+                </span>
               </div>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-faint)' }}>Region:</span>
-                <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>India</span>
+              <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
+                <span style={{ color: 'var(--text-faint)' }}>Last updated:</span>
+                <span style={{ color: 'var(--text-strong)', fontWeight: 600, fontFamily: 'var(--mono)' }}>
+                  {formatTimestampShort(c?.updated_at ?? null)}
+                </span>
               </div>
             </div>
           </div>
@@ -400,7 +488,7 @@ export function ScreenCaseDetail({
                 <Icon name="document" size={26} />
               </div>
               <div style={{ fontSize: 'var(--text-xl)', fontWeight: 800, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
-                {caseEvidence.length || 1}
+                {caseEvidence.length}
               </div>
               <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                 Total Evidence
@@ -412,19 +500,25 @@ export function ScreenCaseDetail({
                 <span style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
                   {videoCount}
                 </span>
-                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>Videos</span>
+                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>Video</span>
               </div>
               <div className="stack" style={{ alignItems: 'center', gap: 2 }}>
                 <span style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
                   {imageCount}
                 </span>
-                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>Images</span>
+                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>Image</span>
               </div>
               <div className="stack" style={{ alignItems: 'center', gap: 2 }}>
                 <span style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
-                  {docCount}
+                  {audioCount}
                 </span>
-                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>Documents</span>
+                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>Audio</span>
+              </div>
+              <div className="stack" style={{ alignItems: 'center', gap: 2 }}>
+                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
+                  {otherCount}
+                </span>
+                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>Other</span>
               </div>
             </div>
           </div>
@@ -439,31 +533,53 @@ export function ScreenCaseDetail({
           </button>
         </div>
 
-        {/* Column 3: CASE NOTES */}
+        {/*
+          Column 3: RECORDED CUSTODY EVENTS.
+
+          This replaces a "CASE NOTES" column that listed four fixed bullets on
+          every case ("Video received from Cyber Cell", "Multiple reuploads
+          identified", "Provenance analysis pending"). The backend stores no
+          free-text case notes, so there was nothing behind them. What it does
+          store is the append-only audit trail, which is the case's actual
+          chronological record -- so that is what is shown.
+        */}
         <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)', justifyContent: 'space-between' }}>
           <div className="stack" style={{ gap: 'var(--space-3)' }}>
             <span className="label" style={{ color: 'var(--text-strong)', letterSpacing: '0.06em' }}>
-              CASE NOTES
+              RECORDED CUSTODY EVENTS
             </span>
 
-            <div className="stack" style={{ gap: 8, fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-              <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
-                <span style={{ color: 'var(--accent-bright)' }}>•</span>
-                <span>Initial investigation started on {formatTimestampShort(c?.created_at ?? null)}</span>
+            {auditError ? (
+              <ErrorBanner context="Audit trail" error={auditError} />
+            ) : auditEvents === null ? (
+              <Spinner label="Reading custody chain…" />
+            ) : auditEvents.length === 0 ? (
+              <Empty>No custody events are recorded against this case yet.</Empty>
+            ) : (
+              <div className="stack" style={{ gap: 8, fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                {auditEvents
+                  .slice(-5)
+                  .reverse()
+                  .map((ev) => (
+                    <div key={ev.audit_id} className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
+                      <span style={{ color: 'var(--accent-bright)' }}>•</span>
+                      <div className="stack" style={{ gap: 1 }}>
+                        <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>
+                          {ev.event}
+                        </span>
+                        <span style={{ fontFamily: 'var(--mono)', fontSize: '10px', color: 'var(--text-faint)' }}>
+                          #{ev.seq} · {formatTimestampShort(ev.timestamp)} · {ev.actor} ·{' '}
+                          {shortHash(ev.row_hash, 8)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>
+                  Showing the {Math.min(5, auditEvents.length)} most recent of {auditEvents.length}{' '}
+                  recorded event(s).
+                </span>
               </div>
-              <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
-                <span style={{ color: 'var(--accent-bright)' }}>•</span>
-                <span>Video received from Cyber Cell</span>
-              </div>
-              <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
-                <span style={{ color: 'var(--accent-bright)' }}>•</span>
-                <span>Multiple reuploads identified</span>
-              </div>
-              <div className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
-                <span style={{ color: 'var(--accent-bright)' }}>•</span>
-                <span>Provenance analysis pending</span>
-              </div>
-            </div>
+            )}
           </div>
 
           <button
@@ -472,7 +588,7 @@ export function ScreenCaseDetail({
             style={{ color: 'var(--accent-bright)', paddingLeft: 0, justifyContent: 'flex-start' }}
             onClick={() => onNavigate('audit', { caseId: currentCaseId })}
           >
-            View notes →
+            View full custody chain →
           </button>
         </div>
       </div>

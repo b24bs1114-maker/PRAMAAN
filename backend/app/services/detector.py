@@ -419,6 +419,14 @@ class DetectorResult:
     model_version: str = "0"
     weights_hash: str = ""
     latency_ms: float | None = None
+    #: Time spent loading weights into memory, when a load happened on this call.
+    #:
+    #: Adapters load lazily, so the first ``analyse()`` of a process pays the
+    #: checkpoint load. Folding that into ``latency_ms`` reported a multi-second
+    #: model load as this file's inference time, which is not a property of the
+    #: file. ``None`` means no load occurred on this call (already resident) or
+    #: the adapter does not load weights at all.
+    model_load_ms: float | None = None
     explanation: str = UNAVAILABLE_EXPLANATION
     heatmap_available: bool = False
     regions: list[dict[str, Any]] = field(default_factory=list)
@@ -459,6 +467,16 @@ class DetectorAdapter(ABC):
     def available(self) -> tuple[bool, str | None]:
         """(usable, reason_if_not)"""
 
+    def prepare(self) -> bool:
+        """Load weights ahead of inference. Return True if a load happened.
+
+        Adapters load lazily inside ``_infer``, which meant the checkpoint load
+        was measured as inference time on the first call of a process. Overriding
+        this lets ``analyse()`` time the two separately. The default is a no-op
+        for adapters that hold no weights.
+        """
+        return False
+
     def _infer(
         self, file_path: Path
     ) -> tuple[Any, float | None, dict[str, Any]] | tuple[Any, dict[str, Any]]:
@@ -473,15 +491,26 @@ class DetectorAdapter(ABC):
         """SHA-256 of this adapter's weights file, or ``""`` when unknown."""
         return weights_digest(self.model_path)
 
+    def reported_identity(self) -> tuple[str, str, str]:
+        """``(model, model_version, weights_hash)`` as this adapter may claim them.
+
+        One source for both ``describe()`` and ``_abstain()``. They disagreed:
+        ``describe()`` withheld a name the adapter had no right to while
+        ``_abstain()`` stamped it onto every result, so the status endpoint and
+        the detection record for the same empty socket named different models.
+        """
+        return self.model_name, self.model_version, self.weights_hash()
+
     def describe(self) -> dict[str, Any]:
         usable, reason = self.available()
+        model, model_version, digest = self.reported_identity()
         return {
             "adapter": self.id,
             "modality": self.modality,
-            "model": self.model_name,
-            "model_version": self.model_version,
+            "model": model,
+            "model_version": model_version,
             "model_path": str(self.model_path) if self.model_path else None,
-            "weights_hash": self.weights_hash(),
+            "weights_hash": digest,
             "available": usable,
             "reason": reason,
             "interface_version": INTERFACE_VERSION,
@@ -495,23 +524,35 @@ class DetectorAdapter(ABC):
         status: str,
         detail: str,
         latency_ms: float | None = None,
+        model_load_ms: float | None = None,
     ) -> DetectorResult:
         """One abstention shape for every reason to abstain.
 
         ``manipulation_score`` and ``confidence`` are ``None`` -- not 0.0, not
         0.5. An abstention carries the reason, never a number that could be read
         as a measurement.
+
+        The identity comes from ``reported_identity()``, so a socket that cannot
+        score anything names no model here either. It used to read
+        ``self.model_name``/``self.weights_hash()`` directly: with
+        ``PRAMAAN_VIDEO_MODEL_PATH`` pointed at the image checkpoint, every video
+        abstention was recorded -- in the analysis record, in the audit row and
+        in the PDF's MODEL RECORD -- as coming from "SwinB-AI-Image-Detector"
+        with that checkpoint's SHA-256, asserting that an image model had been
+        involved in examining a video it never touched.
         """
+        model, model_version, digest = self.reported_identity()
         return DetectorResult(
             media_type=media_type,
             label="ai_manipulation_likelihood",
             manipulation_score=None,
             confidence=None,
             abstained=True,
-            model=self.model_name,
-            model_version=self.model_version,
-            weights_hash=self.weights_hash(),
+            model=model,
+            model_version=model_version,
+            weights_hash=digest,
             latency_ms=latency_ms,
+            model_load_ms=model_load_ms,
             status=status,
             detail=detail,
             explanation=detail,
@@ -540,6 +581,28 @@ class DetectorAdapter(ABC):
                 media_type=media_type, status=STATUS_UNAVAILABLE, detail=detail
             )
 
+        # Load weights outside the inference timer. Adapters load lazily, so
+        # without this the first call of a process reported several seconds of
+        # checkpoint load as this file's inference latency.
+        load_ms: float | None = None
+        load_started = time.perf_counter()
+        try:
+            if self.prepare():
+                load_ms = round((time.perf_counter() - load_started) * 1000, 2)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Detector %s could not load weights: %s: %s",
+                self.id,
+                exc.__class__.__name__,
+                exc,
+            )
+            return self._abstain(
+                media_type=media_type,
+                status=STATUS_ERROR,
+                detail=f"Detector weights failed to load ({exc.__class__.__name__}).",
+                model_load_ms=round((time.perf_counter() - load_started) * 1000, 2),
+            )
+
         started = time.perf_counter()
         try:
             res = self._infer(Path(file_path))
@@ -561,6 +624,7 @@ class DetectorAdapter(ABC):
                 status=STATUS_ERROR,
                 detail=f"Detector inference failed ({exc.__class__.__name__}).",
                 latency_ms=round((time.perf_counter() - started) * 1000, 2),
+                model_load_ms=load_ms,
             )
 
         elapsed = round((time.perf_counter() - started) * 1000, 2)
@@ -575,6 +639,7 @@ class DetectorAdapter(ABC):
                 status=STATUS_UNAVAILABLE,
                 detail=DECLINED_EXPLANATION,
                 latency_ms=elapsed,
+                model_load_ms=load_ms,
             )
 
         try:
@@ -585,6 +650,7 @@ class DetectorAdapter(ABC):
                 status=STATUS_ERROR,
                 detail=f"Detector returned a non-numeric score ({score!r}).",
                 latency_ms=elapsed,
+                model_load_ms=load_ms,
             )
 
         if not 0.0 <= score_val <= 1.0:
@@ -595,6 +661,7 @@ class DetectorAdapter(ABC):
                 status=STATUS_ERROR,
                 detail=f"Detector returned an out-of-range score ({score!r}).",
                 latency_ms=elapsed,
+                model_load_ms=load_ms,
             )
 
         model = str(extras.get("model") or self.model_name)
@@ -620,6 +687,7 @@ class DetectorAdapter(ABC):
             model_version=model_version,
             weights_hash=str(extras.get("weights_hash") or self.weights_hash()),
             latency_ms=elapsed,
+            model_load_ms=load_ms,
             explanation=explanation,
             heatmap_available=bool(extras.get("heatmap_available", False)),
             regions=list(extras.get("regions") or []),
@@ -799,6 +867,11 @@ class OnnxDetector(DetectorAdapter):
             )
         return True, None
 
+    def prepare(self) -> bool:
+        already_resident = self._session is not None
+        self._load()
+        return not already_resident
+
     def _load(self) -> Any:
         if self._session is None:
             import onnxruntime
@@ -858,6 +931,11 @@ class TorchScriptDetector(DetectorAdapter):
                 "detector cannot run."
             )
         return True, None
+
+    def prepare(self) -> bool:
+        already_resident = self._module is not None
+        self._load()
+        return not already_resident
 
     def _load(self) -> Any:
         if self._module is None:
@@ -962,20 +1040,25 @@ class PluginDetector(DetectorAdapter):
             return False, reason
         return self._readiness(fn)
 
-    def describe(self) -> dict[str, Any]:
-        """As ``DetectorAdapter.describe``, minus any borrowed identity.
+    def reported_identity(self) -> tuple[str, str, str]:
+        """As ``DetectorAdapter.reported_identity``, minus any borrowed identity.
 
-        ``model_name`` and ``weights_hash`` are derived from whatever file is at
-        ``model_path``. When that file is not one this plug-in can use, naming it
-        makes the status page report the wrong model: the video slot advertised
-        "SwinB-AI-Image-Detector" and the image checkpoint's digest while being
-        unable to score a single frame. An unusable slot names no model.
+        ``model_name``, ``model_version`` and ``weights_hash`` are all derived
+        from whatever file sits at ``model_path`` -- via its sidecar spec for the
+        first two and its bytes for the third. When that file is not one this
+        plug-in can use, reporting them names the wrong model: the video slot
+        advertised "SwinB-AI-Image-Detector" 3.0.0 and the image checkpoint's
+        digest while being unable to score a single frame. An unusable socket
+        names no model, no version and no weights.
+
+        ``model_path`` is deliberately *not* blanked by ``describe()``: it states
+        what this deployment configured, and hiding a video slot pointed at an
+        image checkpoint would hide the misconfiguration itself.
         """
-        described = super().describe()
-        if described["available"] is False:
-            described["model"] = "none"
-            described["weights_hash"] = ""
-        return described
+        usable, _ = self.available()
+        if not usable:
+            return "none", "", ""
+        return super().reported_identity()
 
     def _readiness(self, fn: Callable[..., Any]) -> tuple[bool, str | None]:
         """Ask the plug-in whether its checkpoint can actually produce a score.
@@ -1005,6 +1088,27 @@ class PluginDetector(DetectorAdapter):
         return False, reason or (
             f"The configured {self.modality} detector cannot produce a score."
         )
+
+    def prepare(self) -> bool:
+        """Warm the plug-in's checkpoint, if the plug-in offers a way to.
+
+        The inference callable lives outside this module and loads its own
+        weights, so the only honest way to time that load separately is to ask
+        the plug-in to do it first. A plug-in may export
+        ``load_checkpoint(model_path) -> bool`` returning True when the call
+        actually loaded weights (rather than finding them already resident). A
+        plug-in that exports no such hook is left alone and the load stays
+        inside the inference measurement, as before -- an unmeasurable split is
+        reported as ``model_load_ms=None``, never as a guess.
+        """
+        fn, _ = self._inference()
+        if fn is None:
+            return False
+        module = sys.modules.get(getattr(fn, "__module__", "") or "")
+        hook = getattr(module, "load_checkpoint", None)
+        if not callable(hook):
+            return False
+        return bool(hook(str(self.model_path) if self.model_path else None))
 
     def _infer(self, file_path: Path) -> tuple[Any, Any, dict[str, Any]]:
         fn, reason = self._inference()
@@ -1203,6 +1307,14 @@ class ImageDetector(DetectorAdapter):
                 return True, None
             reasons.append(f"{adapter.id}: {reason}")
         return False, "; ".join(reasons)
+
+    def prepare(self) -> bool:
+        """Delegate to whichever backend will run, so its load is timed as a load."""
+        active = self._active()
+        if active is None:
+            return False
+        self.active = active
+        return active.prepare()
 
     def _infer(
         self, file_path: Path

@@ -152,7 +152,17 @@ def run_detector(
     path = storage.absolute_path(evidence.stored_path, settings)
     result = adapter.analyse(path, media_type=evidence.media_type)
     payload = result.to_dict()
-    payload["adapter"] = adapter.id
+    # The socket that actually handled the file, not the dispatcher that routed
+    # it. ``adapter.id`` is "multimodal_dispatcher" for every modality, so an
+    # abstention for a video was recorded -- in the analysis record, in the audit
+    # row and in the PDF's MODEL RECORD -- as having come from the dispatcher,
+    # which says nothing about which detector was missing. The dispatcher already
+    # publishes the routed socket in ``extras``; it was being discarded here.
+    extras = result.extras if isinstance(result.extras, dict) else {}
+    payload["adapter"] = str(extras.get("routed_adapter") or adapter.id)
+    payload["dispatcher"] = adapter.id
+    if extras.get("routed_modality"):
+        payload["routed_modality"] = extras["routed_modality"]
     payload["cached"] = False
 
     stored = analysis_store.store_result(
@@ -175,7 +185,8 @@ def run_detector(
         actor=actor,
         details={
             "evidence_id": evidence.id,
-            "adapter": adapter.id,
+            "adapter": payload["adapter"],
+            "dispatcher": adapter.id,
             "model": result.model,
             "model_version": result.model_version,
             "status": result.status,

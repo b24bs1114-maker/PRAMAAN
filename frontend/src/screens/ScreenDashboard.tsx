@@ -1,22 +1,56 @@
 /**
  * Screen: Dashboard - PRAMAAN Investigation Command Center.
  *
- * Exact visual replication of the approved forensic command center design:
- * 1. Title: INVESTIGATION COMMAND CENTER + Priorities, evidence risk and case activity + "+ New Case"
- * 2. 4 KPI Cards (Active Cases, Evidence Items, Flagged Evidence, Pending Review)
- * 3. QUICK ACTIONS boxed container (Upload Evidence, Generate Report, Share Case, Add Note)
- * 4. Main Row: RISK OVERVIEW (200px Donut + Legend) + PRIORITY CASES (5-row interactive queue)
- * 5. Bottom Row: RECENT ACTIVITY (5 horizontal forensic activity cards)
+ * Every number on this screen comes from `GET /api/dashboard/summary`. The
+ * previous build derived most of them from the row index instead, which is worth
+ * spelling out because the result looked completely convincing:
+ *
+ *   - PRIORITY CASES assigned `priority`, a status dot, a status sentence, a
+ *     verdict, a verdict dot and an SLA countdown from `idx`. Row 0 was always
+ *     "high / Analysis Complete / Manipulated / 02:14:37 Remaining" no matter
+ *     which real case landed there. Two real cases could not both be shown as
+ *     the same priority, and a case with no verdict was still given one.
+ *   - The evidence count fell back to `idx === 0 ? 5 : ...` and the case number
+ *     to `20260901-000${8 - idx}`.
+ *   - RECENT ACTIVITY was five hardcoded tiles: `video_deepfake.mp4` uploaded
+ *     5m ago, report `#2047` generated 15m ago, and so on. None of it referred
+ *     to anything in the database.
+ *   - RISK OVERVIEW split the evidence into high/medium/low risk, where medium
+ *     was `Math.round(totalEvidence * 0.17)` -- a risk tier computed from a
+ *     constant. The backend publishes `verdict_breakdown`, which is the real
+ *     disposition of the evidence, so that is what the donut now shows.
+ *   - The four KPI cards fell back to 12 / 84 / 7 / 3 when the request failed
+ *     or returned nothing, so an empty deployment looked like a busy unit.
+ *
+ * The rule applied throughout: a field the backend did not send is rendered as
+ * `NOT_MEASURED`, and a section with no rows says it has no rows.
  */
 
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import type { DashboardSummary } from '../api/types'
+import type { DashboardSummary, Evidence } from '../api/types'
 import { ErrorBanner } from '../components/Banner'
-import { Spinner } from '../components/Feedback'
-import { getFlagshipDemoCases } from '../lib/curated'
+import { Empty, Spinner } from '../components/Feedback'
+import { Icon, mediaIcon } from '../components/Icon'
+import { Pill } from '../components/Pill'
+import { NOT_MEASURED, formatBytes, formatTimestampShort, orPlaceholder } from '../lib/format'
 import type { RoutePath } from '../lib/router'
+import { verdictBandLabel, verdictTone } from '../lib/signals'
 import type { Investigation } from '../state/useInvestigation'
+
+/**
+ * The disposition bands the donut draws, in ring order.
+ *
+ * These are the backend's own verdict tokens plus one derived band for evidence
+ * that has not been analysed yet. "Not yet analysed" is not a risk level and is
+ * not shaded as one -- it is the absence of a measurement.
+ */
+const DISPOSITION_BANDS = [
+  { key: 'MANIPULATED', label: 'Evidence supports manipulation', colour: '#ef4444' },
+  { key: 'INSUFFICIENT_EVIDENCE', label: 'Inconclusive', colour: '#f59e0b' },
+  { key: 'AUTHENTIC', label: 'No manipulation evidence found', colour: '#10b981' },
+  { key: '__UNANALYSED__', label: 'Not yet analysed', colour: 'var(--surface-3)' },
+] as const
 
 export function ScreenDashboard({
   investigation: _investigation,
@@ -53,30 +87,52 @@ export function ScreenDashboard({
     }
   }, [])
 
-  const rawCases = summary?.recent_investigations ?? []
-  const curatedCases = useMemo(() => getFlagshipDemoCases(rawCases), [rawCases])
-  const priorityCases = useMemo(() => curatedCases.slice(0, 5), [curatedCases])
+  /**
+   * The case queue, in the order the backend returned it.
+   *
+   * `recent_investigations` is ordered by the backend. It is not re-sorted or
+   * truncated to a curated three here: hiding real cases from an investigator's
+   * queue, or reordering them to make a demo read well, is not a presentation
+   * choice a case-management screen gets to make.
+   */
+  const caseQueue = useMemo(
+    () => (summary?.recent_investigations ?? []).slice(0, 6),
+    [summary?.recent_investigations],
+  )
 
   const openCase = (caseId: string) => {
     onSelectCase(caseId)
     onNavigate('case-detail', { caseId })
   }
 
-  // Calculate live count and percentages for Risk Overview
-  const totalEvidence = summary?.evidence_items_count ?? 84
-  const highRiskCount = summary?.flagged_media_count ?? 7
-  const medRiskCount = Math.round(totalEvidence * 0.17)
-  const lowRiskCount = totalEvidence - highRiskCount - medRiskCount
+  const totalEvidence = summary?.evidence_items_count ?? 0
+  const analysed = summary?.analysed_evidence_count ?? 0
+  const breakdown = summary?.verdict_breakdown ?? {}
 
-  const highPct = totalEvidence > 0 ? Math.round((highRiskCount / totalEvidence) * 100) : 8
-  const medPct = totalEvidence > 0 ? Math.round((medRiskCount / totalEvidence) * 100) : 17
-  const lowPct = 100 - highPct - medPct
+  /** Real per-verdict counts, with the unanalysed remainder as its own band. */
+  const dispositions = useMemo(() => {
+    const unanalysed = Math.max(0, totalEvidence - analysed)
+    return DISPOSITION_BANDS.map((band) => ({
+      ...band,
+      count: band.key === '__UNANALYSED__' ? unanalysed : (breakdown[band.key] ?? 0),
+    }))
+  }, [breakdown, totalEvidence, analysed])
 
-  // SVG Circumference for r=78 is 490.088
-  const C = 490.088
-  const lowDash = (lowPct / 100) * C
-  const medDash = (medPct / 100) * C
-  const highDash = (highPct / 100) * C
+  /**
+   * Donut geometry. Percentages are of the whole evidence set, so the ring is
+   * only complete when every item has been analysed -- the gap is the honest
+   * visual for "we have not looked at these yet".
+   */
+  const C = 490.088 // circumference at r=78
+  const denominator = dispositions.reduce((sum, d) => sum + d.count, 0)
+  let offset = 0
+  const arcs = dispositions.map((d) => {
+    const fraction = denominator > 0 ? d.count / denominator : 0
+    const dash = fraction * C
+    const arc = { ...d, dash, offset, percent: Math.round(fraction * 100) }
+    offset += dash
+    return arc
+  })
 
   if (loading) {
     return (
@@ -99,243 +155,108 @@ export function ScreenDashboard({
       {/* 1. Header Row */}
       <div className="dashboard-welcome-row">
         <div>
-          <h1 className="dashboard-welcome-title" style={{ letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+          <h1
+            className="dashboard-welcome-title"
+            style={{ letterSpacing: '0.04em', textTransform: 'uppercase' }}
+          >
             INVESTIGATION COMMAND CENTER
           </h1>
           <p className="dashboard-welcome-subtitle">
-            Priorities, evidence risk and case activity
+            Case load, evidence disposition and system state — all counts read from the case
+            database
           </p>
         </div>
 
-        <button
-          type="button"
-          className="btn-new-case"
-          onClick={() => onNavigate('intake')}
-        >
+        <button type="button" className="btn-new-case" onClick={() => onNavigate('intake')}>
           <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
           <span>New Case</span>
         </button>
       </div>
 
-      {/* 2. Top 4 Metric Cards */}
+      {/* 2. Top 4 Metric Cards. No fallback literals: 0 means zero rows matched. */}
       <div className="dashboard-stat-row">
-        {/* ACTIVE CASES */}
-        <div className="dashboard-stat-card dashboard-stat-card--red">
-          <div className="dashboard-stat-card__left">
-            <span className="dashboard-stat-card__label">ACTIVE CASES</span>
-            <div className="dashboard-stat-card__val">
-              <span className="dashboard-stat-card__val-num">
-                {summary?.active_investigations_count ?? 12}
-              </span>
-            </div>
-          </div>
-          <div className="dashboard-stat-card__icon-box dashboard-stat-card__icon-box--red">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-            </svg>
-          </div>
-        </div>
-
-        {/* EVIDENCE ITEMS */}
-        <div className="dashboard-stat-card dashboard-stat-card--cyan">
-          <div className="dashboard-stat-card__left">
-            <span className="dashboard-stat-card__label">EVIDENCE ITEMS</span>
-            <div className="dashboard-stat-card__val">
-              <span className="dashboard-stat-card__val-num">
-                {totalEvidence}
-              </span>
-            </div>
-          </div>
-          <div className="dashboard-stat-card__icon-box dashboard-stat-card__icon-box--cyan">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <ellipse cx="12" cy="5" rx="9" ry="3" />
-              <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-              <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
-            </svg>
-          </div>
-        </div>
-
-        {/* FLAGGED EVIDENCE */}
-        <div className="dashboard-stat-card dashboard-stat-card--amber">
-          <div className="dashboard-stat-card__left">
-            <span className="dashboard-stat-card__label">FLAGGED EVIDENCE</span>
-            <div className="dashboard-stat-card__val">
-              <span className="dashboard-stat-card__val-num">
-                {highRiskCount}
-              </span>
-            </div>
-          </div>
-          <div className="dashboard-stat-card__icon-box dashboard-stat-card__icon-box--amber">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
-              <line x1="4" y1="22" x2="4" y2="15" />
-            </svg>
-          </div>
-        </div>
-
-        {/* PENDING REVIEW */}
-        <div className="dashboard-stat-card dashboard-stat-card--purple">
-          <div className="dashboard-stat-card__left">
-            <span className="dashboard-stat-card__label">PENDING REVIEW</span>
-            <div className="dashboard-stat-card__val">
-              <span className="dashboard-stat-card__val-num">
-                {summary?.pending_review_count ?? 3}
-              </span>
-            </div>
-          </div>
-          <div className="dashboard-stat-card__icon-box dashboard-stat-card__icon-box--purple">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <polyline points="12 6 12 12 16 14" />
-            </svg>
-          </div>
-        </div>
+        <StatCard
+          label="ACTIVE CASES"
+          value={summary?.active_investigations_count}
+          tone="red"
+          icon="layers"
+        />
+        <StatCard label="EVIDENCE ITEMS" value={summary?.evidence_items_count} tone="cyan" icon="evidence" />
+        <StatCard label="FLAGGED EVIDENCE" value={summary?.flagged_media_count} tone="amber" icon="flag" />
+        <StatCard label="PENDING REVIEW" value={summary?.pending_review_count} tone="purple" icon="clock" />
       </div>
 
-      {/* 3. QUICK ACTIONS Boxed Container */}
+      {/* 3. QUICK ACTIONS */}
       <div className="dashboard-quick-actions-box">
         <div className="dashboard-quick-actions-box__title">QUICK ACTIONS</div>
         <div className="dashboard-quick-actions-grid">
-          {/* Action 1: Upload Evidence */}
-          <button
-            type="button"
-            className="quick-action-card quick-action-card--primary"
+          <QuickAction
+            primary
+            tone="red"
+            icon="upload"
+            name="Upload Evidence"
+            desc="Ingest &amp; seal new media"
             onClick={() => onNavigate('intake')}
-          >
-            <div className="quick-action-card__icon quick-action-card__icon--red">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="17 8 12 3 7 8" />
-                <line x1="12" y1="3" x2="12" y2="15" />
-              </svg>
-            </div>
-            <div className="quick-action-card__content">
-              <div className="quick-action-card__name">Upload Evidence</div>
-              <div className="quick-action-card__desc">Ingest &amp; seal new media</div>
-            </div>
-          </button>
-
-          {/* Action 2: Generate Report */}
-          <button
-            type="button"
-            className="quick-action-card"
+          />
+          <QuickAction
+            tone="blue"
+            icon="document"
+            name="Generate Report"
+            desc="Backend-rendered forensic PDF"
             onClick={() => onNavigate('reports')}
-          >
-            <div className="quick-action-card__icon quick-action-card__icon--blue">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-                <line x1="16" y1="13" x2="8" y2="13" />
-                <line x1="16" y1="17" x2="8" y2="17" />
-                <polyline points="10 9 9 9 8 9" />
-              </svg>
-            </div>
-            <div className="quick-action-card__content">
-              <div className="quick-action-card__name">Generate Report</div>
-              <div className="quick-action-card__desc">Official forensic opinion</div>
-            </div>
-          </button>
-
-          {/* Action 3: Share Case */}
-          <button
-            type="button"
-            className="quick-action-card"
-            onClick={() => {
-              if (navigator.clipboard) {
-                navigator.clipboard.writeText(window.location.href)
-              }
-            }}
-          >
-            <div className="quick-action-card__icon quick-action-card__icon--cyan">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="18" cy="5" r="3" />
-                <circle cx="6" cy="12" r="3" />
-                <circle cx="18" cy="19" r="3" />
-                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
-                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
-              </svg>
-            </div>
-            <div className="quick-action-card__content">
-              <div className="quick-action-card__name">Share Case</div>
-              <div className="quick-action-card__desc">Copy investigation link</div>
-            </div>
-          </button>
-
-          {/* Action 4: Add Note */}
-          <button
-            type="button"
-            className="quick-action-card"
+          />
+          <QuickAction
+            tone="purple"
+            icon="lock"
+            name="Audit Trail"
+            desc="Verify the custody hash chain"
+            onClick={() => onNavigate('audit')}
+          />
+          <QuickAction
+            tone="green"
+            icon="search"
+            name="Browse Cases"
+            desc="Open the full case list"
             onClick={() => onNavigate('cases')}
-          >
-            <div className="quick-action-card__icon quick-action-card__icon--green">
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-              </svg>
-            </div>
-            <div className="quick-action-card__content">
-              <div className="quick-action-card__name">Add Note</div>
-              <div className="quick-action-card__desc">Update case annotations</div>
-            </div>
-          </button>
+          />
         </div>
       </div>
 
-      {/* 4. MAIN CONTENT ROW: RISK OVERVIEW (Left) + PRIORITY CASES (Right) */}
+      {/* 4. EVIDENCE DISPOSITION + CASE QUEUE */}
       <div className="dashboard-main-split-grid">
-        {/* Left: RISK OVERVIEW Panel */}
         <div className="card dashboard-card risk-overview-panel">
           <div className="dashboard-card__header-row">
             <div className="row" style={{ gap: 6, alignItems: 'center' }}>
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)' }}>
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-              </svg>
-              <span className="dashboard-card__title">RISK OVERVIEW</span>
+              <Icon name="shield" size={15} style={{ color: 'var(--text-muted)' }} />
+              <span className="dashboard-card__title">EVIDENCE DISPOSITION</span>
             </div>
           </div>
 
           <div className="risk-overview-body">
-            {/* 200px Donut Chart */}
             <div className="risk-donut-box">
               <svg width="200" height="200" viewBox="0 0 200 200" className="risk-donut-svg-200">
-                {/* Background Ring */}
-                <circle cx="100" cy="100" r="78" fill="transparent" stroke="var(--surface-3)" strokeWidth="18" />
-                {/* Low Risk Ring (Green) */}
                 <circle
                   cx="100"
                   cy="100"
                   r="78"
                   fill="transparent"
-                  stroke="#10b981"
+                  stroke="var(--surface-3)"
                   strokeWidth="18"
-                  strokeDasharray={`${lowDash} ${C}`}
-                  strokeDashoffset="0"
-                  transform="rotate(-90 100 100)"
                 />
-                {/* Medium Risk Ring (Amber) */}
-                <circle
-                  cx="100"
-                  cy="100"
-                  r="78"
-                  fill="transparent"
-                  stroke="#f59e0b"
-                  strokeWidth="18"
-                  strokeDasharray={`${medDash} ${C}`}
-                  strokeDashoffset={`-${lowDash}`}
-                  transform="rotate(-90 100 100)"
-                />
-                {/* High Risk Ring (Red) */}
-                <circle
-                  cx="100"
-                  cy="100"
-                  r="78"
-                  fill="transparent"
-                  stroke="#ef4444"
-                  strokeWidth="18"
-                  strokeDasharray={`${highDash} ${C}`}
-                  strokeDashoffset={`-${lowDash + medDash}`}
-                  transform="rotate(-90 100 100)"
-                />
+                {arcs.map((arc) => (
+                  <circle
+                    key={arc.key}
+                    cx="100"
+                    cy="100"
+                    r="78"
+                    fill="transparent"
+                    stroke={arc.colour}
+                    strokeWidth="18"
+                    strokeDasharray={`${arc.dash} ${C}`}
+                    strokeDashoffset={`-${arc.offset}`}
+                    transform="rotate(-90 100 100)"
+                  />
+                ))}
               </svg>
               <div className="risk-donut-box__center">
                 <span className="risk-donut-box__num">{totalEvidence}</span>
@@ -343,49 +264,46 @@ export function ScreenDashboard({
               </div>
             </div>
 
-            {/* Risk Breakdown Legend */}
             <div className="risk-breakdown-legend">
-              <div className="risk-legend-row">
-                <div className="risk-legend-row__left">
-                  <span className="risk-color-box risk-color-box--red" />
-                  <span className="risk-legend-row__label">High Risk</span>
+              {arcs.map((arc) => (
+                <div className="risk-legend-row" key={arc.key}>
+                  <div className="risk-legend-row__left">
+                    <span
+                      className="risk-color-box"
+                      style={{ background: arc.colour }}
+                      aria-hidden="true"
+                    />
+                    <span className="risk-legend-row__label">{arc.label}</span>
+                  </div>
+                  <span className="risk-legend-row__val">
+                    {arc.count}
+                    {denominator > 0 ? ` (${arc.percent}%)` : ''}
+                  </span>
                 </div>
-                <span className="risk-legend-row__val">{highRiskCount} ({highPct}%)</span>
-              </div>
-
-              <div className="risk-legend-row">
-                <div className="risk-legend-row__left">
-                  <span className="risk-color-box risk-color-box--amber" />
-                  <span className="risk-legend-row__label">Medium Risk</span>
-                </div>
-                <span className="risk-legend-row__val">{medRiskCount} ({medPct}%)</span>
-              </div>
-
-              <div className="risk-legend-row">
-                <div className="risk-legend-row__left">
-                  <span className="risk-color-box risk-color-box--green" />
-                  <span className="risk-legend-row__label">Low Risk</span>
-                </div>
-                <span className="risk-legend-row__val">{lowRiskCount} ({lowPct}%)</span>
-              </div>
+              ))}
             </div>
           </div>
 
           <div className="risk-overview-footer">
-            <button
-              type="button"
-              className="risk-analytics-link"
-              onClick={() => onNavigate('reports')}
+            <p
+              style={{
+                fontSize: '10.5px',
+                color: 'var(--text-muted)',
+                margin: 0,
+                lineHeight: 1.5,
+              }}
             >
-              View detailed risk analytics →
-            </button>
+              {analysed} of {totalEvidence} evidence items have a fused verdict on record. Bands are
+              the backend's verdict tokens, not risk scores — “no manipulation evidence found” is a
+              non-finding, not a verification of authenticity.
+            </p>
           </div>
         </div>
 
-        {/* Right: PRIORITY CASES Table Panel */}
+        {/* CASE QUEUE — every column is a real field or a placeholder */}
         <div className="card dashboard-card priority-cases-panel">
           <div className="dashboard-card__header-row">
-            <span className="dashboard-card__title">PRIORITY CASES</span>
+            <span className="dashboard-card__title">CASE QUEUE</span>
             <button
               type="button"
               className="dashboard-card__view-all"
@@ -395,165 +313,263 @@ export function ScreenDashboard({
             </button>
           </div>
 
-          <div className="priority-cases-table-wrap">
-            <table className="priority-cases-table">
-              <thead>
-                <tr>
-                  <th>PRIORITY</th>
-                  <th>CASE ID</th>
-                  <th>STATUS</th>
-                  <th>EVIDENCE</th>
-                  <th>VERDICT</th>
-                  <th>SLA / UPDATED</th>
-                  <th aria-label="Action" style={{ width: 24 }} />
-                </tr>
-              </thead>
-              <tbody>
-                {priorityCases.map((c, idx) => {
-                  const priority = idx === 0 || idx === 1 ? 'high' : idx === 2 ? 'medium' : 'low'
-                  const statusDot = idx === 0 || idx === 3 ? 'green' : idx === 1 ? 'amber' : 'blue'
-                  const statusText = idx === 0 ? 'Analysis Complete' : idx === 1 ? 'In Review' : idx === 2 ? 'Evidence Ingested' : idx === 3 ? 'Analysis Complete' : 'Report Generated'
-                  const verdictText = idx === 0 || idx === 1 ? 'Manipulated' : idx === 2 ? 'Insufficient' : 'Authentic'
-                  const verdictDot = idx === 0 || idx === 1 ? 'red' : idx === 2 ? 'amber' : 'green'
-                  const slaText = idx === 0 ? '02:14:37 Remaining' : idx === 1 ? '01:42:18 Remaining' : idx === 2 ? '03:00:12 Remaining' : idx === 3 ? 'Updated 1h ago' : 'Updated 2h ago'
-                  const isSlaCount = idx <= 2
-
-                  return (
-                    <tr
-                      key={c.case_id}
-                      className="priority-case-tr"
-                      onClick={() => openCase(c.case_id)}
-                      tabIndex={0}
-                      role="button"
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault()
-                          openCase(c.case_id)
-                        }
-                      }}
-                    >
-                      <td>
-                        <span className={`badge-risk badge-risk--${priority}`}>
-                          {priority.toUpperCase()}
-                        </span>
-                      </td>
-                      <td>
-                        <span className="priority-case-id-text">
-                          #{c.case_number || `20260901-000${8 - idx}`}
-                        </span>
-                      </td>
-                      <td>
-                        <div className="row" style={{ gap: 6, alignItems: 'center' }}>
-                          <span className={`status-circle status-circle--${statusDot}`} />
-                          <span className="priority-status-text">{statusText}</span>
-                        </div>
-                      </td>
-                      <td>
-                        <span className="priority-evidence-text">
-                          {c.evidence_count ?? (idx === 0 ? 5 : idx === 1 ? 3 : idx === 2 ? 4 : idx === 3 ? 2 : 6)} items
-                        </span>
-                      </td>
-                      <td>
-                        <div className="row" style={{ gap: 6, alignItems: 'center' }}>
-                          <span className={`status-circle status-circle--${verdictDot}`} />
-                          <span className="priority-verdict-text">{verdictText}</span>
-                        </div>
-                      </td>
-                      <td>
-                        <span className={`priority-sla-text${isSlaCount ? ' priority-sla-text--count' : ''}`}>
-                          {slaText}
-                        </span>
-                      </td>
-                      <td>
-                        <span className="priority-row-chevron">›</span>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+          {caseQueue.length === 0 ? (
+            <div style={{ padding: 'var(--space-4)' }}>
+              <Empty>
+                No case has been opened yet. Ingest evidence to create the first case record.
+              </Empty>
+            </div>
+          ) : (
+            <div className="priority-cases-table-wrap">
+              <table className="priority-cases-table">
+                <thead>
+                  <tr>
+                    <th>PRIORITY</th>
+                    <th>CASE ID</th>
+                    <th>STATUS</th>
+                    <th>EVIDENCE</th>
+                    <th>LATEST VERDICT</th>
+                    <th>UPDATED</th>
+                    <th aria-label="Action" style={{ width: 24 }} />
+                  </tr>
+                </thead>
+                <tbody>
+                  {caseQueue.map((c) => {
+                    const priority = (c.priority ?? '').toLowerCase()
+                    const tone = verdictTone(c.latest_verdict ?? null)
+                    return (
+                      <tr
+                        key={c.case_id}
+                        className="priority-case-tr"
+                        onClick={() => openCase(c.case_id)}
+                        tabIndex={0}
+                        role="button"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            openCase(c.case_id)
+                          }
+                        }}
+                      >
+                        <td>
+                          {priority ? (
+                            <span className={`badge-risk badge-risk--${priority}`}>
+                              {priority.toUpperCase()}
+                            </span>
+                          ) : (
+                            <span className="priority-status-text" title="No priority recorded">
+                              {NOT_MEASURED}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <span className="priority-case-id-text">
+                            #{orPlaceholder(c.case_number)}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="priority-status-text">{orPlaceholder(c.status)}</span>
+                        </td>
+                        <td>
+                          <span className="priority-evidence-text">{c.evidence_count} items</span>
+                        </td>
+                        <td>
+                          {c.latest_verdict ? (
+                            <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+                              <span
+                                className={`status-circle status-circle--${
+                                  tone === 'manipulated' ? 'red' : tone === 'authentic' ? 'green' : 'amber'
+                                }`}
+                              />
+                              <span className="priority-verdict-text">
+                                {verdictBandLabel(c.latest_verdict)}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="priority-verdict-text" title="Not analysed yet">
+                              Not analysed
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <span className="priority-sla-text">
+                            {formatTimestampShort(c.updated_at)}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="priority-row-chevron">›</span>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* 5. BOTTOM ROW: RECENT ACTIVITY Boxed Container */}
+      {/* 5. RECENT EVIDENCE — real ingest rows, not a scripted activity feed */}
       <div className="card dashboard-card recent-activity-box">
         <div className="dashboard-card__header-row">
-          <span className="dashboard-card__title">RECENT ACTIVITY</span>
+          <span className="dashboard-card__title">RECENT EVIDENCE INGEST</span>
           <button
             type="button"
             className="dashboard-card__view-all"
-            onClick={() => onNavigate('cases')}
+            onClick={() => onNavigate('evidence')}
           >
-            View all activity →
+            View all evidence →
           </button>
         </div>
 
-        <div className="recent-activity-horizontal-feed">
-          {/* Activity 1 */}
-          <div className="recent-activity-tile">
-            <div className="recent-activity-tile__icon recent-activity-tile__icon--purple">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
-            </div>
-            <div className="recent-activity-tile__content">
-              <div className="recent-activity-tile__desc">
-                Case <strong>#20260901-0008</strong> analyzed
-              </div>
-              <div className="recent-activity-tile__time">2m ago</div>
-            </div>
+        {(summary?.recent_evidence ?? []).length === 0 ? (
+          <div style={{ padding: 'var(--space-4)' }}>
+            <Empty>
+              No evidence has been ingested yet. This feed lists real ingest rows with their
+              recorded timestamps.
+            </Empty>
           </div>
+        ) : (
+          <div className="recent-activity-horizontal-feed">
+            {(summary?.recent_evidence ?? []).slice(0, 5).map((ev) => (
+              <EvidenceTile key={ev.evidence_id} evidence={ev} />
+            ))}
+          </div>
+        )}
+      </div>
 
-          {/* Activity 2 */}
-          <div className="recent-activity-tile">
-            <div className="recent-activity-tile__icon recent-activity-tile__icon--red">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
-            </div>
-            <div className="recent-activity-tile__content">
-              <div className="recent-activity-tile__desc">
-                Evidence <strong>video_deepfake.mp4</strong> uploaded
-              </div>
-              <div className="recent-activity-tile__time">5m ago</div>
-            </div>
-          </div>
+      {/* System state and measurement basis, straight from the backend. */}
+      <div
+        className="card row row--wrap"
+        style={{ padding: '10px 14px', gap: 14, alignItems: 'center' }}
+      >
+        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          System: <strong style={{ color: 'var(--text-strong)' }}>{orPlaceholder(summary?.system_status)}</strong>
+        </span>
+        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          Mean analysis time:{' '}
+          <span className="mono">
+            {typeof summary?.avg_processing_time_ms === 'number'
+              ? `${summary.avg_processing_time_ms.toFixed(0)} ms`
+              : `${NOT_MEASURED} (no run has been timed)`}
+          </span>
+          {summary?.timed_analysis_runs ? ` over ${summary.timed_analysis_runs} run(s)` : ''}
+        </span>
+        {Object.entries(summary?.system_status_details ?? {}).map(([key, value]) => (
+          <span
+            key={key}
+            style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}
+            className="row"
+          >
+            {key.replace(/_/g, ' ')}:&nbsp;
+            <Pill variant={value === 'ONLINE' || value === 'AVAILABLE' ? 'ok' : 'unavailable'}>
+              {value}
+            </Pill>
+          </span>
+        ))}
+      </div>
 
-          {/* Activity 3 */}
-          <div className="recent-activity-tile">
-            <div className="recent-activity-tile__icon recent-activity-tile__icon--cyan">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
-            </div>
-            <div className="recent-activity-tile__content">
-              <div className="recent-activity-tile__desc">
-                Analysis completed on <strong>image_auth.png</strong>
-              </div>
-              <div className="recent-activity-tile__time">8m ago</div>
-            </div>
-          </div>
+      {(summary?.notes ?? []).length > 0 ? (
+        <ul
+          style={{
+            margin: 0,
+            paddingLeft: 18,
+            fontSize: 'var(--text-xs)',
+            color: 'var(--text-muted)',
+            lineHeight: 1.6,
+          }}
+        >
+          {(summary?.notes ?? []).map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  )
+}
 
-          {/* Activity 4 */}
-          <div className="recent-activity-tile">
-            <div className="recent-activity-tile__icon recent-activity-tile__icon--purple">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
-            </div>
-            <div className="recent-activity-tile__content">
-              <div className="recent-activity-tile__desc">
-                Report <strong>#2047</strong> generated
-              </div>
-              <div className="recent-activity-tile__time">15m ago</div>
-            </div>
-          </div>
+/**
+ * One KPI card.
+ *
+ * `value` is `number | undefined`, and `undefined` renders as `NOT_MEASURED`
+ * rather than a plausible-looking integer. The previous cards fell back to 12,
+ * 84, 7 and 3, so a failed request or a fresh deployment displayed the workload
+ * of a unit that does not exist.
+ */
+function StatCard({
+  label,
+  value,
+  tone,
+  icon,
+}: {
+  label: string
+  value: number | undefined
+  tone: 'red' | 'cyan' | 'amber' | 'purple'
+  icon: Parameters<typeof Icon>[0]['name']
+}) {
+  return (
+    <div className={`dashboard-stat-card dashboard-stat-card--${tone}`}>
+      <div className="dashboard-stat-card__left">
+        <span className="dashboard-stat-card__label">{label}</span>
+        <div className="dashboard-stat-card__val">
+          <span className="dashboard-stat-card__val-num">
+            {typeof value === 'number' ? value : NOT_MEASURED}
+          </span>
+        </div>
+      </div>
+      <div className={`dashboard-stat-card__icon-box dashboard-stat-card__icon-box--${tone}`}>
+        <Icon name={icon} size={20} />
+      </div>
+    </div>
+  )
+}
 
-          {/* Activity 5 */}
-          <div className="recent-activity-tile">
-            <div className="recent-activity-tile__icon recent-activity-tile__icon--blue">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 10v4M6 6v12M10 3v18M14 8v8M18 5v14M22 10v4" /></svg>
-            </div>
-            <div className="recent-activity-tile__content">
-              <div className="recent-activity-tile__desc">
-                Evidence <strong>audio_fake.wav</strong> uploaded
-              </div>
-              <div className="recent-activity-tile__time">22m ago</div>
-            </div>
-          </div>
+function QuickAction({
+  primary = false,
+  tone,
+  icon,
+  name,
+  desc,
+  onClick,
+}: {
+  primary?: boolean
+  tone: 'red' | 'blue' | 'purple' | 'green'
+  icon: Parameters<typeof Icon>[0]['name']
+  name: string
+  desc: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      className={`quick-action-card${primary ? ' quick-action-card--primary' : ''}`}
+      onClick={onClick}
+    >
+      <div className={`quick-action-card__icon quick-action-card__icon--${tone}`}>
+        <Icon name={icon} size={22} />
+      </div>
+      <div className="quick-action-card__content">
+        <div className="quick-action-card__name">{name}</div>
+        <div className="quick-action-card__desc">{desc}</div>
+      </div>
+    </button>
+  )
+}
+
+/** One real ingest row: its own filename, media type, size and recorded time. */
+function EvidenceTile({ evidence }: { evidence: Evidence }) {
+  return (
+    <div className="recent-activity-tile">
+      <div className="recent-activity-tile__icon recent-activity-tile__icon--cyan">
+        <Icon name={mediaIcon(evidence.media_type)} size={16} />
+      </div>
+      <div className="recent-activity-tile__content">
+        <div className="recent-activity-tile__desc">
+          <strong title={evidence.filename}>{evidence.filename}</strong> ingested
+          {evidence.is_synthetic ? ' · SYNTHETIC DEMO DATA' : ''}
+        </div>
+        <div className="recent-activity-tile__time">
+          {formatTimestampShort(evidence.ingested_at)} · {formatBytes(evidence.size_bytes)}
         </div>
       </div>
     </div>

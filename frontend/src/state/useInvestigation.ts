@@ -50,6 +50,16 @@ export interface Investigation {
   caseRecord: CaseRecord | null
   evidence: Evidence[]
   selectCase: (id: string) => void
+  /**
+   * Phase and error of the last `selectCase` call.
+   *
+   * Selecting a case is a network read that can fail (case deleted, backend
+   * down, permission). It used to fail silently, which left whichever screen
+   * asked for the case showing the *previous* case's data under the new id --
+   * the worst possible outcome for a chain-of-custody tool. The failure is now
+   * state the screens can render.
+   */
+  caseLoad: Slice<CaseRecord>
   upload: Slice<UploadResponse>
   uploadProgress: UploadProgress | null
   uploadFile: (file: File, fields: { title?: string; description?: string; examiner?: string }) => void
@@ -82,6 +92,7 @@ export function useInvestigation(): Investigation {
 
   const [caseRecord, setCaseRecord] = useState<CaseRecord | null>(null)
   const [evidence, setEvidence] = useState<Evidence[]>([])
+  const [caseLoad, setCaseLoad] = useState<Slice<CaseRecord>>(idle)
 
   const [upload, setUpload] = useState<Slice<UploadResponse>>(idle)
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null)
@@ -151,6 +162,7 @@ export function useInvestigation(): Investigation {
     generation.current += 1
     setCaseRecord(null)
     setEvidence([])
+    setCaseLoad(idle())
     setUpload(idle())
     setUploadProgress(null)
     setAnalysis(idle())
@@ -243,16 +255,39 @@ export function useInvestigation(): Investigation {
   )
 
   const selectCase = useCallback((id: string) => {
+    const gen = generation.current
+    setCaseLoad({ phase: 'loading', data: null, error: null })
     api.getCase(id).then(
       (c) => {
-        if (!mounted.current) return
+        if (!mounted.current || gen !== generation.current) return
         setCaseRecord(c)
-        api.listEvidence(id).then((ev) => {
-          if (!mounted.current) return
-          setEvidence(ev.evidence)
-        })
+        setCaseLoad({ phase: 'ready', data: c, error: null })
+        api.listEvidence(id).then(
+          (ev) => {
+            if (!mounted.current || gen !== generation.current) return
+            setEvidence(ev.evidence)
+          },
+          (error) => {
+            // The case loaded but its evidence list did not. Surfacing this as a
+            // case-level error is the honest outcome: an empty evidence table
+            // beside a real case number would read as "this case has no
+            // evidence", which is a different and false statement.
+            if (!mounted.current || gen !== generation.current) return
+            setEvidence([])
+            setCaseLoad({ phase: 'error', data: null, error })
+            if (error instanceof ApiError && error.isBackendUnreachable) setHealth('down')
+          },
+        )
       },
-      () => {},
+      (error) => {
+        if (!mounted.current || gen !== generation.current) return
+        // Clear the stale case: showing the previous case's record under a new id
+        // is a chain-of-custody error, not a graceful degradation.
+        setCaseRecord(null)
+        setEvidence([])
+        setCaseLoad({ phase: 'error', data: null, error })
+        if (error instanceof ApiError && error.isBackendUnreachable) setHealth('down')
+      },
     )
   }, [])
 
@@ -264,6 +299,7 @@ export function useInvestigation(): Investigation {
       caseRecord,
       evidence,
       selectCase,
+      caseLoad,
       upload,
       uploadProgress,
       uploadFile,
@@ -286,6 +322,7 @@ export function useInvestigation(): Investigation {
       caseRecord,
       evidence,
       selectCase,
+      caseLoad,
       upload,
       uploadProgress,
       uploadFile,

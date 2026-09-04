@@ -1,28 +1,120 @@
+# PRAMAAN backend -- Render Blueprint.
+#
+# Deploys backend/Dockerfile. The alternative (runtime: python + a build script)
+# cannot install ffmpeg or libsndfile1, so audio and video decoding would be
+# broken in a way no build step could report; and it would be a second
+# provisioning path that drifts from the one the repository's own scripts and
+# tests exercise. The Dockerfile is the artifact.
+#
+# Two measured facts decide the plan below, and neither can be worked around in a
+# config file:
+#
+#  1. A persistent disk requires a PAID instance type. On the free instance the
+#     filesystem is ephemeral, so the SQLite case file, the stored evidence
+#     bytes, the perceptual-hash index, generated reports AND the append-only
+#     audit chain are destroyed on every restart and every deploy. A chain of
+#     custody that does not survive a restart is not a chain of custody, so this
+#     blueprint declares a disk.
+#
+#  2. 512 MB cannot hold either detector. Swin-B peaks at 396 MB resident on the
+#     memory-mapped path (1052 MB without it) before the web process itself, and
+#     the wav2vec2 audio model peaks at ~1.67 GB. Both are measured and recorded
+#     in pramaan-detector/weights/model_manifest.json.
+#
+# So the plan below is 1c-2g (1 CPU / 2 GB), which is the smallest one that both
+# supports a disk and can actually run the image detector.
+#
+# --- Cheaper profile: no AI, storage still persistent ------------------------
+# Change three lines to run the honest non-AI deployment on the smallest paid
+# instance (0.5 CPU / 512 MB):
+#     plan: 0.5c-512mb
+#     PRAMAAN_ENABLE_AI_DETECTOR: "false"
+#     PRAMAAN_WEIGHTS_MODALITIES: "none"
+# The ai_detection signal then reports UNAVAILABLE with a stated reason and is
+# excluded from fusion, which is renormalised over the signals that did run.
+# Hashing, near-duplicate retrieval, metadata, C2PA provenance and JPEG/ELA
+# forensics all run fully on that plan.
+#
+# --- Free instance ------------------------------------------------------------
+# Delete the `disk:` block and set `plan: free` as well. Do that only for a
+# throwaway demo: nothing uploaded survives a restart, and Render idles free
+# instances out. The status endpoint stays truthful either way -- what is lost is
+# the evidence, silently, which is the one failure this system exists to avoid.
 services:
   - type: web
     name: pramaan-backend
-    env: python
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
     region: singapore
-    plan: free
-    buildCommand: "bash scripts/render_build.sh"
-    startCommand: "PYTHONPATH=backend gunicorn -w 1 -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT"
+    plan: 1c-2g
     healthCheckPath: /health
+    disk:
+      name: pramaan-evidence
+      # PRAMAAN_DATA_DIR below points here: the case database, the evidence
+      # store, the hash index and the audit chain. Reports are written to a
+      # subdirectory of it, because a service can attach only one disk.
+      mountPath: /data
+      sizeGB: 5
+    # There is no buildCommand or startCommand: the Dockerfile declares both, and
+    # the previous startCommand invoked `gunicorn`, which is not in
+    # backend/requirements.txt -- the service could only ever have failed to boot.
+    #
+    # Render turns every variable below into a `--build-arg` as well as a runtime
+    # variable, which is how the weights settings reach the build. Variables the
+    # Dockerfile already bakes in (PRAMAAN_DETECTOR_OFFLINE, the model paths, the
+    # three detector entrypoints, PRAMAAN_ENVIRONMENT, PYTHONPATH) are deliberately
+    # not repeated here; duplicating them creates two places to disagree.
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.13
-      - key: PRAMAAN_ENVIRONMENT
-        value: production
+      # --- Persistent storage -------------------------------------------------
+      # Must stay inside the mountPath above. Reports get a subdirectory rather
+      # than a second disk, which Render does not allow.
+      - key: PRAMAAN_DATA_DIR
+        value: /data
+      - key: PRAMAAN_REPORTS_DIR
+        value: /data/reports
+      # --- Which checkpoints the image is built with (build args) -------------
+      # "image" only. Adding ",audio" needs 2c-4g or larger: 1.67 GB of audio
+      # model plus the resident image model does not fit in 2 GB, and the result
+      # would be an OOM kill mid-request instead of a forensic result. "video" is
+      # not a valid value -- no video checkpoint is published.
+      #
+      # The release repo and tag come from model_manifest.json, which is the
+      # source of truth for what a given checkpoint should hash to; override
+      # PRAMAAN_WEIGHTS_RELEASE_REPO/TAG here only to point at a mirror.
+      - key: PRAMAAN_WEIGHTS_MODALITIES
+        value: image
+      # Writes the memory-mapped safetensors directory the image loader prefers:
+      # 396 MB resident instead of 1052 MB. On a 2 GB instance this is what makes
+      # the difference between running the detector and being killed by the OOM
+      # reaper, so it is on here even though it is optional in the Dockerfile.
+      - key: PRAMAAN_CONVERT_SAFETENSORS
+        value: "1"
+      # "1" would fail the build if the checkpoint could not be fetched or did not
+      # match its manifest digest. Left at "0" so a GitHub outage degrades to an
+      # honest UNAVAILABLE detector rather than taking the whole service down.
+      - key: PRAMAAN_FAIL_ON_MISSING_WEIGHTS
+        value: "0"
+      # --- Runtime detector behaviour -----------------------------------------
+      # The master toggle. It was "false" while the model paths were also set,
+      # which is a contradiction: the paths advertised a detector the toggle had
+      # switched off. It is "true" here because this plan can genuinely hold the
+      # image model. Set it to "false" for the 512 MB profile above -- and note
+      # that switching it off does not make anything report AUTHENTIC; the signal
+      # reports UNAVAILABLE and fusion renormalises without it.
       - key: PRAMAAN_ENABLE_AI_DETECTOR
-        value: "false"
-      - key: PRAMAAN_HOST
-        value: 0.0.0.0
+        value: "true"
+      # Read straight from the process environment by the detector package, so
+      # unlike the settings above it has no default from app/config.py: torch would
+      # otherwise start one thread per core it can see, and on a 1-CPU instance a
+      # single forward pass then saturates the loop that has to answer /health --
+      # which Render reads as a failed deploy rather than as a busy detector.
+      - key: PRAMAAN_TORCH_THREADS
+        value: "1"
+      # --- Browser access -----------------------------------------------------
       - key: PRAMAAN_CORS_ALLOW_ORIGINS
         value: "https://pramaan-77hs.vercel.app,https://frontendeploy-sigma.vercel.app,http://localhost:5173,http://127.0.0.1:5173"
       - key: PRAMAAN_CORS_ALLOW_METHODS
         value: "*"
       - key: PRAMAAN_CORS_ALLOW_HEADERS
         value: "*"
-      - key: PRAMAAN_IMAGE_MODEL_PATH
-        value: "pramaan-detector/weights/image_detector.pt"
-      - key: PRAMAAN_AUDIO_MODEL_PATH
-        value: "pramaan-detector/weights/audio_detector.pt"

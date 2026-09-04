@@ -223,10 +223,10 @@ def _stamp_matches(candidate: Path, checkpoint: Path) -> bool:
         return False
     declared_digest = str(stamp.get("sha256") or "")
     if declared_digest:
-        # _file_hash returns the first 16 hex chars and is cached on
+        # _file_hash returns the full digest and is cached on
         # (path, size, mtime), and the caller hashes this checkpoint anyway,
         # so this costs one read at most.
-        if _file_hash(str(checkpoint)) != declared_digest[:16]:
+        if _file_hash(str(checkpoint)) != declared_digest:
             return False
     return True
 
@@ -442,12 +442,28 @@ class ImageDetector:
         finally:
             del tensor
 
-        confidence = min(abs(score - 0.5) * 2.0, 1.0)
+        # No confidence is reported. The value here used to be
+        # `min(abs(score - 0.5) * 2.0, 1.0)`, which is a deterministic transform
+        # of the score and carries no independent information: a score of 0.133
+        # became "73.4% confidence" purely by arithmetic. The consuming contract
+        # in the backend (`app/services/detector.py`) states it outright -- "A
+        # number derived from the score is not a confidence" -- and this model
+        # has no calibration set behind it, so it has no calibrated probability
+        # to report. The margin is still recorded below as raw evidence, named
+        # for what it is.
+        score_margin = min(abs(score - 0.5) * 2.0, 1.0)
         regions = _extract_regions(cam) if cam is not None else []
         latency_ms = (time.perf_counter() - t0) * 1000
 
         explanation = _explain_image(score, regions)
-        evidence: dict[str, Any] = {"raw_score": score, "load_strategy": self.load_strategy}
+        evidence: dict[str, Any] = {
+            "raw_score": score,
+            "load_strategy": self.load_strategy,
+            # A rescaled distance from the 0.5 decision boundary, not a
+            # probability and not a calibrated confidence.
+            "score_margin_from_midpoint": round(score_margin, 4),
+            "calibrated": False,
+        }
         if cam is not None:
             evidence["cam_shape"] = list(cam.shape)
         else:
@@ -460,7 +476,7 @@ class ImageDetector:
         return make_result(
             media_type="image",
             score=score,
-            confidence=confidence,
+            confidence=None,
             model=MODEL_NAME,
             model_version=MODEL_VERSION,
             weights_hash=self.weights_hash,
@@ -514,6 +530,20 @@ def release_image_detector() -> None:
         _global_detector = None
 
 
+def load_checkpoint(model_path: Optional[str] = None) -> bool:
+    """Build the detector now, so the caller can time the load separately.
+
+    Returns True when this call actually loaded the checkpoint, False when the
+    model was already resident (a warm process pays no load, and reporting one
+    would invent a duration). The backend adapter calls this before starting its
+    inference timer; without it a multi-second Swin-B load was reported as the
+    inference latency of the first file analysed in a process.
+    """
+    was_cold = _global_detector is None
+    get_image_detector(weights_path=str(model_path) if model_path else None)
+    return was_cold
+
+
 def detect_image(path: str | Path, model_path: Optional[str] = None, **kwargs) -> dict:
     """Entrypoint function for backend plugin detector interface."""
     detector = get_image_detector(weights_path=str(model_path) if model_path else None)
@@ -526,9 +556,17 @@ _hash_lock = threading.Lock()
 
 
 def _file_hash(path: str) -> str:
-    """First 16 hex chars of the file's SHA-256, cached on (path, size, mtime).
+    """The file's full SHA-256, cached on (path, size, mtime).
 
     A 347 MB read per model construction is cheap once and wasteful thereafter.
+
+    This used to return only the first 16 hex characters, which meant the same
+    checkpoint was named by two different strings in the same report: the
+    backend's own ``weights_digest`` records the full digest in
+    ``/api/detector/status``, while the per-exhibit detection record carried the
+    16-char prefix -- and the report printed the prefix under the label
+    "SHA-256". A truncated digest presented as a whole one cannot be checked
+    against the manifest, which also stores 64 characters.
     """
     try:
         stat = os.stat(path)
@@ -543,20 +581,50 @@ def _file_hash(path: str) -> str:
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
-    value = h.hexdigest()[:16]
+    value = h.hexdigest()
     with _hash_lock:
         _hash_cache[key] = value
     return value
 
 
 def _explain_image(score: float, regions: list) -> str:
-    if abs(score - 0.5) < 0.15:
-        return "Evidence is ambiguous; insufficient confidence to classify image."
-    direction = "AI-generated or manipulated" if score >= 0.5 else "authentic"
+    """Plain-language reading of the score, with no calibration claim.
+
+    This model has not been evaluated against a labelled ground-truth set in
+    this repository, so the wording must not present the score as a
+    classification. Two phrasings were removed:
+
+      * "Image classified as authentic" -- on the sample set in `samples/`, known
+        Midjourney and SDXL outputs score 0.0245 to 0.2853, i.e. well below the
+        midpoint. Reporting those as "classified as authentic" converts a weak,
+        uncalibrated score into an affirmative finding of authenticity, which is
+        the exact error this system exists to avoid. A low score means the model
+        did not find evidence of manipulation; it is not evidence of provenance.
+
+      * "Suspicious regions detected at N location(s)" -- Grad-CAM shows where
+        the network's activation concentrated. High activation is not a located
+        manipulation, and on a low-scoring image it is not suspicious at all.
+    """
     region_note = (
-        f" Suspicious regions detected at {len(regions)} location(s)." if regions else ""
+        f" Grad-CAM activation concentrated in {len(regions)} region(s); attention"
+        " indicates where the network looked, not a located edit."
+        if regions
+        else ""
     )
-    return f"Image classified as {direction} (manipulation likelihood={score:.3f}).{region_note}"
+    if abs(score - 0.5) < 0.15:
+        return (
+            f"Score {score:.3f} sits near the 0.5 decision midpoint; this model does not"
+            f" separate the image in either direction.{region_note}"
+        )
+    if score >= 0.5:
+        return (
+            f"Score {score:.3f} is above the 0.5 midpoint, consistent with AI generation or"
+            f" manipulation. Uncalibrated model output, not a classification.{region_note}"
+        )
+    return (
+        f"Score {score:.3f} is below the 0.5 midpoint: this model found no evidence of AI"
+        f" generation or manipulation. That is not a finding of authenticity.{region_note}"
+    )
 
 
 def _unsupported(ext: str, media_type: str, t0: float):

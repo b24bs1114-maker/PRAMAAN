@@ -45,12 +45,86 @@ MIN_DURATION = 0.5         # seconds
 _DEFAULT_WEIGHTS_PATH = Path(__file__).resolve().parents[2] / "weights" / "audio_detector.pt"
 _HF_MODEL_NAME = "garystafford/wav2vec2-deepfake-voice-detector"
 
+#: The class index whose softmax probability is reported as the manipulation
+#: score. The upstream config declares ``id2label {0: "real", 1: "fake"}`` and
+#: ``weights/audio_detector.pt.json`` declares ``positive_index: 1`` to match.
+#: Both are checked at load time rather than assumed: reading ``probs[1]`` from a
+#: checkpoint whose config labels index 1 "real" would invert every verdict --
+#: authentic speech reported as a clone and a clone reported as authentic -- with
+#: nothing in the output to show that it had happened.
+POSITIVE_INDEX = 1
+
+#: Substrings that identify a config label as the synthetic/manipulated class.
+_FAKE_LABEL_MARKERS = ("fake", "spoof", "synthetic", "clone", "deepfake", "generated")
+
+#: Parameter-name fragments a checkpoint must contain to be usable here. These are
+#: ``Wav2Vec2ForSequenceClassification``'s three parts: the wav2vec2 encoder, the
+#: projection layer, and the classification head.
+_REQUIRED_PARAM_FRAGMENTS = (b"wav2vec2.", b"projector.", b"classifier.")
+
+#: What "ready" means for this detector, in one place, because three separate
+#: things must hold and only the first is obvious:
+#:
+#: 1. ``audio_detector.pt`` is present and holds wav2vec2 sequence-classifier
+#:    parameters (checked by ``checkpoint_readiness`` without loading them);
+#: 2. the architecture ``config.json`` for ``_HF_MODEL_NAME`` is reachable -- it
+#:    is fetched from the hub unless ``PRAMAAN_DETECTOR_OFFLINE`` is set, in which
+#:    case it must already be in the local Hugging Face cache;
+#: 3. that config's ``id2label`` agrees with :data:`POSITIVE_INDEX`.
+#:
+#: Readiness is not a claim about accuracy. This detector's direction and label
+#: mapping are verified; its error rate on Indian-language speech, on telephony
+#: codecs, or on any generator not in its training set is unmeasured here. See
+#: ``docs/AUDIO_READINESS.md``.
+READINESS_CONTRACT = (
+    "ready = checkpoint present with wav2vec2 sequence-classifier parameters, "
+    "architecture config reachable (cached when offline), and config id2label "
+    "consistent with positive_index=1. Readiness is not a claim of accuracy."
+)
+
+#: Peak resident memory to build and hold this model, measured on this
+#: checkpoint: ~1.67 GB. Recorded here because it is the number that decides
+#: whether a deployment can run audio at all, and a 512 MB instance cannot.
+PEAK_MEMORY_BYTES = 1_670_000_000
+
 NO_TRAINED_MODEL_EXPLANATION = (
     "No trained audio detector could be loaded, so no voice-manipulation score "
     "was produced. Set PRAMAAN_AUDIO_MODEL_PATH to the audio_detector.pt "
     "checkpoint. This is NOT a finding of authenticity and NOT a finding of "
     "manipulation -- the signal is missing and is excluded from fusion."
 )
+
+
+def _fake_index(id2label: dict) -> Optional[int]:
+    """The index the config says is the synthetic class, or ``None`` if unclear."""
+    matches = [
+        int(index)
+        for index, label in id2label.items()
+        if any(marker in str(label).lower() for marker in _FAKE_LABEL_MARKERS)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def verify_label_direction(id2label: Optional[dict]) -> None:
+    """Raise unless ``id2label`` agrees that :data:`POSITIVE_INDEX` is synthetic.
+
+    A config with no usable labels is left alone: the upstream model publishes
+    them, but a locally fine-tuned checkpoint might not, and refusing to run over
+    a missing annotation would be stricter than the evidence warrants. A config
+    that *contradicts* the assumed direction is a hard failure -- it means the
+    score this module would report is the probability of the wrong class.
+    """
+    if not id2label:
+        return
+    index = _fake_index(dict(id2label))
+    if index is None or index == POSITIVE_INDEX:
+        return
+    raise RuntimeError(
+        f"checkpoint config maps index {index} to the synthetic class and "
+        f"index {POSITIVE_INDEX} to something else (id2label={dict(id2label)!r}), "
+        f"but this module reports index {POSITIVE_INDEX} as the manipulation "
+        f"score. Loading it would invert every verdict"
+    )
 
 
 def _build_wav2vec2(checkpoint: Path) -> tuple[Any, str]:
@@ -65,6 +139,11 @@ def _build_wav2vec2(checkpoint: Path) -> tuple[Any, str]:
     from transformers import AutoConfig, AutoModelForAudioClassification
 
     config = AutoConfig.from_pretrained(_HF_MODEL_NAME)
+    # Before any tensor is read: the config states which class index means
+    # "fake", and this module reports index POSITIVE_INDEX as the manipulation
+    # score. If those disagree the score is the probability of the wrong class,
+    # so the load fails instead of producing inverted verdicts.
+    verify_label_direction(getattr(config, "id2label", None))
     with torch.device("meta"):
         model = AutoModelForAudioClassification.from_config(config)
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
@@ -244,9 +323,12 @@ class AudioDetector:
                 with torch.inference_mode():
                     logits = self.model(t)
                     probs = torch.softmax(logits, dim=1)[0]
-                    # Class 0 = real, Class 1 = fake
+                    # POSITIVE_INDEX, not a literal 1: the index is verified
+                    # against the checkpoint config's id2label at load time, and
+                    # naming it here keeps the verified value and the value that
+                    # is actually read from drifting apart.
                     score = (
-                        probs[1].item() if probs.shape[0] > 1
+                        probs[POSITIVE_INDEX].item() if probs.shape[0] > 1
                         else torch.sigmoid(logits[0, 0]).item()
                     )
             finally:
@@ -284,11 +366,126 @@ def release_audio_detector() -> None:
         _global_audio_detector = None
 
 
+def load_checkpoint(model_path: Optional[str] = None) -> bool:
+    """Build the detector now, so the caller can time the load separately.
+
+    Returns True when this call actually loaded the checkpoint, False when the
+    model was already resident. See the identical hook in ``image_detector``:
+    the wav2vec2 load is the larger of the two, so folding it into the inference
+    timer misreported it by whole seconds on the first call of a process.
+    """
+    was_cold = _global_audio_detector is None
+    get_audio_detector(weights_path=str(model_path) if model_path else None)
+    return was_cold
+
+
 def detect_audio(path: str | Path, model_path: Optional[str] = None, **kwargs) -> dict:
     """Entrypoint function for backend plugin detector interface."""
     detector = get_audio_detector(weights_path=str(model_path) if model_path else None)
     result = detector.detect(str(path))
     return result.to_dict()
+
+
+def _offline() -> bool:
+    """Whether this process is forbidden from reaching a model hub."""
+    import os
+
+    return any(
+        os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+        for name in ("PRAMAAN_DETECTOR_OFFLINE", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    )
+
+
+def _cached_config_paths() -> list[Path]:
+    """Local Hugging Face cache locations of ``_HF_MODEL_NAME``'s ``config.json``.
+
+    Globbed on the filesystem rather than resolved through ``huggingface_hub``:
+    this runs on every status poll, and importing the hub client (which imports
+    ``requests`` and, transitively for ``transformers``, torch) to answer "is a
+    4 KB json file on disk" is what this module exists to avoid.
+    """
+    import os
+
+    roots = [
+        os.getenv("HF_HUB_CACHE", "").strip(),
+        os.path.join(os.getenv("HF_HOME", "").strip(), "hub") if os.getenv("HF_HOME", "").strip() else "",
+        os.path.expanduser("~/.cache/huggingface/hub"),
+    ]
+    slug = "models--" + _HF_MODEL_NAME.replace("/", "--")
+    found: list[Path] = []
+    for root in roots:
+        if not root:
+            continue
+        base = Path(root) / slug / "snapshots"
+        if not base.is_dir():
+            continue
+        found.extend(sorted(base.glob("*/config.json")))
+    return found
+
+
+def checkpoint_readiness(model_path: Optional[str] = None) -> tuple[bool, Optional[str]]:
+    """Can this module ever produce an audio score with ``model_path``?
+
+    Read by the backend's status probe. Without this hook the probe reports a
+    detector as available whenever the configured file exists and this module
+    imports -- and both are true of a truncated download, of the *image*
+    checkpoint, and of a machine with no cached architecture config -- so the
+    dashboard advertised a working voice-clone detector that abstained on every
+    request. See :data:`READINESS_CONTRACT` for what is being asserted, and what
+    is not: this establishes that the model can run, never that it is accurate.
+
+    Kept cheap, because status is polled: the checkpoint is not loaded, torch and
+    transformers are not imported, and the parameter names are read from the
+    ``data.pkl`` member of the zip (a few hundred KB) rather than from the 1.26 GB
+    of tensors beside it.
+    """
+    resolved = Path(model_path) if model_path else _DEFAULT_WEIGHTS_PATH
+    if not resolved.exists():
+        return False, NO_TRAINED_MODEL_EXPLANATION
+
+    import zipfile
+    try:
+        with zipfile.ZipFile(resolved) as archive:
+            pickles = [n for n in archive.namelist() if n.endswith("data.pkl")]
+            if not pickles:
+                return False, (
+                    f"{resolved.name} is not a torch.save archive, so its "
+                    f"parameter names cannot be read without loading 1.26 GB and "
+                    f"readiness cannot be established. {NO_TRAINED_MODEL_EXPLANATION}"
+                )
+            blob = archive.read(pickles[0])
+    except Exception as exc:
+        return False, (
+            f"{resolved.name} could not be read as a checkpoint archive "
+            f"({exc.__class__.__name__}), so readiness could not be established. "
+            f"{NO_TRAINED_MODEL_EXPLANATION}"
+        )
+
+    # An allowlist, not a denylist: the checkpoint must contain the parameters
+    # this architecture needs. A denylist passes every wrong checkpoint nobody
+    # has thought to exclude -- which is how the video slot came to accept this
+    # very file.
+    missing = [f.decode() for f in _REQUIRED_PARAM_FRAGMENTS if f not in blob]
+    if missing:
+        return False, (
+            f"{resolved.name} does not hold weights for a wav2vec2 sequence "
+            f"classifier: it declares no {' or '.join(missing)} parameters. "
+            f"{NO_TRAINED_MODEL_EXPLANATION}"
+        )
+
+    # The architecture itself comes from the hub's config.json. Online that is a
+    # fetch; offline it has to already be cached, and if it is not, the load
+    # fails at the first request rather than here -- which is exactly the
+    # available-then-always-abstains state this hook exists to prevent.
+    if _offline() and not _cached_config_paths():
+        return False, (
+            f"the architecture config for {_HF_MODEL_NAME} is not in the local "
+            f"Hugging Face cache and this process is configured offline "
+            f"(PRAMAAN_DETECTOR_OFFLINE), so the model cannot be built. Warm the "
+            f"cache during the build, or unset the offline flag. "
+            f"{NO_TRAINED_MODEL_EXPLANATION}"
+        )
+    return True, None
 
 
 def _load_audio(path: str) -> tuple[np.ndarray, int]:
@@ -350,11 +547,17 @@ def _explain_audio(score: float, chunk_scores: list, suspicious: list) -> str:
 
 
 def _file_hash(path: str) -> str:
+    """The checkpoint's full SHA-256.
+
+    Not truncated: the backend's ``weights_digest`` and the weights manifest both
+    record all 64 characters, so a 16-char prefix here named the same file
+    differently in the same report and could not be checked against either.
+    """
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
-    return h.hexdigest()[:16]
+    return h.hexdigest()
 
 
 def _unsupported(ext: str, t0: float, wh: str) -> DetectionResult:

@@ -1,19 +1,29 @@
 /**
- * Screen: Audit Trail (Screen 7 in visual collage).
+ * Screen: Audit Trail.
  *
- * Visual reproduction of Panel 7 from collage:
- * 1. Top Bar: Case ID + 6-Phase Stepper
- * 2. Header: Title "AUDIT TRAIL" · Subtitle "Verify the chain of custody and integrity."
- * 3. 2-Column Split:
- *    - Left Column:
- *      - CHAIN STATUS (Large VERIFIED card + "The evidence chain is complete and cryptographically verified.")
- *      - CHAIN SUMMARY (Events count, Evidence ID, Timestamp, Verified By, "View Verification Details")
- *    - Right Column:
- *      - AUDIT EVENTS table (TIME / APP, ACTOR, EVENT, EVIDENCE, CHAIN STATUS with green verified badge)
- * 4. Bottom Action Bar: "Generate Report →" (red CTA)
+ * The custody ledger for one case, plus the result of verifying it.
+ *
+ * The most serious defect this screen used to carry was `const isVerified =
+ * verification ? verification.valid : true` -- so before anyone pressed "Verify
+ * Chain", the card read **VERIFIED** in green and claimed "the evidence chain is
+ * complete and cryptographically verified". A cryptographic verification that
+ * has not been performed is not a pass. Verification is now tri-state: not yet
+ * run, valid, or failed, and only the middle one is green.
+ *
+ * Also corrected here:
+ *   - The algorithm fallback read "SHA-256 Merkle Link". The chain is a LINEAR
+ *     hash chain -- `row_hash = SHA-256(previous_hash || canonical_json(payload))`
+ *     -- with no Merkle tree anywhere in it. Naming the wrong construction in a
+ *     court-facing tool misdescribes what the integrity guarantee actually is.
+ *   - The event count fell back to `8` and the per-row evidence cell to
+ *     `video_deepfake.mp4`, so an empty ledger displayed eight rows' worth of
+ *     count and every row named a file that does not exist.
+ *   - Every row carried a green "✓ Verified" pill unconditionally. A row's
+ *     status now comes from the verification response's `first_invalid_seq`, and
+ *     says "Not verified" when no verification has been run.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import type { AuditTrail } from '../api/types'
 import { ErrorBanner } from '../components/Banner'
@@ -21,9 +31,12 @@ import { CopyButton } from '../components/CopyButton'
 import { Empty, Spinner } from '../components/Feedback'
 import { Icon } from '../components/Icon'
 import { Pill } from '../components/Pill'
-import { formatTimestamp, shortHash } from '../lib/format'
+import { NOT_MEASURED, formatTimestamp, shortHash } from '../lib/format'
 import type { RoutePath } from '../lib/router'
 import { isReady, type Investigation } from '../state/useInvestigation'
+
+/** The three genuinely different states of chain verification. */
+type ChainState = 'unverified' | 'valid' | 'invalid'
 
 export function ScreenAudit({
   caseId,
@@ -34,7 +47,7 @@ export function ScreenAudit({
   investigation: Investigation
   onNavigate: (path: RoutePath, params?: { caseId?: string; filter?: string }) => void
 }) {
-  const { caseRecord, evidence, auditVerification, verifyAudit } = investigation
+  const { caseRecord, evidence, analysis, propagation, auditVerification, verifyAudit } = investigation
   const currentCaseId = caseId || caseRecord?.case_id || null
 
   const [trail, setTrail] = useState<AuditTrail | null>(null)
@@ -83,15 +96,76 @@ export function ScreenAudit({
   const verifying = auditVerification.phase === 'loading'
   const verifyError = auditVerification.phase === 'error' ? auditVerification.error : null
 
+  /**
+   * The evidence item this ledger is anchored to, if there is one on record.
+   *
+   * No synthesised identifier: the old fallback produced
+   * `EV-2026-09-01-${case_id.slice(0, 4)}`, a plausible-looking evidence id in
+   * the system's own format for an item that was never ingested.
+   */
   const primaryEvidenceId =
     evidence[0]?.evidence_id ??
-    (trail?.events[0]?.details?.evidence_id ? String(trail.events[0].details.evidence_id) : `EV-2026-09-01-${currentCaseId.slice(0, 4)}`)
-  const headHash = verification?.head_hash ?? trail?.head_hash ?? '-'
-  const genesisHash = verification?.genesis_hash ?? trail?.genesis_hash ?? '-'
-  const algorithm = verification?.algorithm ?? trail?.algorithm ?? 'SHA-256 Merkle Link'
+    (trail?.events[0]?.details?.evidence_id
+      ? String(trail.events[0].details.evidence_id)
+      : null)
 
-  const isVerified = verification ? verification.valid : true
-  const activeCaseNumber = caseRecord?.case_number || `CAS-${currentCaseId.slice(0, 8)}`
+  const headHash = verification?.head_hash ?? trail?.head_hash ?? NOT_MEASURED
+  const genesisHash = verification?.genesis_hash ?? trail?.genesis_hash ?? NOT_MEASURED
+  /**
+   * The construction the backend names, verbatim.
+   *
+   * The fallback describes what `audit.py` actually computes -- a linear chain,
+   * each row hashing its predecessor's hash together with its own canonical
+   * payload. It is deliberately NOT called a Merkle link: there is no tree, no
+   * sibling hashing and no inclusion proof, so claiming one would overstate the
+   * cryptographic property on a screen an examiner may be asked to explain.
+   */
+  const algorithm =
+    verification?.algorithm ?? trail?.algorithm ?? 'SHA-256 linear hash chain'
+
+  /**
+   * Verification state.
+   *
+   * `trail.chain_valid` is honoured when the embedded trail carries it, but the
+   * absence of any verification result is `unverified` -- never a pass.
+   */
+  const chainState: ChainState = verification
+    ? verification.valid
+      ? 'valid'
+      : 'invalid'
+    : trail?.chain_valid === true
+      ? 'valid'
+      : trail?.chain_valid === false
+        ? 'invalid'
+        : 'unverified'
+
+  /** The sequence number at which verification first failed, when it did. */
+  const firstInvalidSeq = verification?.first_invalid_seq ?? trail?.first_invalid_seq ?? null
+
+  const activeCaseNumber = caseRecord?.case_number || null
+  const totalRows = trail?.total_rows ?? events.length
+
+  /**
+   * Workflow position, derived from what has actually happened this session.
+   *
+   * The stepper used to hard-code steps 1-4 as complete with green ticks on
+   * every visit, which told the examiner that provenance tracing had been done
+   * on cases where it had not.
+   */
+  const steps = useMemo(
+    () => [
+      { label: 'Case', done: Boolean(caseRecord) },
+      { label: 'Evidence', done: evidence.length > 0 },
+      { label: 'Analysis', done: isReady(analysis) || Boolean(caseRecord?.latest_verdict) },
+      {
+        label: 'Provenance',
+        done:
+          isReady(propagation) &&
+          (propagation.data.instance_count > 0 || propagation.data.matched_candidate_count > 0),
+      },
+    ],
+    [caseRecord, evidence.length, analysis, propagation],
+  )
 
   return (
     <div className="screen stack" style={{ gap: 'var(--space-4)' }}>
@@ -111,10 +185,10 @@ export function ScreenAudit({
       >
         <div className="row" style={{ gap: 10, alignItems: 'center' }}>
           <span style={{ fontSize: '10px', color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.08em', fontFamily: 'var(--mono)', fontWeight: 700 }}>
-            CASE ID
+            {activeCaseNumber ? 'CASE NUMBER' : 'INTERNAL CASE ID'}
           </span>
           <code style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: 'var(--accent-bright)' }}>
-            #{activeCaseNumber}
+            {activeCaseNumber ? `#${activeCaseNumber}` : shortHash(currentCaseId, 12)}
           </code>
           {caseRecord?.title ? (
             <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-strong)', fontWeight: 600 }}>
@@ -123,16 +197,21 @@ export function ScreenAudit({
           ) : null}
         </div>
 
-        {/* 6-Step Workflow Stepper */}
+        {/* Workflow stepper. Ticks reflect real state; nothing is pre-ticked. */}
         <nav className="row" style={{ gap: 6, alignItems: 'center', fontSize: 'var(--text-xs)', fontFamily: 'var(--mono)' }} aria-label="Investigation Workflow">
-          <span style={{ color: 'var(--ok-bright)', fontWeight: 600 }}>1. Case ✓</span>
-          <span style={{ color: 'var(--text-faint)' }}>→</span>
-          <span style={{ color: 'var(--ok-bright)', fontWeight: 600 }}>2. Evidence ✓</span>
-          <span style={{ color: 'var(--text-faint)' }}>→</span>
-          <span style={{ color: 'var(--ok-bright)', fontWeight: 600 }}>3. Analysis ✓</span>
-          <span style={{ color: 'var(--text-faint)' }}>→</span>
-          <span style={{ color: 'var(--ok-bright)', fontWeight: 600 }}>4. Provenance ✓</span>
-          <span style={{ color: 'var(--text-faint)' }}>→</span>
+          {steps.map((step, idx) => (
+            <span key={step.label} className="row" style={{ gap: 6, alignItems: 'center' }}>
+              <span
+                style={{
+                  color: step.done ? 'var(--ok-bright)' : 'var(--text-faint)',
+                  fontWeight: step.done ? 600 : 400,
+                }}
+              >
+                {idx + 1}. {step.label} {step.done ? '✓' : '·'}
+              </span>
+              <span style={{ color: 'var(--text-faint)' }}>→</span>
+            </span>
+          ))}
           <span style={{ background: 'var(--accent)', color: '#ffffff', padding: '2px 8px', borderRadius: 4, fontWeight: 700 }}>5. Audit</span>
           <span style={{ color: 'var(--text-faint)' }}>→</span>
           <span style={{ color: 'var(--text-muted)' }}>6. Report</span>
@@ -170,21 +249,62 @@ export function ScreenAudit({
                 alignItems: 'center',
                 gap: 8,
                 padding: '10px 14px',
-                background: isVerified ? 'var(--ok-wash)' : 'var(--danger-wash)',
-                border: `1px solid ${isVerified ? 'var(--ok-line)' : 'var(--danger-line)'}`,
+                background:
+                  chainState === 'valid'
+                    ? 'var(--ok-wash)'
+                    : chainState === 'invalid'
+                      ? 'var(--danger-wash)'
+                      : 'var(--surface-3)',
+                border: `1px solid ${
+                  chainState === 'valid'
+                    ? 'var(--ok-line)'
+                    : chainState === 'invalid'
+                      ? 'var(--danger-line)'
+                      : 'var(--border)'
+                }`,
                 borderRadius: 'var(--radius)',
               }}
             >
-              <Icon name={isVerified ? 'check' : 'error'} size={18} style={{ color: isVerified ? 'var(--ok-bright)' : 'var(--danger-bright)' }} />
-              <span style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: isVerified ? 'var(--ok-bright)' : 'var(--danger-bright)' }}>
-                {isVerified ? 'VERIFIED' : 'COMPROMISED'}
+              <Icon
+                name={chainState === 'valid' ? 'check' : chainState === 'invalid' ? 'error' : 'lock'}
+                size={18}
+                style={{
+                  color:
+                    chainState === 'valid'
+                      ? 'var(--ok-bright)'
+                      : chainState === 'invalid'
+                        ? 'var(--danger-bright)'
+                        : 'var(--text-muted)',
+                }}
+              />
+              <span
+                style={{
+                  fontSize: 'var(--text-sm)',
+                  fontWeight: 800,
+                  color:
+                    chainState === 'valid'
+                      ? 'var(--ok-bright)'
+                      : chainState === 'invalid'
+                        ? 'var(--danger-bright)'
+                        : 'var(--text-muted)',
+                }}
+              >
+                {chainState === 'valid'
+                  ? 'CHAIN INTACT'
+                  : chainState === 'invalid'
+                    ? 'CHAIN BROKEN'
+                    : 'NOT VERIFIED'}
               </span>
             </div>
 
             <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: 0, lineHeight: 'var(--leading-normal)' }}>
-              {isVerified
-                ? 'The evidence chain is complete and cryptographically verified.'
-                : 'The cryptographic chain failed verification. Check the logs below.'}
+              {chainState === 'valid'
+                ? 'Every recorded row re-hashes to its successor, so the ledger has not been altered since it was written. This attests to the integrity of the record, not to the truth of what the rows describe.'
+                : chainState === 'invalid'
+                  ? `Recomputation does not match the stored hashes${
+                      firstInvalidSeq !== null ? ` from sequence #${firstInvalidSeq} onward` : ''
+                    }. Treat the ledger from that point as unreliable.`
+                  : 'The chain has not been verified in this session. Run verification to recompute every row hash — an unverified chain is neither intact nor broken, it is unchecked.'}
             </p>
 
             <button
@@ -195,7 +315,7 @@ export function ScreenAudit({
               style={{ marginTop: 4 }}
             >
               {verifying ? <Spinner label="Verifying..." /> : <Icon name="lock" size={13} />}
-              {isVerified ? 'Re-Verify Chain' : 'Verify Chain'}
+              {chainState === 'unverified' ? 'Verify Chain' : 'Re-Verify Chain'}
             </button>
           </div>
 
@@ -209,28 +329,55 @@ export function ScreenAudit({
               <div className="row" style={{ justifyContent: 'space-between' }}>
                 <span style={{ color: 'var(--text-faint)' }}>Events</span>
                 <span style={{ fontWeight: 800, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
-                  {events.length || 8}
+                  {/* Real count. The old `|| 8` reported eight rows for an empty ledger. */}
+                  {totalRows}
                 </span>
               </div>
 
               <div className="stack" style={{ gap: 2 }}>
                 <span style={{ color: 'var(--text-faint)' }}>Evidence ID</span>
                 <code className="mono" style={{ fontSize: '11px', color: 'var(--text-strong)', wordBreak: 'break-all' }}>
-                  {primaryEvidenceId}
+                  {primaryEvidenceId ?? NOT_MEASURED}
                 </code>
               </div>
 
               <div className="stack" style={{ gap: 2 }}>
-                <span style={{ color: 'var(--text-faint)' }}>Timestamp</span>
+                <span style={{ color: 'var(--text-faint)' }}>Last recorded event</span>
                 <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
-                  {formatTimestamp(new Date().toISOString())}
+                  {/*
+                    The timestamp of the newest row, not `new Date()`. The old code
+                    rendered the current clock under the label "Timestamp", which
+                    reads as the moment the chain was last written to.
+                  */}
+                  {events.length > 0
+                    ? formatTimestamp(events[events.length - 1].timestamp)
+                    : NOT_MEASURED}
                 </span>
               </div>
 
               <div className="row" style={{ justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--text-faint)' }}>Verified By</span>
-                <span style={{ fontWeight: 700, color: 'var(--text-strong)' }}>System</span>
+                <span style={{ color: 'var(--text-faint)' }}>Verification</span>
+                <span style={{ fontWeight: 700, color: 'var(--text-strong)' }}>
+                  {chainState === 'unverified'
+                    ? 'Not run'
+                    : `${verification ? 'POST /audit/verify' : 'Embedded in analysis'}`}
+                </span>
               </div>
+
+              {verification ? (
+                <div className="row" style={{ justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--text-faint)' }}>Rows recomputed</span>
+                  <span style={{ fontWeight: 700, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
+                    {verification.case_rows} of {verification.total_rows}
+                  </span>
+                </div>
+              ) : null}
+
+              {trail?.truncated ? (
+                <p style={{ margin: 0, color: 'var(--warn-bright, var(--text-muted))', fontSize: '10.5px' }}>
+                  This view is truncated: {events.length} of {totalRows} rows are listed.
+                </p>
+              ) : null}
             </div>
 
             <button
@@ -251,7 +398,7 @@ export function ScreenAudit({
               AUDIT EVENTS
             </span>
             <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-              {events.length || 8} total entries
+              {totalRows} total {totalRows === 1 ? 'entry' : 'entries'}
             </span>
           </div>
 
@@ -276,25 +423,51 @@ export function ScreenAudit({
                   </tr>
                 </thead>
                 <tbody>
-                  {events.map((ev) => (
-                    <tr key={ev.seq}>
-                      <td style={{ fontSize: 'var(--text-xs)', whiteSpace: 'nowrap', fontFamily: 'var(--mono)', color: 'var(--text-muted)' }}>
-                        {formatTimestamp(ev.timestamp)}
-                      </td>
-                      <td style={{ fontSize: 'var(--text-xs)', color: 'var(--text-strong)', fontWeight: 600 }}>
-                        {ev.actor}
-                      </td>
-                      <td style={{ fontWeight: 600, fontSize: 'var(--text-xs)', color: 'var(--text-strong)' }}>
-                        {ev.event}
-                      </td>
-                      <td className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                        {ev.details && 'evidence_id' in ev.details ? shortHash(String(ev.details.evidence_id)) : 'video_deepfake.mp4'}
-                      </td>
-                      <td>
-                        <Pill variant="ok">✓ Verified</Pill>
-                      </td>
-                    </tr>
-                  ))}
+                  {events.map((ev) => {
+                    /*
+                     * Per-row status. A linear chain breaks from a point onward,
+                     * so every row at or after `first_invalid_seq` is suspect and
+                     * everything before it still verifies. With no verification
+                     * result there is nothing to report but that fact -- the old
+                     * code printed a green "✓ Verified" pill on every row
+                     * regardless, including on a chain nobody had checked.
+                     */
+                    const rowState: ChainState =
+                      chainState === 'unverified'
+                        ? 'unverified'
+                        : firstInvalidSeq !== null && ev.seq >= firstInvalidSeq
+                          ? 'invalid'
+                          : chainState
+                    const evidenceId =
+                      ev.details && 'evidence_id' in ev.details && ev.details.evidence_id
+                        ? shortHash(String(ev.details.evidence_id))
+                        : NOT_MEASURED
+                    return (
+                      <tr key={ev.seq}>
+                        <td style={{ fontSize: 'var(--text-xs)', whiteSpace: 'nowrap', fontFamily: 'var(--mono)', color: 'var(--text-muted)' }}>
+                          {formatTimestamp(ev.timestamp)}
+                        </td>
+                        <td style={{ fontSize: 'var(--text-xs)', color: 'var(--text-strong)', fontWeight: 600 }}>
+                          {ev.actor}
+                        </td>
+                        <td style={{ fontWeight: 600, fontSize: 'var(--text-xs)', color: 'var(--text-strong)' }}>
+                          {ev.event}
+                        </td>
+                        <td className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                          {evidenceId}
+                        </td>
+                        <td>
+                          {rowState === 'valid' ? (
+                            <Pill variant="ok">✓ Hash matches</Pill>
+                          ) : rowState === 'invalid' ? (
+                            <Pill variant="error">✕ Hash mismatch</Pill>
+                          ) : (
+                            <Pill variant="unavailable">Not verified</Pill>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -309,19 +482,33 @@ export function ScreenAudit({
             CRYPTOGRAPHIC HASH ANCHORS
           </span>
           <dl className="dl" style={{ fontSize: 'var(--text-xs)' }}>
-            <dt>Algorithm</dt>
+            <dt>Construction</dt>
             <dd className="mono">{algorithm}</dd>
+            <dt>Row hash</dt>
+            <dd className="mono">SHA-256(previous_hash ‖ canonical_json(payload))</dd>
             <dt>Genesis Hash</dt>
             <dd className="row" style={{ gap: 6, alignItems: 'center' }}>
               <code className="mono break-all">{genesisHash}</code>
-              {genesisHash !== '-' ? <CopyButton value={genesisHash} title="Copy Genesis Hash" /> : null}
+              {genesisHash !== NOT_MEASURED ? <CopyButton value={genesisHash} title="Copy Genesis Hash" /> : null}
             </dd>
             <dt>Head Hash</dt>
             <dd className="row" style={{ gap: 6, alignItems: 'center' }}>
               <code className="mono break-all">{headHash}</code>
-              {headHash !== '-' ? <CopyButton value={headHash} title="Copy Head Hash" /> : null}
+              {headHash !== NOT_MEASURED ? <CopyButton value={headHash} title="Copy Head Hash" /> : null}
             </dd>
           </dl>
+          {trail?.interpretation ? (
+            <p style={{ margin: 0, fontSize: '10.5px', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+              {trail.interpretation}
+            </p>
+          ) : null}
+          {(verification?.issues ?? trail?.issues ?? []).length > 0 ? (
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: '10.5px', color: 'var(--danger-bright)' }}>
+              {(verification?.issues ?? trail?.issues ?? []).map((issue) => (
+                <li key={issue}>{issue}</li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
 
@@ -343,7 +530,7 @@ export function ScreenAudit({
             NEXT ACTION
           </span>
           <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-strong)', fontWeight: 600 }}>
-            Compile verified forensic opinion and export certified evidence dossier.
+            Compile the recorded findings and custody chain into the backend-rendered report.
           </span>
         </div>
 

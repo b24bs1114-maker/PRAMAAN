@@ -173,8 +173,30 @@ def _collect_nodes(
 
 
 def _origin(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Earliest dated instance among the reconstructed nodes."""
-    dated = [n for n in nodes if n["timestamp"]]
+    """Earliest dated instance among the nodes that are actually in a lineage.
+
+    "Instance" means an instance *of the media being traced*, which is why a node
+    only qualifies once something ties it to the case's imagery: a measured
+    perceptual distance, or a recorded parent/child provenance link.
+
+    Without that filter the earliest node in the whole reconstruction won,
+    including exhibits that share nothing but a case file. A case holding two
+    photos and an unrelated video reported the video as the earliest known
+    instance of the photo's lineage -- the three uploads landed in the same
+    second, so the tie-break decided a provenance finding. Video has no
+    perceptual index here, so it can never be placed in an image's lineage; the
+    honest result for a case with nothing comparable is no origin at all.
+    """
+    dated = [
+        n
+        for n in nodes
+        if n["timestamp"]
+        and (
+            n["distance_to_case_evidence"] is not None
+            or n["parent_id"] is not None
+            or n["generation"] is not None
+        )
+    ]
     if not dated:
         return None
     earliest = min(
@@ -185,6 +207,27 @@ def _origin(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
             n["evidence_id"],
         ),
     )
+    # Instances sharing the winning timestamp. The sort above breaks such a tie on
+    # generation and then on evidence id, which is deterministic but forensically
+    # meaningless: when two copies carry the same recorded time, a uuid comparison
+    # decided which one this function named as the earliest known instance. The
+    # tie is now reported instead of hidden, so a reader can see that the ordering
+    # among those instances is not established by the record.
+    tied = sorted(
+        n["evidence_id"] for n in dated if n["timestamp"] == earliest["timestamp"]
+    )
+    caveat = (
+        "This is the earliest instance PRAMAAN can see in its local index. It "
+        "is NOT established as the absolute real-world origin: earlier copies "
+        "may exist outside the corpus, and the timestamp itself may be "
+        "inaccurate."
+    )
+    if len(tied) > 1:
+        caveat += (
+            f" {len(tied)} instances share this timestamp, so which of them came "
+            "first is NOT established by the record; the one named here was "
+            "selected deterministically, not measured to be earlier."
+        )
     return {
         "label": ORIGIN_LABEL,
         "evidence_id": earliest["evidence_id"],
@@ -199,12 +242,9 @@ def _origin(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
         "discovered_by": earliest["discovered_by"],
         "distance_to_case_evidence": earliest["distance_to_case_evidence"],
         "is_absolute_origin": False,
-        "caveat": (
-            "This is the earliest instance PRAMAAN can see in its local index. It "
-            "is NOT established as the absolute real-world origin: earlier copies "
-            "may exist outside the corpus, and the timestamp itself may be "
-            "inaccurate."
-        ),
+        "tied_earliest_evidence_ids": tied,
+        "timestamp_is_tied": len(tied) > 1,
+        "caveat": caveat,
     }
 
 
@@ -286,7 +326,13 @@ def reconstruct_case(
     for row in rows.values():
         occurred_at, timestamp_source = _node_timestamp(row)
         distance, similarity = _min_distance_to_case(row, case_hashes)
-        if row.id in case_ids:
+        # A case's own hashable evidence is trivially zero bits from itself, so
+        # this only restates what the measurement above already returned. It is
+        # gated on ``row.phash`` because it used to apply to *every* case item:
+        # a video, which PRAMAAN cannot perceptually hash at all, was recorded at
+        # distance 0 / similarity 1.0 from the case's images -- a claim of
+        # perceptual identity that nothing had measured.
+        if row.id in case_ids and row.phash:
             distance, similarity = 0, 1.0
         nodes.append(
             {

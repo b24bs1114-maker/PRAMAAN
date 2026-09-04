@@ -166,6 +166,29 @@ def m4a_bytes(seed: int = 0) -> bytes:
     return video[:8] + b"M4A " + video[12:]
 
 
+def mov_bytes(seed: int = 0) -> bytes:
+    """A QuickTime container: the same box layout, major brand ``qt  ``.
+
+    ``.mov`` and ``.mp4`` are both ISO-BMFF, so the brand is the only thing that
+    separates them in the header -- which is why a sniffer that ignores it records
+    ``video/mp4`` against QuickTime evidence.
+    """
+    video = mp4_bytes(seed=seed)
+    return video[:8] + b"qt  " + video[12:]
+
+
+def mov_bytes_without_ftyp(seed: int = 0) -> bytes:
+    """Old-style QuickTime: no ``ftyp`` box at all, ``moov`` comes first.
+
+    ISO-BMFF requires ``ftyp`` first, so a file whose leading box is ``moov`` is
+    QuickTime. Built by dropping the ``ftyp`` box off :func:`mp4_bytes`, whose
+    first box is 8 + 16 bytes of brand payload.
+    """
+    video = mp4_bytes(seed=seed)
+    ftyp_size = struct.unpack(">I", video[:4])[0]
+    return video[ftyp_size:]
+
+
 def mp3_bytes(seed: int = 0) -> bytes:
     """An ID3v2-tagged MPEG audio stub (header only -- not decodable audio)."""
     tag_body = b"\x00" * 32

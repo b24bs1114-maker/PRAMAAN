@@ -185,15 +185,55 @@ export function verdictBandLabel(band: VerdictBand | string | null | undefined):
   }
 }
 
-/** Icon glyph. Shape carries the meaning so colour is never the only cue. */
-export function verdictIcon(band: VerdictBand | string | null | undefined): string {
-  switch (verdictTone(band)) {
-    case 'authentic':
-      return '✓'
-    case 'manipulated':
-      return '⚠'
+/**
+ * Confidence band, as a word.
+ *
+ * `Verdict.confidence` is a STRING BAND from the backend -- `none`, `low` or
+ * `moderate`. It is never `high`, by construction: `fusion._confidence` carries
+ * the comment "Never 'high' -- no threshold here is validated", because no
+ * threshold in this system has been calibrated against ground truth.
+ *
+ * It is also not a probability. `Number('low')` is `NaN`, so the previous
+ * build's `(Number(verdict.confidence) * 100).toFixed(0)%` rendered the string
+ * `NaN%` and fell back to a hardcoded `82%` labelled "High Confidence" -- a
+ * number no part of the system ever produced, attached to a band the system
+ * refuses to emit. This function is the only sanctioned way to display the
+ * field: word in, word out, no arithmetic.
+ */
+export function confidenceBandLabel(confidence: string | null | undefined): string {
+  switch (confidence) {
+    case 'moderate':
+      return 'MODERATE'
+    case 'low':
+      return 'LOW'
+    case 'none':
+      return 'NONE'
+    case null:
+    case undefined:
+    case '':
+      return 'NOT REPORTED'
     default:
-      return '◐'
+      // An unrecognised band is shown verbatim rather than mapped onto one of
+      // the known words, which would misstate what the backend said.
+      return String(confidence).toUpperCase()
+  }
+}
+
+/** The one-line gloss under the band, explaining what it does and does not mean. */
+export function confidenceBandNote(confidence: string | null | undefined): string {
+  switch (confidence) {
+    case 'moderate':
+      return 'Enough signal coverage and margin for the strongest band this system emits. Not a calibrated probability.'
+    case 'low':
+      return 'Thin coverage or a score close to a threshold. Treat the band as a lead, not a conclusion.'
+    case 'none':
+      return 'No signal could be scored, so no confidence is claimed.'
+    case null:
+    case undefined:
+    case '':
+      return 'The backend did not report a confidence band for this verdict.'
+    default:
+      return 'Band reported by the backend fusion engine. No threshold in this build is calibrated.'
   }
 }
 
@@ -202,11 +242,16 @@ export function verdictIcon(band: VerdictBand | string | null | undefined): stri
  *
  * Rahul calls this "the strongest credibility sentence in the product": the
  * interface always states how much of the evidence base the verdict rests on.
+ *
+ * `signals_available` is the count that was actually assessed; `signals_total`
+ * is the count that was considered. Reading the total as "assessed" -- which an
+ * earlier phrasing did -- overstates the evidence base by however many signals
+ * were unavailable.
  */
 export function coverageLine(verdict: Verdict): string {
   const total = verdict.signals_total
   const available = verdict.signals_available
-  return `${total} SIGNALS ASSESSED · ${available} AVAILABLE`
+  return `${available} OF ${total} SIGNALS ASSESSED`
 }
 
 /** Longer form, spelling out the fraction of the evidence base. */

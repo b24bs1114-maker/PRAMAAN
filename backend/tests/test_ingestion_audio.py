@@ -15,7 +15,15 @@ import hashlib
 from fastapi.testclient import TestClient
 
 from app.services.storage import MEDIA_AUDIO, MEDIA_VIDEO, _sniff
-from tests.helpers import jpeg_bytes, m4a_bytes, mp3_bytes, mp4_bytes, wav_bytes
+from tests.helpers import (
+    jpeg_bytes,
+    m4a_bytes,
+    mov_bytes,
+    mov_bytes_without_ftyp,
+    mp3_bytes,
+    mp4_bytes,
+    wav_bytes,
+)
 
 
 def _upload(client: TestClient, data: bytes, name: str, mime: str = "audio/wav"):
@@ -45,9 +53,16 @@ def test_audio_containers_are_identified_from_their_bytes() -> None:
 
 
 def test_ftyp_brand_separates_audio_from_video_in_one_container() -> None:
-    """M4A and MP4 are the same box format; only the brand says which it is."""
+    """M4A, MOV and MP4 are the same box format; only the brand says which."""
     assert _sniff(m4a_bytes()[:32]) == ("audio/mp4", MEDIA_AUDIO, "m4a")
     assert _sniff(mp4_bytes()[:32]) == ("video/mp4", MEDIA_VIDEO, "mp4")
+    # QuickTime. Before the brand was read, this returned ("video/mp4", "mp4"):
+    # settings.video_extensions and the rejection message both advertise MOV, but
+    # nothing could produce it, so QuickTime evidence was recorded as MP4.
+    assert _sniff(mov_bytes()[:32]) == ("video/quicktime", MEDIA_VIDEO, "mov")
+    # Old-style QuickTime has no ftyp box at all; ISO-BMFF requires one first, so
+    # a leading moov identifies the container without guessing.
+    assert _sniff(mov_bytes_without_ftyp()[:32]) == ("video/quicktime", MEDIA_VIDEO, "mov")
     # An unrecognised brand stays video, which is what this sniffer did before
     # audio existed. Guessing "audio" for an unknown brand would silently reroute
     # video evidence to an audio model.

@@ -71,6 +71,11 @@ def _sanitise(text: str) -> str:
         "‘": "'", "’": "'", "“": '"', "”": '"',
         "–": "-", "—": "--", "…": "...", " ": " ",
         "→": "->", "×": "x", "≥": ">=", "≤": "<=",
+        # Neither is latin-1, so without these entries a bullet reached the
+        # unmappable branch below and printed as "?". (The ReportLab renderer in
+        # report.py drops bullets for its own reason: it reverse-maps U+2022 onto
+        # WinAnsi 0x7F, which that encoding leaves undefined.)
+        "•": "-", "·": "-",
     }
     out = []
     for ch in str(text):

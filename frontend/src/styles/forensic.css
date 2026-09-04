@@ -1,0 +1,1769 @@
+/**
+ * Forensic presentation layer.
+ *
+ * These classes carry meaning, not decoration. Two rules govern all of them:
+ *
+ *  1. An unmeasured value must look unmeasured. Excluded signals get a dashed
+ *     empty track, never a zero-length filled bar -- a zero-length bar reads as
+ *     "measured 0.000", which is a different claim.
+ *  2. A verdict never shows a percentage. The backend publishes a confidence
+ *     BAND (none / low / moderate) and a score with declared thresholds; the
+ *     UI renders exactly that and no derived certainty.
+ */
+
+/* ==========================================================================
+   Verdict
+   ========================================================================== */
+
+.verdict {
+  position: relative;
+  overflow: hidden;
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-1);
+  animation: pm-rise var(--dur-deliberate) var(--ease-entrance) both;
+}
+
+.verdict::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--rail-w);
+  background: var(--vd, var(--neutral));
+}
+
+.verdict--authentic {
+  --vd: var(--ok);
+}
+.verdict--manipulated {
+  --vd: var(--danger);
+}
+.verdict--inconclusive {
+  --vd: var(--warn);
+}
+.verdict--none {
+  --vd: var(--neutral);
+}
+
+.verdict__top {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-5);
+  padding: var(--space-5) var(--space-6);
+  background: color-mix(in srgb, var(--vd) 7%, var(--surface-1));
+  border-bottom: var(--bw) solid var(--line);
+}
+
+.verdict__mark {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  height: 46px;
+  border-radius: var(--r-md);
+  border: var(--bw) solid color-mix(in srgb, var(--vd) 42%, transparent);
+  background: color-mix(in srgb, var(--vd) 13%, transparent);
+  color: var(--vd);
+  font-size: 20px;
+  line-height: 1;
+  flex: none;
+}
+
+.verdict__headings {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.verdict__eyebrow {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: var(--ls-eyebrow);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.verdict__band {
+  font-size: var(--fs-h2);
+  font-weight: 700;
+  letter-spacing: var(--ls-display);
+  line-height: 1.1;
+  color: var(--vd);
+}
+
+.verdict__sub {
+  font-size: var(--fs-small);
+  color: var(--text-muted);
+}
+
+.verdict__aside {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+  flex: none;
+  text-align: right;
+}
+
+.verdict__body {
+  padding: var(--space-5) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.verdict__rationale {
+  font-size: var(--fs-body-lg);
+  line-height: var(--lh-prose);
+  color: var(--text-secondary);
+  max-width: 88ch;
+}
+
+/* ==========================================================================
+   Score scale.
+
+   The fusion score is plotted against the backend's OWN published thresholds
+   instead of being restated as a percentage. Zone widths are computed from
+   thresholds.authentic_at_or_below and thresholds.manipulated_at_or_above, so
+   the picture changes if the backend's configuration changes -- the frontend
+   asserts nothing of its own.
+   ========================================================================== */
+
+.scale {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.scale__track {
+  position: relative;
+  height: 26px;
+  display: flex;
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+
+.scale__zone {
+  height: 100%;
+  min-width: 0;
+}
+
+.scale__zone--authentic {
+  background: color-mix(in srgb, var(--ok) 20%, transparent);
+  border-right: var(--bw) solid color-mix(in srgb, var(--ok) 45%, transparent);
+}
+
+.scale__zone--middle {
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+}
+
+.scale__zone--manipulated {
+  background: color-mix(in srgb, var(--danger) 20%, transparent);
+  border-left: var(--bw) solid color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+/* Marker: drawn only when manipulation_score is a number. */
+.scale__marker {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 3px;
+  margin-left: -1.5px;
+  border-radius: var(--r-pill);
+  background: var(--text-primary);
+  box-shadow: 0 0 0 2px var(--surface-1);
+  transition: left var(--dur-deliberate) var(--ease-entrance);
+}
+
+.scale__marker::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -5px;
+  width: 9px;
+  height: 9px;
+  margin-left: -4.5px;
+  border-radius: 2px;
+  background: var(--text-primary);
+  transform: rotate(45deg);
+}
+
+.scale__axis {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.scale__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--fs-micro);
+  color: var(--text-muted);
+}
+
+.scale__legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.scale__swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.scale__swatch--authentic {
+  background: color-mix(in srgb, var(--ok) 55%, transparent);
+}
+.scale__swatch--middle {
+  background: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.scale__swatch--manipulated {
+  background: color-mix(in srgb, var(--danger) 55%, transparent);
+}
+
+/* Thresholds unknown: no zones can be drawn honestly, so the track is inert. */
+.scale__track--unknown {
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--surface-inset),
+    var(--surface-inset) 6px,
+    var(--surface-2) 6px,
+    var(--surface-2) 12px
+  );
+}
+
+/* ==========================================================================
+   Signals
+   ========================================================================== */
+
+.signal {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 200px;
+  gap: var(--space-4) var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: var(--bw) solid var(--line-faint);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.signal:last-child {
+  border-bottom: 0;
+}
+
+.signal:hover {
+  background: var(--surface-2);
+}
+
+.signal--excluded {
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 9px,
+    color-mix(in srgb, var(--neutral) 4%, transparent) 9px,
+    color-mix(in srgb, var(--neutral) 4%, transparent) 18px
+  );
+}
+
+.signal__main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.signal__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.signal__name {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.signal--excluded .signal__name {
+  color: var(--text-muted);
+}
+
+.signal__explanation {
+  font-size: var(--fs-small);
+  line-height: var(--lh-body);
+  color: var(--text-secondary);
+  max-width: 84ch;
+}
+
+/* The exclusion sentence. Always present on an excluded signal -- the dashed
+   bar alone would read as a measured zero. */
+.signal__note {
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  max-width: 84ch;
+}
+
+/* The bar. Included signals get a filled track; excluded ones get a dashed
+   empty track and the words, never a zero bar. */
+.signal__bar {
+  position: relative;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--surface-active);
+  overflow: hidden;
+}
+
+.signal__bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--sig, var(--neutral));
+  transform-origin: left;
+  animation: pm-fade-in var(--dur-slow) var(--ease-out) both;
+  transition: width var(--dur-slow) var(--ease-out);
+}
+
+.signal__bar--empty {
+  background: transparent;
+  border: var(--bw) dashed var(--line-strong);
+  height: 6px;
+}
+
+.signal--strong-authentic {
+  --sig: var(--ok);
+}
+.signal--weak-authentic {
+  --sig: var(--ok-strong);
+}
+.signal--neutral {
+  --sig: var(--warn);
+}
+.signal--weak-manipulated {
+  --sig: var(--danger-strong);
+}
+.signal--strong-manipulated {
+  --sig: var(--danger);
+}
+.signal--unavailable {
+  --sig: var(--neutral);
+}
+
+.signal__numbers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.signal__num-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: var(--fs-micro);
+}
+
+.signal__num-key {
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.signal__num-val {
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.signal__num-val--none {
+  color: var(--text-faint);
+}
+
+@media (max-width: 860px) {
+  .signal {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* The published arithmetic: the fusion sum exactly as the backend printed it.
+   Rendering it verbatim is how the UI proves it adds no maths of its own. */
+.arithmetic {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-inset);
+}
+
+.arithmetic__expr {
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  color: var(--text-primary);
+  overflow-x: auto;
+  white-space: pre;
+  padding-bottom: 2px;
+}
+
+.arithmetic__note {
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  line-height: var(--lh-body);
+}
+
+/* ==========================================================================
+   Evidence viewer
+   ========================================================================== */
+
+.viewer {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 280px;
+  background:
+    linear-gradient(45deg, var(--surface-inset) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--surface-inset) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--surface-inset) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--surface-inset) 75%);
+  background-size: 16px 16px;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+  background-color: var(--surface-2);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.viewer__media {
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  display: block;
+  animation: pm-fade-in var(--dur-slow) var(--ease-out) both;
+}
+
+/* The viewer and the sentences that qualify it. */
+.viewer-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Audio and unpreviewable types get a plain surface: the checkerboard means
+   "image transparency", and using it for a waveform-less player would be a
+   decorative borrowing with no meaning. */
+.viewer--flat {
+  background: var(--surface-inset);
+  min-height: 0;
+  padding: var(--space-5);
+}
+
+/* Zoom transform target. Regions are positioned against this box, so they
+   scale with the image instead of drifting off it. */
+.viewer__stage {
+  position: relative;
+  display: block;
+  transform-origin: center center;
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.viewer__audio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-muted);
+  width: 100%;
+}
+
+.viewer__player {
+  width: 100%;
+  max-width: 520px;
+}
+
+.viewer__audio-note {
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  max-width: 60ch;
+  text-align: center;
+  line-height: var(--lh-body);
+}
+
+.viewer__zoom-val {
+  align-self: center;
+  padding: 0 var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-secondary);
+}
+
+.viewer__note {
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  line-height: var(--lh-body);
+}
+
+.viewer__frame {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* Corner reticles: an examination frame, not a decorative flourish. They mark
+   the boundary of what is being inspected. */
+.viewer__reticle {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border: 2px solid color-mix(in srgb, var(--accent-2) 62%, transparent);
+}
+
+.viewer__reticle--tl {
+  top: 8px;
+  left: 8px;
+  border-right: 0;
+  border-bottom: 0;
+}
+.viewer__reticle--tr {
+  top: 8px;
+  right: 8px;
+  border-left: 0;
+  border-bottom: 0;
+}
+.viewer__reticle--bl {
+  bottom: 8px;
+  left: 8px;
+  border-right: 0;
+  border-top: 0;
+}
+.viewer__reticle--br {
+  bottom: 8px;
+  right: 8px;
+  border-left: 0;
+  border-top: 0;
+}
+
+.viewer__tag {
+  position: absolute;
+  top: var(--space-3);
+  left: var(--space-3);
+  z-index: 2;
+}
+
+.viewer__zoom {
+  position: absolute;
+  bottom: var(--space-3);
+  right: var(--space-3);
+  z-index: 2;
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--bg-void) 74%, transparent);
+  border: var(--bw) solid var(--line-strong);
+  backdrop-filter: blur(6px);
+}
+
+/* A detector region, drawn ONLY from coordinates the model actually stored. */
+.viewer__region {
+  position: absolute;
+  border: 2px solid var(--danger);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg-void) 60%, transparent);
+  animation: pm-fade-in var(--dur-slow) var(--ease-out) both;
+}
+
+.viewer__region-label {
+  position: absolute;
+  top: -18px;
+  left: -2px;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: var(--danger);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* Evidence thumbnail used in lists and grids. */
+.thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--surface-inset);
+  border: var(--bw) solid var(--line);
+  display: grid;
+  place-items: center;
+  color: var(--text-faint);
+  flex: none;
+}
+
+.thumb--sm {
+  width: 44px;
+  height: 44px;
+  aspect-ratio: auto;
+}
+
+.thumb--md {
+  width: 64px;
+  height: 64px;
+  aspect-ratio: auto;
+}
+
+.thumb__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumb__badge {
+  position: absolute;
+  bottom: 3px;
+  right: 3px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--bg-void) 82%, transparent);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ==========================================================================
+   Intake dropzone
+   ========================================================================== */
+
+.dropzone {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-9) var(--space-6);
+  border: 2px dashed var(--line-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface-inset);
+  text-align: center;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-base) var(--ease-out),
+    background-color var(--dur-base) var(--ease-out);
+}
+
+.dropzone:hover {
+  border-color: var(--line-accent);
+  background: var(--surface-2);
+}
+
+.dropzone--active {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+.dropzone--busy {
+  cursor: progress;
+  border-style: solid;
+}
+
+.dropzone__mark {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--r-md);
+  border: var(--bw) solid var(--line-strong);
+  background: var(--surface-1);
+  color: var(--accent);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.dropzone:hover .dropzone__mark {
+  transform: translateY(-2px);
+}
+
+.dropzone__title {
+  font-size: var(--fs-h4);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.dropzone__sub {
+  font-size: var(--fs-small);
+  color: var(--text-muted);
+  max-width: 56ch;
+  line-height: var(--lh-body);
+}
+
+.dropzone__formats {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: var(--space-1);
+}
+
+.dropzone__reticle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--accent);
+  opacity: 0;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+
+.dropzone--active .dropzone__reticle {
+  opacity: 1;
+}
+
+.dropzone__reticle--tl {
+  top: 10px;
+  left: 10px;
+  border-right: 0;
+  border-bottom: 0;
+}
+.dropzone__reticle--tr {
+  top: 10px;
+  right: 10px;
+  border-left: 0;
+  border-bottom: 0;
+}
+.dropzone__reticle--bl {
+  bottom: 10px;
+  left: 10px;
+  border-right: 0;
+  border-top: 0;
+}
+.dropzone__reticle--br {
+  bottom: 10px;
+  right: 10px;
+  border-left: 0;
+  border-top: 0;
+}
+
+/* ==========================================================================
+   Audit hash chain.
+
+   Each row is a link: previous_hash must equal the preceding row's row_hash.
+   The rail between markers is that relationship drawn literally. It is grey
+   until POST /audit/verify returns valid:true -- never green on arrival.
+   ========================================================================== */
+
+.chain {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.chain__link {
+  position: relative;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5) var(--space-3) var(--space-4);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.chain__link:hover {
+  background: var(--surface-2);
+}
+
+/* A row that opens a detail view is a real button, so it is reachable by
+   keyboard. It must not inherit any of the button chrome; focus comes from the
+   global :focus-visible rule, inset via .focus-inset. */
+.chain__link--button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* The connector. transform-origin top so the verified sweep grows downward. */
+.chain__rail {
+  position: absolute;
+  left: calc(var(--space-4) + 17px);
+  top: 30px;
+  bottom: -6px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--line-strong);
+}
+
+.chain__link:last-child .chain__rail {
+  display: none;
+}
+
+.chain--verified .chain__rail {
+  background: var(--ok);
+  animation: pm-chain-sweep var(--dur-deliberate) var(--ease-out) both;
+  transform-origin: top;
+}
+
+.chain--broken .chain__rail {
+  background: var(--line-strong);
+}
+
+/* Rows at or after the first invalid sequence lose the verified rail. */
+.chain__link--invalid .chain__rail,
+.chain--broken .chain__link--invalid ~ .chain__link .chain__rail {
+  background: var(--danger);
+}
+
+.chain__marker {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-sm);
+  border: var(--bw) solid var(--line-strong);
+  background: var(--surface-inset);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  flex: none;
+}
+
+.chain--verified .chain__marker {
+  border-color: color-mix(in srgb, var(--ok) 50%, transparent);
+  background: var(--ok-wash);
+  color: var(--ok-strong);
+}
+
+.chain__link--invalid .chain__marker {
+  border-color: var(--danger);
+  background: var(--danger-wash);
+  color: var(--danger-strong);
+}
+
+.chain__body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-bottom: var(--space-2);
+}
+
+.chain__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.chain__event {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.chain__time {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.chain__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  flex-wrap: wrap;
+  font-size: var(--fs-micro);
+  color: var(--text-muted);
+}
+
+/* previous_hash -> row_hash, shown as the link it is. */
+.chain__hashes {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.chain__hash-arrow {
+  color: var(--line-strong);
+}
+
+.chain--verified .chain__hash-arrow {
+  color: var(--ok);
+}
+
+/* Chain verification hero. Three states, and the initial one is NOT green. */
+.chainstate {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-5) var(--space-6);
+  border: var(--bw) solid var(--line);
+  border-left-width: var(--rail-w);
+  border-radius: var(--r-lg);
+  background: var(--surface-1);
+}
+
+.chainstate--pending {
+  border-left-color: var(--neutral);
+}
+
+.chainstate--verified {
+  border-left-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 5%, var(--surface-1));
+}
+
+.chainstate--failed {
+  border-left-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 5%, var(--surface-1));
+}
+
+.chainstate__mark {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: var(--r-md);
+  border: var(--bw) solid var(--line-strong);
+  background: var(--surface-inset);
+  color: var(--text-muted);
+  flex: none;
+}
+
+.chainstate--verified .chainstate__mark {
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+  background: var(--ok-wash);
+  color: var(--ok);
+}
+
+.chainstate--failed .chainstate__mark {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: var(--danger-wash);
+  color: var(--danger);
+}
+
+.chainstate__body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chainstate__title {
+  font-size: var(--fs-h3);
+  font-weight: 700;
+  letter-spacing: var(--ls-display);
+  color: var(--text-muted);
+}
+
+.chainstate--verified .chainstate__title {
+  color: var(--ok-strong);
+}
+
+.chainstate--failed .chainstate__title {
+  color: var(--danger-strong);
+}
+
+.chainstate__detail {
+  font-size: var(--fs-small);
+  color: var(--text-secondary);
+  line-height: var(--lh-body);
+  max-width: 78ch;
+}
+
+.chainstate__actions {
+  margin-left: auto;
+  flex: none;
+}
+
+/* Scope line under the verdict sentence: algorithm, scope, row counts. Data
+   only -- it makes no claim the state above has not already made. */
+.chainstate__meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  padding-top: 2px;
+}
+
+/* Custody strip: SHA-256 identity plus the client-side re-hash comparison.
+   The "match" claim is only made after the browser really computed the digest. */
+.custody {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-inset);
+  flex-wrap: wrap;
+}
+
+.custody__seal {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--r-xs);
+  border: var(--bw) solid color-mix(in srgb, var(--accent-2) 40%, transparent);
+  background: var(--accent-2-wash);
+  color: var(--accent-2);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: var(--ls-eyebrow);
+  text-transform: uppercase;
+  flex: none;
+}
+
+.custody__text {
+  font-size: var(--fs-small);
+  color: var(--text-secondary);
+  min-width: 0;
+  flex: 1;
+}
+
+/* ==========================================================================
+   Provenance: origin, graph, timeline.
+
+   Wording is fixed by the backend contract. The earliest row PRAMAAN holds is
+   the "earliest known instance in the indexed evidence corpus" -- not an
+   original, not a first upload, not a web-wide origin.
+   ========================================================================== */
+
+.origin {
+  position: relative;
+  overflow: hidden;
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-1);
+}
+
+.origin--found::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--rail-w);
+  background: var(--accent-2);
+}
+
+.origin--none::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--rail-w);
+  background: var(--neutral);
+}
+
+.origin__top {
+  display: flex;
+  gap: var(--space-5);
+  padding: var(--space-5) var(--space-6);
+  background: color-mix(in srgb, var(--accent-2) 5%, var(--surface-1));
+  border-bottom: var(--bw) solid var(--line);
+}
+
+.origin--none .origin__top {
+  background: var(--surface-2);
+}
+
+.origin__body {
+  padding: var(--space-5) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.origin__mark {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-md);
+  border: var(--bw) solid color-mix(in srgb, var(--accent-2) 40%, transparent);
+  background: var(--accent-2-wash);
+  color: var(--accent-2);
+  flex: none;
+}
+
+.origin--none .origin__mark {
+  border-color: var(--line-strong);
+  background: var(--surface-inset);
+  color: var(--text-muted);
+}
+
+.origin__titles {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.origin__ids {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+}
+
+.origin__actions {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The backend's own caveat sentence. Never abbreviated, never hidden behind a
+   disclosure -- it is the qualifier that keeps the heading honest. */
+.origin__caveat {
+  font-size: var(--fs-small);
+  color: var(--text-secondary);
+  line-height: var(--lh-body);
+  max-width: 90ch;
+}
+
+.origin__label {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: var(--ls-eyebrow);
+  text-transform: uppercase;
+  color: var(--accent-2);
+}
+
+.origin--none .origin__label {
+  color: var(--text-muted);
+}
+
+.origin__filename {
+  font-size: var(--fs-h3);
+  font-weight: 650;
+  letter-spacing: var(--ls-display);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.origin__hops {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  font-size: var(--fs-small);
+  color: var(--text-muted);
+}
+
+.origin__hop {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface-inset);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-secondary);
+}
+
+.origin__hop-arrow {
+  color: var(--line-strong);
+}
+
+/* Graph -------------------------------------------------------------------
+   Nodes are real HTML buttons positioned over an SVG edge layer, so the graph
+   is keyboard navigable and every node is selectable -- the previous build
+   could only reach node details through the timeline table. */
+
+.pgraph {
+  position: relative;
+  overflow: auto;
+  background:
+    radial-gradient(circle at 1px 1px, var(--line-faint) 1px, transparent 0)
+      0 0 / 22px 22px,
+    var(--surface-inset);
+  border-radius: var(--r-md);
+  min-height: 320px;
+}
+
+/* The graph plus its legend and detail panel. The legend is part of the
+   evidence: it is what tells the reader that a dashed line was never measured. */
+.pgraph-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.pgraph__legend {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3) var(--space-5);
+  flex-wrap: wrap;
+  font-size: var(--fs-micro);
+  color: var(--text-muted);
+}
+
+.pgraph__legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pgraph__legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--r-xs);
+  border: 2px solid var(--line-strong);
+  flex: none;
+}
+
+.pgraph__legend-swatch--subject {
+  border-color: var(--accent);
+}
+
+.pgraph__legend-swatch--earliest {
+  border-color: var(--accent-2);
+}
+
+.pgraph__hint {
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  line-height: var(--lh-body);
+}
+
+/* Relationship list inside the selected-node panel. Basis on its own line,
+   because the strength of a link is the point. */
+.pgraph__rels {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.pgraph__rel-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pgraph__rel {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2) var(--space-3);
+  align-items: center;
+  padding: var(--space-2) var(--space-3);
+  border: var(--bw) solid var(--line-faint);
+  border-radius: var(--r-sm);
+  background: var(--surface-inset);
+}
+
+.pgraph__rel-text {
+  font-size: var(--fs-micro);
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pgraph__rel-arrow {
+  color: var(--line-strong);
+}
+
+.pgraph__rel-basis {
+  grid-column: 2;
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  line-height: var(--lh-body);
+}
+
+.pgraph__canvas {
+  position: relative;
+  min-width: 100%;
+  padding: var(--space-6) var(--space-5);
+}
+
+.pgraph__edges {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.pgraph__edge {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+  transition:
+    stroke var(--dur-base) var(--ease-out),
+    stroke-width var(--dur-base) var(--ease-out);
+}
+
+/* An edge PRAMAAN measured (hash distance) vs one asserted by stored lineage.
+   Observed relationships are solid cyan; inferred ones stay dashed and grey. */
+.pgraph__edge--observed {
+  stroke: var(--accent-2);
+  stroke-dasharray: none;
+}
+
+.pgraph__edge--inferred {
+  stroke-dasharray: 4 4;
+}
+
+.pgraph__edge--active {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+
+.pgraph__edge-label {
+  fill: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.pgraph__lane {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: var(--bw) dashed var(--line-faint);
+  pointer-events: none;
+}
+
+.pgraph__lane-label {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.pnode {
+  position: absolute;
+  width: 188px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: var(--bw) solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-2);
+  text-align: left;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.pnode:hover {
+  border-color: var(--line-accent);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-3);
+}
+
+.pnode--active {
+  border-color: var(--accent);
+  box-shadow:
+    var(--shadow-2),
+    0 0 0 3px var(--accent-wash);
+}
+
+/* The case's own evidence -- the thing under examination. */
+.pnode--subject {
+  border-color: var(--accent);
+}
+
+/* The earliest instance PRAMAAN holds. Cyan = PRAMAAN measured this. */
+.pnode--earliest {
+  border-color: var(--accent-2);
+}
+
+.pnode__top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pnode__role {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.pnode--subject .pnode__role {
+  color: var(--accent);
+}
+
+.pnode--earliest .pnode__role {
+  color: var(--accent-2);
+}
+
+.pnode__name {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pnode__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pnode__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: 10px;
+}
+
+.pnode__key {
+  color: var(--text-faint);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.pnode__val {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.pnode__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding-top: var(--space-2);
+  border-top: var(--bw) solid var(--line-faint);
+}
+
+/* Timeline: observed timestamps, with their source stated. A timestamp whose
+   origin is a platform claim is not the same evidence as one PRAMAAN recorded. */
+.timeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.timeline__row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 150px 20px minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.timeline__row:hover {
+  background: var(--surface-2);
+}
+
+.timeline__when {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-muted);
+  text-align: right;
+  padding-top: 2px;
+}
+
+.timeline__gutter {
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+
+.timeline__gutter::before {
+  content: '';
+  position: absolute;
+  top: 14px;
+  bottom: -18px;
+  width: 2px;
+  background: var(--line);
+}
+
+.timeline__row:last-child .timeline__gutter::before {
+  display: none;
+}
+
+.timeline__node {
+  position: relative;
+  z-index: 1;
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: var(--r-pill);
+  background: var(--surface-1);
+  border: 2px solid var(--line-strong);
+  flex: none;
+}
+
+.timeline__node--earliest {
+  border-color: var(--accent-2);
+  background: var(--accent-2);
+}
+
+.timeline__node--subject {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.timeline__content {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: var(--space-2);
+}
+
+.timeline__title {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.timeline__detail {
+  font-size: var(--fs-micro);
+  color: var(--text-muted);
+  display: flex;
+  gap: var(--space-2) var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* Where the time came from. A platform's claim and a PRAMAAN record are not
+   interchangeable, so the provenance of each timestamp travels with it. */
+.timeline__source {
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  line-height: var(--lh-body);
+}
+
+/* The dated / undated divide, stated. Undated rows are not "latest". */
+.timeline__break {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  border: var(--bw) dashed var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface-inset);
+  font-size: var(--fs-micro);
+  color: var(--text-muted);
+}
+
+@media (max-width: 720px) {
+  .timeline__row {
+    grid-template-columns: 20px minmax(0, 1fr);
+  }
+
+  .timeline__when {
+    grid-column: 1 / -1;
+    text-align: left;
+    padding-left: 32px;
+  }
+}
+
+/* ==========================================================================
+   Reports. The backend renders and hashes the PDF; the frontend lists and
+   downloads it and never draws a competing report of its own.
+   ========================================================================== */
+
+.artefact {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+
+.artefact:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+
+/* A document glyph, not a fake page preview. Rendering a mock first page would
+   be inventing report content. */
+.artefact__glyph {
+  position: relative;
+  width: 92px;
+  height: 118px;
+  border: var(--bw) solid var(--line-strong);
+  border-radius: var(--r-xs);
+  background: var(--surface-inset);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: var(--space-3) var(--space-2);
+  overflow: hidden;
+  flex: none;
+}
+
+.artefact__glyph::after {
+  content: 'PDF';
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  padding: 1px 5px;
+  background: var(--danger);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  border-top-left-radius: var(--r-xs);
+}
+
+.artefact__glyph-line {
+  height: 3px;
+  border-radius: var(--r-pill);
+  background: var(--line-strong);
+}
+
+.artefact__glyph-line:nth-child(1) {
+  width: 70%;
+  background: var(--accent);
+  height: 4px;
+}
+.artefact__glyph-line:nth-child(2) {
+  width: 100%;
+}
+.artefact__glyph-line:nth-child(3) {
+  width: 88%;
+}
+.artefact__glyph-line:nth-child(4) {
+  width: 94%;
+}
+.artefact__glyph-line:nth-child(5) {
+  width: 62%;
+}
+.artefact__glyph-line:nth-child(6) {
+  width: 82%;
+}
+
+.artefact__main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.artefact__name {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.artefact__specs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-2) var(--space-4);
+}
+
+.artefact__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.artefact__titles {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.artefact__ids {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+}
+
+.artefact__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  flex: none;
+}
+
+/* The line that stops the card from becoming a report of its own. */
+.artefact__note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  line-height: var(--lh-body);
+}
+
+@media (max-width: 720px) {
+  .artefact {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .artefact__glyph {
+    display: none;
+  }
+}
+
+
+
+
+
+
+
+
+
+
+

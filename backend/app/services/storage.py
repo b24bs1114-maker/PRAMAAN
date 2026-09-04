@@ -58,6 +58,19 @@ _MAGIC: tuple[tuple[int, bytes, str, str, str], ...] = (
 #: before audio existed -- an unrecognised brand must not become audio.
 _AUDIO_FTYP_BRANDS = frozenset({b"M4A ", b"M4B ", b"M4P ", b"F4A ", b"F4B "})
 
+#: QuickTime's ``ftyp`` major brand. A ``.mov`` shares the ISO-BMFF box layout
+#: with MP4, so before this it sniffed as ``video/mp4`` with extension ``mp4``:
+#: ``settings.video_extensions`` and the rejection message both advertise MOV,
+#: but no code path could produce it. That recorded the wrong container format
+#: against the evidence and raised a spurious declared-vs-detected mismatch
+#: warning for the *correct* declared type ``video/quicktime``.
+_QUICKTIME_FTYP_BRANDS = frozenset({b"qt  "})
+
+#: First atom of a header-less (pre-``ftyp``) QuickTime file. ISO-BMFF requires
+#: ``ftyp`` to come first, so a file whose first box is one of these is
+#: QuickTime rather than MP4.
+_QUICKTIME_LEADING_ATOMS = frozenset({b"moov", b"mdat", b"wide", b"pnot"})
+
 #: MPEG audio / ADTS frame sync. The second byte carries the MPEG version and
 #: layer, which is the only thing separating a bare MP3 frame from ADTS AAC.
 _MP3_FRAME_SYNC = frozenset({b"\xff\xfb", b"\xff\xfa", b"\xff\xf3", b"\xff\xf2"})
@@ -120,11 +133,15 @@ def _sniff(header: bytes) -> tuple[str, str, str] | None:
         if header[offset : offset + len(signature)] == signature:
             return mime, media, ext
     if header[4:8] == b"ftyp":
-        # One container, two media types: the brand decides. Anything that is not
-        # a known audio brand remains MP4 video, as before.
+        # One container, three media types: the brand decides. Anything that is
+        # not a known audio or QuickTime brand remains MP4 video, as before.
         if header[8:12] in _AUDIO_FTYP_BRANDS:
             return "audio/mp4", MEDIA_AUDIO, "m4a"
+        if header[8:12] in _QUICKTIME_FTYP_BRANDS:
+            return "video/quicktime", MEDIA_VIDEO, "mov"
         return "video/mp4", MEDIA_VIDEO, "mp4"
+    if header[4:8] in _QUICKTIME_LEADING_ATOMS:
+        return "video/quicktime", MEDIA_VIDEO, "mov"
     if header[:4] == b"RIFF" and len(header) >= 12:
         if header[8:12] == b"WEBP":
             return "image/webp", MEDIA_IMAGE, "webp"

@@ -1,0 +1,14 @@
+/**
+ * PRAMAAN stylesheet entry point.
+ *
+ * Layer order matters: tokens define the vocabulary, base resets and sets the
+ * document, ui provides product-agnostic primitives, shell frames the app,
+ * forensic carries domain meaning, screens compose pages.
+ */
+
+@import './tokens.css';
+@import './base.css';
+@import './ui.css';
+@import './shell.css';
+@import './forensic.css';
+@import './screens.css';

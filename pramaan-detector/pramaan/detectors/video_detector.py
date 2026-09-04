@@ -293,6 +293,13 @@ def detect_video(path: str | Path, model_path: Optional[str] = None, **kwargs) -
     return result.to_dict()
 
 
+#: Parameter-name fragments a checkpoint must contain to be usable by
+#: ``ImageForensicNet``: EfficientNet-B0's feature stack, and the 2-class head
+#: (``classifier`` is ``Sequential(Dropout, Linear)``, so its only parameters are
+#: ``classifier.1.weight`` / ``classifier.1.bias``).
+_REQUIRED_PARAM_FRAGMENTS = (b"features.", b"classifier.1.")
+
+
 def checkpoint_readiness(model_path: Optional[str] = None) -> tuple[bool, Optional[str]]:
     """Can this module ever produce a video score with ``model_path``?
 
@@ -304,8 +311,18 @@ def checkpoint_readiness(model_path: Optional[str] = None) -> tuple[bool, Option
     The answer has to be cheap: status is polled by the dashboard. So the
     checkpoint is *not* loaded. A ``.pt`` file is a zip archive whose ``data.pkl``
     member holds the state-dict's key names as plain strings, a few hundred KB,
-    and that is enough to tell Swin-B parameters from this EfficientNet-B0 frame
-    model's. Loading the tensors instead costs ~520 MB of RSS (measured).
+    and that is enough to tell one architecture's parameters from another's.
+    Loading the tensors instead costs ~520 MB of RSS (measured).
+
+    The test is an allowlist -- the checkpoint must contain the parameter names
+    this frame model actually needs. It used to be a denylist that rejected only
+    the ``swin.`` prefix it had seen before and accepted everything else, so
+    ``checkpoint_readiness("audio_detector.pt")`` returned ``True``: pointing
+    ``PRAMAAN_VIDEO_MODEL_PATH`` at the 1.26 GB wav2vec2 *speech* checkpoint --
+    the adjacent line in ``.env.example`` -- made the status endpoint advertise an
+    available video deepfake detector, because that file happens to contain the
+    string ``classifier.``. An allowlist cannot pass a checkpoint nobody has
+    thought to exclude.
     """
     resolved = Path(model_path) if model_path else _DEFAULT_WEIGHTS_PATH
     if not resolved.exists():
@@ -316,20 +333,31 @@ def checkpoint_readiness(model_path: Optional[str] = None) -> tuple[bool, Option
         with zipfile.ZipFile(resolved) as archive:
             pickles = [n for n in archive.namelist() if n.endswith("data.pkl")]
             if not pickles:
-                return True, None      # not a zip-format checkpoint; let load decide
+                # A torch.save archive always has one. Without it this is a
+                # legacy pickle, a TorchScript module, or not a checkpoint at
+                # all, and readiness cannot be established cheaply. Reporting
+                # "ready" here is what advertised a video detector that did not
+                # exist, so the unknown case is reported as unknown.
+                return False, (
+                    f"{resolved.name} is not a torch.save archive, so its "
+                    f"parameter names cannot be read without loading it and "
+                    f"readiness cannot be established. Re-save the checkpoint "
+                    f"with torch.save(model.state_dict(), ...). "
+                    f"{NO_TRAINED_MODEL_EXPLANATION}"
+                )
             blob = archive.read(pickles[0])
-    except Exception:
-        return True, None              # unreadable here is reported by the loader
-    if b"swin." in blob:
+    except Exception as exc:
         return False, (
-            f"{resolved.name} contains Swin-B image-classifier parameters, not "
-            f"weights for this EfficientNet-B0 frame model. "
+            f"{resolved.name} could not be read as a checkpoint archive "
+            f"({exc.__class__.__name__}), so readiness could not be established. "
             f"{NO_TRAINED_MODEL_EXPLANATION}"
         )
-    if b"classifier." not in blob:
+
+    missing = [f.decode() for f in _REQUIRED_PARAM_FRAGMENTS if f not in blob]
+    if missing:
         return False, (
-            f"{resolved.name} supplies no classifier head for this frame model, "
-            f"so the head would stay randomly initialised. "
+            f"{resolved.name} does not hold weights for this EfficientNet-B0 "
+            f"frame model: it declares no {' or '.join(missing)} parameters. "
             f"{NO_TRAINED_MODEL_EXPLANATION}"
         )
     return True, None

@@ -1,0 +1,859 @@
+/**
+ * Shell: the persistent frame around every route -- topbar, sidebar, case
+ * workflow rail, command palette.
+ */
+
+.app {
+  display: grid;
+  grid-template-rows: var(--topbar-h) minmax(0, 1fr);
+  height: 100%;
+  background: var(--bg-void);
+}
+
+.app__body {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.app__main {
+  position: relative;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--bg-base);
+  border-top-left-radius: var(--r-xl);
+  border-left: var(--bw) solid var(--line);
+  border-top: var(--bw) solid var(--line);
+}
+
+/* ==========================================================================
+   Topbar
+   ========================================================================== */
+
+.topbar {
+  z-index: var(--z-topbar);
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-4);
+  background: var(--bg-void);
+}
+
+.topbar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 38px;
+  padding-right: var(--space-4);
+  border-radius: var(--r-sm);
+  flex: none;
+  cursor: pointer;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.topbar__brand:hover {
+  opacity: 0.82;
+}
+
+.topbar__brand-img {
+  height: 26px;
+  width: auto;
+  object-fit: contain;
+}
+
+.topbar__divider {
+  width: var(--bw);
+  height: 22px;
+  background: var(--line-strong);
+  flex: none;
+}
+
+/* Global search. The palette is the real search surface; this is its trigger,
+   so it looks like a field but behaves like a button. */
+.topbar__search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 32px;
+  width: min(460px, 100%);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  background: var(--surface-inset);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--text-faint);
+  font-size: var(--fs-small);
+  text-align: left;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out);
+}
+
+.topbar__search:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+.topbar__search-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar__right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+
+.topbar__icon-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.topbar__icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.topbar__badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-pill);
+  background: var(--danger);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  border: 2px solid var(--bg-void);
+  box-sizing: content-box;
+}
+
+.topbar__clock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  padding-left: var(--space-3);
+  border-left: var(--bw) solid var(--line);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.topbar__date {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.topbar__time {
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* ==========================================================================
+   Sidebar
+   ========================================================================== */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-void);
+  padding: 0 var(--space-3) var(--space-3);
+}
+
+.sidebar__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding-top: var(--space-2);
+}
+
+.sidebar__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar__label {
+  padding: 0 var(--space-3) var(--space-2);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.sidebar__item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-3);
+  height: 32px;
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  font-size: var(--fs-body);
+  font-weight: 500;
+  text-align: left;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.sidebar__item:hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+.sidebar__item--active {
+  background: var(--accent-wash);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.sidebar__item--active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: var(--rail-w);
+  border-radius: 0 var(--r-pill) var(--r-pill) 0;
+  background: var(--accent);
+}
+
+.sidebar__item-icon {
+  flex: none;
+  color: var(--text-muted);
+  transition: color var(--dur-fast) var(--ease-out);
+}
+
+.sidebar__item--active .sidebar__item-icon {
+  color: var(--accent);
+}
+
+.sidebar__item-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar__item-count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.sidebar__footer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  margin-top: var(--space-3);
+  border-top: var(--bw) solid var(--line);
+}
+
+/* System status card: reports what the backend said, never a fixed reassurance. */
+.sysstat {
+  padding: var(--space-3);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.sysstat__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sysstat__title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.sysstat__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--fs-micro);
+}
+
+.sysstat__key {
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.sysstat__val {
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.sysstat__val--ok {
+  color: var(--ok-strong);
+}
+.sysstat__val--warn {
+  color: var(--warn-strong);
+}
+.sysstat__val--danger {
+  color: var(--danger-strong);
+}
+.sysstat__val--none {
+  color: var(--text-faint);
+}
+
+/* Session identity. There is no auth in this build, and the sidebar says so
+   rather than inventing an examiner. */
+.session-pill {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+}
+
+.session-pill__mark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-sm);
+  background: var(--surface-3);
+  border: var(--bw) solid var(--line-strong);
+  color: var(--text-muted);
+  flex: none;
+}
+
+.session-pill__info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.session-pill__name {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-pill__role {
+  font-size: 10px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   Case workflow rail.
+
+   The six stages -- UPLOAD, EXAMINE, EXPLAIN, TRACE, VERIFY, REPORT -- are the
+   product's spine, so they are pinned above every case-scoped screen. Stage
+   completion is DERIVED from backend state (see src/lib/caseflow.ts); nothing
+   here can be marked done by navigating past it.
+   ========================================================================== */
+
+.caserail {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  background: color-mix(in srgb, var(--bg-base) 86%, transparent);
+  backdrop-filter: blur(10px) saturate(140%);
+  border-bottom: var(--bw) solid var(--line);
+}
+
+.caserail__top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-7);
+  max-width: var(--content-max);
+  margin: 0 auto;
+  width: 100%;
+}
+
+.caserail__id {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.caserail__number {
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+}
+
+.caserail__title {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 42ch;
+}
+
+.caserail__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.caserail__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+
+.caserail__steps {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 0 var(--space-7);
+  max-width: var(--content-max);
+  margin: 0 auto;
+  width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.caserail__steps::-webkit-scrollbar {
+  display: none;
+}
+
+.step {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-3) var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--fs-small);
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+
+.step::after {
+  content: '';
+  position: absolute;
+  left: var(--space-3);
+  right: var(--space-3);
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.step:hover:not(:disabled) {
+  color: var(--text-secondary);
+}
+
+.step:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+.step--active {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.step--active::after {
+  transform: scaleX(1);
+}
+
+/* The stage marker is the honest bit: filled only when the underlying backend
+   state exists, hollow while pending, dashed when the stage cannot be entered. */
+.step__mark {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--r-pill);
+  border: var(--bw) solid var(--line-strong);
+  background: var(--surface-inset);
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  flex: none;
+  transition:
+    background-color var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) var(--ease-out),
+    color var(--dur-base) var(--ease-out);
+}
+
+.step--done .step__mark {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: var(--text-inverse);
+}
+
+.step--active .step__mark {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.step--blocked .step__mark {
+  border-style: dashed;
+}
+
+.step__label {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  align-items: flex-start;
+}
+
+.step__name {
+  font-size: var(--fs-small);
+  line-height: 1.25;
+}
+
+.step__state {
+  font-size: 9px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  line-height: 1.25;
+}
+
+.step--done .step__state {
+  color: var(--ok);
+}
+
+.step__sep {
+  align-self: center;
+  width: 14px;
+  height: var(--bw);
+  background: var(--line);
+  flex: none;
+}
+
+/* ==========================================================================
+   Command palette. Cmd/Ctrl-K. Searches only what the backend returned.
+   ========================================================================== */
+
+.palette-root {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-palette);
+  display: flex;
+  justify-content: center;
+  padding: 12vh var(--space-5) var(--space-5);
+}
+
+.palette {
+  position: relative;
+  width: min(680px, 100%);
+  max-height: 62vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-rail);
+  border: var(--bw) solid var(--line-strong);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+  animation: pm-scale-in var(--dur-base) var(--ease-out) both;
+}
+
+.palette__field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: var(--bw) solid var(--line);
+  flex: none;
+}
+
+.palette__input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  outline: none;
+  font-size: var(--fs-h4);
+  color: var(--text-primary);
+}
+
+.palette__input::placeholder {
+  color: var(--text-faint);
+}
+
+.palette__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2);
+}
+
+.palette__group-label {
+  padding: var(--space-3) var(--space-3) var(--space-1);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.palette__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--r-sm);
+  text-align: left;
+  color: var(--text-secondary);
+  transition: background-color var(--dur-instant) var(--ease-out);
+}
+
+.palette__item--active {
+  background: var(--accent-wash);
+  color: var(--text-primary);
+}
+
+.palette__item-icon {
+  flex: none;
+  color: var(--text-faint);
+}
+
+.palette__item--active .palette__item-icon {
+  color: var(--accent);
+}
+
+.palette__item-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.palette__item-title {
+  font-size: var(--fs-body);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette__item-sub {
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette__item-tag {
+  flex: none;
+}
+
+.palette__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  border-top: var(--bw) solid var(--line);
+  background: var(--surface-2);
+  font-size: var(--fs-micro);
+  color: var(--text-faint);
+  flex: none;
+}
+
+.palette__hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ==========================================================================
+   Shell responsiveness.
+
+   1280 and up: full sidebar.
+   1024-1279:   narrower sidebar, labels intact.
+   Below 1024:  sidebar becomes an off-canvas sheet; the topbar gains a toggle.
+   ========================================================================== */
+
+@media (max-width: 1279px) {
+  :root {
+    --sidebar-w: 200px;
+  }
+
+  .caserail__top,
+  .caserail__steps {
+    padding-left: var(--space-5);
+    padding-right: var(--space-5);
+  }
+
+  .screen {
+    padding-left: var(--space-5);
+    padding-right: var(--space-5);
+  }
+}
+
+@media (max-width: 1023px) {
+  .app__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .app__main {
+    border-left: 0;
+    border-top-left-radius: 0;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: var(--topbar-h);
+    bottom: 0;
+    left: 0;
+    z-index: var(--z-drawer);
+    width: min(280px, 84vw);
+    background: var(--bg-rail);
+    border-right: var(--bw) solid var(--line-strong);
+    box-shadow: var(--shadow-3);
+    transform: translateX(-101%);
+    transition: transform var(--dur-slow) var(--ease-entrance);
+  }
+
+  .sidebar--open {
+    transform: none;
+  }
+
+  .sidebar-scrim {
+    position: fixed;
+    top: var(--topbar-h);
+    inset: var(--topbar-h) 0 0 0;
+    z-index: calc(var(--z-drawer) - 1);
+    background: var(--scrim);
+  }
+}
+
+@media (min-width: 1024px) {
+  .topbar__menu,
+  .sidebar-scrim {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .topbar {
+    gap: var(--space-2);
+    padding: 0 var(--space-3);
+  }
+
+  .topbar__brand {
+    padding-right: 0;
+  }
+
+  .topbar__brand-img {
+    height: 22px;
+  }
+
+  .topbar__divider,
+  .topbar__clock {
+    display: none;
+  }
+
+  .topbar__search-label,
+  .topbar__search .kbd {
+    display: none;
+  }
+
+  .topbar__search {
+    width: 32px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .caserail__top {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .caserail__steps {
+    padding: 0 var(--space-4);
+  }
+
+  .caserail__actions {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .step__state {
+    display: none;
+  }
+
+  .palette-root {
+    padding: var(--space-4);
+  }
+
+  .drawer__panel {
+    width: 100vw;
+  }
+}
+
+
+
+
+
+

@@ -12,7 +12,13 @@ for filenames, sizes and SHA-256 digests -- and for each modality checks:
 Step 4 is skipped with ``--no-load`` (useful in a build container where the
 point is only to prove the bytes arrived intact).
 
-Exit code 0 means every declared asset is present, verified and loadable.
+A modality the manifest marks ``"status": "unpublished"`` has no asset to check.
+It is reported ``[UNAVAILABLE]`` and counted separately: not verified, and not a
+failure either, because nothing is broken. Video used to be declared with the
+*image* checkpoint's filename and digest, so this script printed ``[OK]`` for
+video and a build log appeared to show three verified detectors where two exist.
+
+Exit code 0 means every *published* asset is present, verified and loadable.
 """
 
 from __future__ import annotations
@@ -59,12 +65,16 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-def resolve_checkpoint(modality: str, entry: dict) -> Path:
+def resolve_checkpoint(modality: str, entry: dict) -> Path | None:
+    """The checkpoint to check, or ``None`` when the manifest declares no asset."""
     override = os.getenv(PATH_ENV[modality], "").strip()
     if override:
         candidate = Path(override).expanduser()
         return candidate if candidate.is_absolute() else (PROJECT_ROOT / candidate)
-    return WEIGHTS_DIR / entry["checkpoint_filename"]
+    filename = entry.get("checkpoint_filename")
+    if not filename:
+        return None
+    return WEIGHTS_DIR / filename
 
 
 def load_image(checkpoint: Path) -> str:
@@ -78,9 +88,22 @@ def load_image(checkpoint: Path) -> str:
 
 
 def load_video(checkpoint: Path) -> str:
+    """Build the video detector, and fail unless it can actually score frames.
+
+    ``VideoDetector`` never raises on an unusable checkpoint -- it records why and
+    abstains -- so returning a description here regardless printed ``[OK] loaded``
+    for a detector that cannot produce a single score. The unusable state is
+    raised so the caller reports it as the failure it is.
+    """
     from pramaan.detectors.video_detector import VideoDetector
 
     detector = VideoDetector(weights_path=str(checkpoint))
+    if not detector.usable:
+        raise RuntimeError(
+            f"loaded no usable frame model (load_strategy="
+            f"{getattr(detector, 'load_strategy', 'unknown')}): "
+            f"{detector.unavailable_reason}"
+        )
     return (
         f"{type(detector.frame_model).__name__} loaded via "
         f"{getattr(detector, 'load_strategy', 'unknown')} "
@@ -89,9 +112,20 @@ def load_video(checkpoint: Path) -> str:
 
 
 def load_audio(checkpoint: Path) -> str:
+    """Build the audio detector, and fail unless it can actually score audio.
+
+    Same reason as ``load_video``: ``AudioDetector`` reports an unloadable
+    checkpoint through ``usable``/``unavailable_reason`` rather than raising.
+    """
     from pramaan.detectors.audio_detector import AudioDetector
 
     detector = AudioDetector(weights_path=str(checkpoint))
+    if not detector.usable:
+        raise RuntimeError(
+            f"loaded no usable model (load_strategy="
+            f"{getattr(detector, 'load_strategy', 'unknown')}): "
+            f"{detector.unavailable_reason}"
+        )
     return f"{type(detector.model).__name__} loaded (weights_hash={detector.weights_hash})"
 
 LOADERS = {"image": load_image, "video": load_video, "audio": load_audio}
@@ -132,6 +166,7 @@ def main() -> int:
     wanted = args.modality or env_list or sorted(models)
 
     failures: list[str] = []
+    unpublished: list[str] = []
     print(f"=== PRAMAAN model asset verification ===")
     print(f"manifest: {MANIFEST_PATH}")
 
@@ -142,6 +177,24 @@ def main() -> int:
             continue
         checkpoint = resolve_checkpoint(modality, entry)
         print(f"\n--- {modality} ---")
+
+        # An unpublished modality with no override has nothing to verify. Saying
+        # so is the whole point: an absent detector must not be reportable as a
+        # verified one, and the previous manifest made video indistinguishable
+        # from a provisioned modality in this output.
+        if checkpoint is None:
+            print("[UNAVAILABLE] the manifest declares no checkpoint for this modality")
+            detail = str(entry.get("status_detail") or "").strip()
+            if detail:
+                print(f"              {detail}")
+            if entry.get("expected_checkpoint_filename"):
+                print(f"              expected filename once published: "
+                      f"{entry['expected_checkpoint_filename']}")
+            print(f"              nothing was verified; set {PATH_ENV[modality]} to "
+                  f"check your own checkpoint")
+            unpublished.append(modality)
+            continue
+
         print(f"path      : {checkpoint}")
 
         if not checkpoint.is_file():
@@ -159,13 +212,21 @@ def main() -> int:
 
         if not args.no_hash:
             digest = sha256_of(checkpoint)
-            expected = entry.get("weights_sha256", "")
+            expected = entry.get("weights_sha256") or ""
             print(f"sha256    : {digest}")
             if expected and digest != expected:
                 print(f"[FAIL] digest mismatch, manifest declares {expected}")
                 failures.append(f"{modality}: sha256 mismatch")
                 continue
-            print("[OK] digest matches manifest")
+            if expected:
+                print("[OK] digest matches manifest")
+            else:
+                # A checkpoint supplied by env override against an unpublished
+                # entry. It is present, but the manifest holds no digest to check
+                # it against, so nothing has been verified and the output must
+                # not imply otherwise.
+                print("[UNVERIFIED] the manifest declares no digest for this "
+                      "modality, so the file's contents were not checked")
 
         if args.no_load:
             continue
@@ -179,12 +240,20 @@ def main() -> int:
         print(f"[OK] loaded: {detail}")
 
     print()
+    if unpublished:
+        print(f"=== {len(unpublished)} MODALITY(S) WITH NO PUBLISHED ASSET ===")
+        for modality in unpublished:
+            print(f"  - {modality}: unavailable, nothing verified")
     if failures:
         print(f"=== {len(failures)} FAILURE(S) ===")
         for failure in failures:
             print(f"  - {failure}")
         return 1
-    print("=== all declared model assets verified ===")
+    checked = [m for m in wanted if m not in unpublished]
+    if checked:
+        print(f"=== published model assets verified: {', '.join(checked)} ===")
+    else:
+        print("=== nothing to verify: no requested modality has a published asset ===")
     return 0
 
 

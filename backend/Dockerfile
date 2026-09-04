@@ -21,7 +21,12 @@ ARG PIP_EXTRA_ARGS=""
 # to pull from a mirror or a signed URL instead.
 ARG PRAMAAN_WEIGHTS_RELEASE_REPO=""
 ARG PRAMAAN_WEIGHTS_RELEASE_TAG=""
-ARG PRAMAAN_WEIGHTS_MODALITIES="image,video"
+# Which checkpoints to provision. "video" is not a valid choice to add: no video
+# checkpoint is published, so it would fetch nothing (see the manifest). Add
+# ",audio" only when the instance has >= 2 GB of RAM -- that model peaks at
+# ~1.67 GB resident, and an image that ships it to a 512 MB instance produces an
+# OOM kill mid-request instead of a forensic result.
+ARG PRAMAAN_WEIGHTS_MODALITIES="image"
 ARG PRAMAAN_IMAGE_WEIGHTS_URL=""
 ARG PRAMAAN_VIDEO_WEIGHTS_URL=""
 ARG PRAMAAN_AUDIO_WEIGHTS_URL=""
@@ -68,18 +73,36 @@ RUN set -eu; \
           || echo "[WARN] model assets absent/unverified; those modalities will report UNAVAILABLE"; \
     fi
 
-# 3b. Bake in the torchvision EfficientNet-B0 weights the video frame model falls
-#     back to. Without this the *first video analysis* downloads them from
-#     download.pytorch.org at runtime -- a 20 MB fetch that makes the image
-#     non-reproducible, stalls the request, and fails outright on an instance
-#     with no egress. TORCH_HOME must match the runtime user's, so it is set to a
-#     fixed path rather than the build user's $HOME.
-ENV TORCH_HOME=/app/.torch
-RUN python -c "from torchvision.models import EfficientNet_B0_Weights as W; \
-p=W.DEFAULT.get_state_dict(progress=False); print('cached EfficientNet-B0:', len(p), 'tensors')"
+# 3b. Keep any torch cache inside the image at a path the runtime user owns.
+#     Nothing is pre-fetched into it: this used to bake in torchvision's
+#     EfficientNet-B0 weights because the video frame model fell back to them
+#     when no video checkpoint was present. It no longer does -- with no trained
+#     checkpoint it builds no model at all and abstains, so the only remaining
+#     constructor is ImageForensicNet(pretrained=False), which downloads nothing.
+#     TORCH_HOME still points at a fixed path so that if torch ever does cache
+#     something it lands somewhere writable rather than in a nonexistent $HOME.
+ENV TORCH_HOME=/app/.torch \
+    HF_HOME=/app/.hf
+
+# 3c. When the audio checkpoint was provisioned, cache its *architecture config*
+#     (config.json only -- never weights; the tensors come from the verified
+#     checkpoint on disk). The runtime sets PRAMAAN_DETECTOR_OFFLINE=true, so
+#     transformers may not reach the hub: without this cached config the audio
+#     model cannot be constructed at all, and audio would report
+#     INSUFFICIENT_EVIDENCE on every request in an image that shipped a 1.26 GB
+#     checkpoint. Skipped when audio was not provisioned, so no build needs egress
+#     it does not use.
+RUN set -eu; \
+    case ",${PRAMAAN_WEIGHTS_MODALITIES}," in \
+      *,audio,*) python -c "from transformers import AutoConfig; \
+c=AutoConfig.from_pretrained('garystafford/wav2vec2-deepfake-voice-detector'); \
+print('cached audio architecture config:', c.architectures, c.id2label)" ;; \
+      *) echo '[NOTE] audio not provisioned; architecture config not cached' ;; \
+    esac
 
 # 4. Copy production backend application code (no test files or frontend)
 COPY backend/app ./backend/app
+COPY backend/docker-entrypoint.py ./backend/docker-entrypoint.py
 
 # Create non-root runtime user with volume storage directories
 RUN groupadd --gid 1000 pramaan \
@@ -97,7 +120,6 @@ ENV PRAMAAN_DATA_DIR=/data \
     PRAMAAN_LOG_LEVEL=INFO \
     PRAMAAN_WEIGHTS_DIR=/app/pramaan-detector/weights \
     PRAMAAN_IMAGE_MODEL_PATH=/app/pramaan-detector/weights/image_detector.pt \
-    PRAMAAN_VIDEO_MODEL_PATH=/app/pramaan-detector/weights/image_detector.pt \
     PRAMAAN_AUDIO_MODEL_PATH=/app/pramaan-detector/weights/audio_detector.pt \
     PRAMAAN_IMAGE_MODEL_HF_DIR=/app/pramaan-detector/weights/image_detector_hf \
     PRAMAAN_DETECTOR_OFFLINE=true \
@@ -106,9 +128,30 @@ ENV PRAMAAN_DATA_DIR=/data \
     PRAMAAN_AUDIO_DETECTOR_ENTRYPOINT=pramaan.detectors.audio_detector:detect_audio \
     PYTHONPATH=/app/backend
 
+# PRAMAAN_VIDEO_MODEL_PATH is deliberately NOT set. No video checkpoint is
+# published, and pointing this at image_detector.pt (as this file used to) loads
+# nothing -- Swin-B parameters do not fit the EfficientNet-B0 frame model -- while
+# making /api/detector/status advertise a video deepfake detector that abstains on
+# every request. Left unset, video reports INSUFFICIENT_EVIDENCE and names no
+# model. The video *entrypoint* above stays set because that module is installed
+# and states its own unavailability.
+#
+# PRAMAAN_AUDIO_MODEL_PATH above is only satisfied when the build provisioned the
+# audio checkpoint (PRAMAAN_WEIGHTS_MODALITIES includes "audio"). Otherwise the
+# file is absent and audio reports INSUFFICIENT_EVIDENCE, which is the correct
+# state for an instance that cannot hold a 1.67 GB model.
+
 VOLUME ["/data", "/reports"]
 
-USER pramaan
+# The container starts as root and does not stay there: docker-entrypoint.py
+# prepares the mounted storage -- a freshly mounted volume or Render disk belongs
+# to root, and the evidence store, SQLite case file and audit chain all live on
+# it -- and then setuid()s to `pramaan` and execs the CMD below. There is no way
+# to chown a mount at build time, because it is not mounted then; running the
+# application as root instead would trade the whole non-root posture for it.
+# `docker run --user 1000` still works: the entrypoint sees it is already
+# unprivileged, skips the chown, and warns if the storage is unwritable.
+ENTRYPOINT ["python", "/app/backend/docker-entrypoint.py"]
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

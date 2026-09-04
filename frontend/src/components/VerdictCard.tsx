@@ -1,6 +1,27 @@
+/**
+ * The fused verdict, as the backend reported it.
+ *
+ * Two defects were fixed here, both of the same kind -- a value being coerced
+ * into a shape it does not have:
+ *
+ *   - `manipulation_score ?? 0` turned an unscored verdict into a score of zero,
+ *     i.e. into the strongest possible "no manipulation" reading of a case where
+ *     nothing was measured at all.
+ *   - Confidence was rendered as `Number(verdict.confidence) * 100` with a `%`
+ *     suffix. `confidence` is a band word (`none` / `low` / `moderate`), never a
+ *     number, so this displayed a literal `NaN%` on every verdict the fusion
+ *     engine has ever produced. It is a band, and it is shown as one.
+ */
 import type { Verdict, VerdictBand } from '../api/types'
-import { formatScore } from '../lib/format'
-import { coverageLine, coverageSentence, verdictBandLabel, verdictTone } from '../lib/signals'
+import { NOT_MEASURED, formatScore } from '../lib/format'
+import {
+  confidenceBandLabel,
+  confidenceBandNote,
+  coverageLine,
+  coverageSentence,
+  verdictBandLabel,
+  verdictTone,
+} from '../lib/signals'
 import { Empty } from './Feedback'
 import { Icon } from './Icon'
 
@@ -14,8 +35,9 @@ export function VerdictCard({ verdict }: { verdict: Verdict | null }) {
   }
 
   const tone = verdictTone(verdict.verdict)
-  const score = verdict.manipulation_score ?? 0
-  const scorePercent = Math.min(100, Math.max(0, score * 100))
+  const score = verdict.manipulation_score
+  // Only meaningful when a score exists; there is no zero stand-in for "unscored".
+  const scorePercent = score === null ? null : Math.min(100, Math.max(0, score * 100))
 
   return (
     <div className={`verdict verdict--${tone}`} style={{ animation: 'verdictReveal 240ms cubic-bezier(0.16, 1, 0.3, 1) backwards' }}>
@@ -33,12 +55,12 @@ export function VerdictCard({ verdict }: { verdict: Verdict | null }) {
       </div>
 
       {/* Manipulation Score Bar */}
-      {verdict.manipulation_score !== null ? (
+      {scorePercent !== null ? (
         <div style={{ marginTop: 'var(--space-3)', marginBottom: 'var(--space-2)' }}>
           <div className="row" style={{ justifyContent: 'space-between', fontSize: 'var(--text-2xs)', fontFamily: 'var(--mono)', color: 'var(--text-muted)', marginBottom: 4 }}>
             <span>MANIPULATION INDEX</span>
             <span style={{ fontWeight: 700, color: 'var(--text-strong)' }}>
-              {(scorePercent).toFixed(1)}% ({formatScore(verdict.manipulation_score, 4)})
+              {scorePercent.toFixed(1)}% ({formatScore(verdict.manipulation_score, 4)})
             </span>
           </div>
           <div style={{ height: 6, background: 'var(--surface-3)', borderRadius: 100, overflow: 'hidden' }}>
@@ -53,7 +75,14 @@ export function VerdictCard({ verdict }: { verdict: Verdict | null }) {
             />
           </div>
         </div>
-      ) : null}
+      ) : (
+        <div style={{ marginTop: 'var(--space-3)', marginBottom: 'var(--space-2)' }}>
+          <div className="row" style={{ justifyContent: 'space-between', fontSize: 'var(--text-2xs)', fontFamily: 'var(--mono)', color: 'var(--text-muted)' }}>
+            <span>MANIPULATION INDEX</span>
+            <span style={{ fontWeight: 700, color: 'var(--text-muted)' }}>{NOT_MEASURED} NOT SCORED</span>
+          </div>
+        </div>
+      )}
 
       <p className="verdict__rationale">{verdict.rationale}</p>
       <p className="verdict__sub">{coverageSentence(verdict)}</p>
@@ -73,9 +102,12 @@ export function VerdictCard({ verdict }: { verdict: Verdict | null }) {
             <dd className="mono">
               {formatScore(verdict.manipulation_score, 4)} (0–1 scale)
             </dd>
-            <dt>Confidence</dt>
-            <dd className="mono">
-              {verdict.confidence ? `${(Number(verdict.confidence) * 100).toFixed(0)}%` : '-'}
+            <dt>Confidence band</dt>
+            <dd>
+              <span className="mono">{confidenceBandLabel(verdict.confidence)}</span>
+              <div className="muted" style={{ fontSize: 'var(--text-2xs)', marginTop: 2, lineHeight: 1.5 }}>
+                {confidenceBandNote(verdict.confidence)}
+              </div>
             </dd>
             <dt>Arithmetic</dt>
             <dd className="mono break-all" style={{ fontSize: 'var(--text-2xs)' }}>

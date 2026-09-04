@@ -1,14 +1,21 @@
 {
-  "manifest_version": "2.0.0",
+  "manifest_version": "2.1.0",
   "project": "PRAMAAN Multi-Modal Deepfake Detector",
-  "updated_at": "2026-09-01T00:00:00Z",
+  "updated_at": "2026-09-04T00:00:00Z",
   "_comment": [
     "Single source of truth for model assets. scripts/download_weights.py and",
     "scripts/verify_model_assets.py both read this file: filenames, sizes and",
     "SHA-256 digests here are what a build downloads and verifies. The digests",
     "below were computed from the installed checkpoints -- do not edit them by",
     "hand; re-run scripts/verify_model_assets.py --no-load after replacing a",
-    "checkpoint and copy the printed digest in."
+    "checkpoint and copy the printed digest in.",
+    "",
+    "Every entry carries a \"status\": \"published\" means a checkpoint exists and",
+    "the size/digest below are its own; \"unpublished\" means there is no asset,",
+    "and the entry only records what a future one would have to be. An",
+    "unpublished modality is never verified, never downloaded, and never",
+    "reported as [OK] -- it must not borrow another modality's checkpoint,",
+    "filename, digest or model name to look provisioned."
   ],
   "release": {
     "repo": "b24bs1114-maker/PRAMAAN",
@@ -18,6 +25,7 @@
   },
   "models": {
     "image": {
+      "status": "published",
       "model_name": "SwinB-AI-Image-Detector",
       "model_version": "3.0.0",
       "source_repo": "https://github.com/truebees-ai/Image-Deepfake-Detectors-Public-Library",
@@ -48,38 +56,37 @@
         "0": "MANIPULATED / SYNTHETIC (AI-generated image)",
         "1": "AUTHENTIC (Real human photo)"
       },
+      "positive_index": 0,
+      "label_direction_verified": "weights/image_detector.pt.json declares positive_index 0, matching the label mapping above: the manipulation score is class 0's softmax probability.",
       "explanation": "Outputs manipulation score from class 0 ('artificial') softmax probability. Swin final block Grad-CAM computes 7x7 spatial patch grid activation maps.",
+      "validation_status": "NOT CALIBRATED. The score is a softmax output, not a probability of manipulation, and no error rate or ROC has been measured for this configuration in PRAMAAN. The verdict thresholds (0.35 / 0.65) are demonstration defaults chosen before any reference dataset was run, not operating points derived from one. Do not describe this detector as accurate or its score as a confidence.",
       "known_limitations": "Evaluates structural texture and spatial patch artifacts from diffusion and GAN generators; heavily recompressed low-res web images may reduce confidence."
     },
     "video": {
-      "model_name": "VideoDetector-EfficientNetB0",
-      "model_version": "3.0.0",
+      "status": "unpublished",
+      "status_detail": "No video checkpoint has been published for PRAMAAN. There is nothing to download, nothing to verify, and the video modality reports INSUFFICIENT_EVIDENCE for every file. This entry declares the architecture a future checkpoint must fit -- it does not declare an asset that exists.",
+      "model_name": null,
+      "model_version": null,
+      "target_architecture": "Frame-sampled EfficientNet-B0 (pramaan.detectors.video_detector.ImageForensicNet: torchvision efficientnet_b0 features + Linear(1280, 2) head) with OpenCV face detection and temporal variance aggregation",
       "source_repo": "https://github.com/TRahulsingh/DeepfakeDetector",
-      "checkpoint_filename": "image_detector.pt",
-      "release_asset": "image_detector.pt",
-      "shares_checkpoint_with": "image",
-      "checkpoint_compatibility": "INCOMPATIBLE -- image_detector.pt holds Swin-B parameters, which do not fit this EfficientNet-B0 frame model. VideoDetector detects this, discards the checkpoint, and runs ImageNet-pretrained EfficientNet-B0 instead; it reports weights_hash='imagenet-efficientnet-b0' so a verdict is not attributed to weights that were never used. A purpose-trained video_detector.pt is still to be published.",
-      "weights_size_bytes": 347151670,
-      "weights_sha256": "25edbe34eaa7168366e2c98c49e09c98ca1afd4ca4be0d21d6b84f2b9a24b83f",
-      "license": "MIT",
-      "architecture": "Frame-sampled EfficientNet-B0 + OpenCV face detection + temporal variance score aggregation",
-      "input_preprocessing": {
-        "sampling_fps": 1,
-        "max_frames": 60,
-        "frame_resize": [224, 224],
-        "normalization": {
-          "mean": [0.485, 0.456, 0.406],
-          "std": [0.229, 0.224, 0.225]
-        }
-      },
-      "label_mapping": {
+      "checkpoint_filename": null,
+      "expected_checkpoint_filename": "video_detector.pt",
+      "release_asset": null,
+      "weights_size_bytes": null,
+      "weights_sha256": null,
+      "why_no_checkpoint": [
+        "image_detector.pt is NOT a video checkpoint. It holds Swin-B image-classifier parameters, which do not fit the EfficientNet-B0 frame model above. It was previously declared here as the video asset, which made scripts/verify_model_assets.py print [OK] for video and made the video slot report the image model's name and SHA-256.",
+        "Without a trained checkpoint the frame model's Linear(1280, 2) head is randomly initialised, so its output changes on every process start. Two runs over the same 3-second clip returned 0.327 and then an abstention, differing only by process. That is noise, not a measurement, so video_detector.py refuses to build the model at all and abstains instead.",
+        "pramaan.detectors.video_detector.checkpoint_readiness enforces this without loading the file: a checkpoint must declare 'features.' and 'classifier.1.' parameters to be accepted."
+      ],
+      "to_enable_video": "Publish a video_detector.pt trained for the target architecture, add its size and SHA-256 here, and point PRAMAAN_VIDEO_MODEL_PATH at it. Until then leave PRAMAAN_VIDEO_MODEL_PATH unset -- pointing it at another modality's checkpoint installs no video detector.",
+      "label_mapping_expected": {
         "0": "AUTHENTIC (Real video)",
         "1": "MANIPULATED (AI-generated video or face swap)"
-      },
-      "explanation": "Combines 70% mean frame manipulation score and 30% inter-frame temporal inconsistency score. Detects suspicious frame timestamps.",
-      "known_limitations": "Frame-based temporal aggregation model; not a 3D spatiotemporal convolution model. Rapid camera cuts can increase temporal variance."
+      }
     },
     "audio": {
+      "status": "published",
       "model_name": "Wav2Vec2-GaryStafford-DeepfakeVoiceDetector",
       "model_version": "2.0.0",
       "source_repo": "https://github.com/garystafford/deepfake-voice-detection-public",
@@ -90,6 +97,9 @@
       "weights_sha256": "79945f599acb3e7c1cab547fb5223341bee0ccb7daf62b40f21da7a8bd431a69",
       "license": "Apache-2.0",
       "architecture": "Wav2Vec2 sequence classification model fine-tuned for real-vs-AI voice detection",
+      "peak_memory_bytes": 1670000000,
+      "deployment_note": "Peak RSS to build and hold this model is ~1.67 GB (measured). It cannot run on a 512 MB instance; the audio socket must be left unconfigured there, and audio then reports INSUFFICIENT_EVIDENCE rather than a score.",
+      "requires_architecture_config": "garystafford/wav2vec2-deepfake-voice-detector config.json. Only the config is fetched, never weights. With PRAMAAN_DETECTOR_OFFLINE set it must already be in the local Hugging Face cache, or the model cannot be built; pramaan.detectors.audio_detector.checkpoint_readiness reports that state instead of advertising an available detector that abstains on every request.",
       "input_preprocessing": {
         "target_sample_rate_hz": 16000,
         "channels": 1,
@@ -100,8 +110,11 @@
         "0": "AUTHENTIC (Real human speech)",
         "1": "MANIPULATED (Synthetic / cloned AI voice)"
       },
+      "positive_index": 1,
+      "label_direction_verified": "The upstream config declares id2label {0: real, 1: fake}; weights/audio_detector.pt.json declares positive_index 1; audio_detector.POSITIVE_INDEX is 1. verify_label_direction() checks the config against that constant at load time and refuses a checkpoint whose labels contradict it, because reading the wrong index would invert every verdict silently.",
       "explanation": "Evaluates audio in 3-second windows, computes STFT spectrogram evidence, and flags suspicious voice segments.",
-      "known_limitations": "Targeted specifically at human speech and voice cloning anti-spoofing; background music or non-speech ambient audio is outside training domain."
+      "validation_status": "NOT EMPIRICALLY VALIDATED in PRAMAAN. What has been checked is that the checkpoint loads key-for-key, that the score is read from the class the config labels synthetic, and that the pipeline abstains when it cannot load. No accuracy, error rate, or operating threshold has been measured on ground-truth speech in this configuration. Do not describe this detector as validated.",
+      "known_limitations": "Targeted specifically at human speech and voice cloning anti-spoofing; background music or non-speech ambient audio is outside training domain. Scores are model outputs, not calibrated probabilities."
     }
   }
 }

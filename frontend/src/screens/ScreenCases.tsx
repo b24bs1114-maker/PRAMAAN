@@ -3,19 +3,29 @@
  *
  * Primary question: "Which investigation should I open?"
  *
+ * The worklist is now the real worklist. Two defects were removed:
+ *
+ *   - `getFlagshipDemoCases` reduced the queue to three hand-picked cases (one
+ *     MANIPULATED, one AUTHENTIC, one multimodal) whenever no filter was active.
+ *     A case queue that silently hides open cases is worse than no queue: the
+ *     count read "Showing 3 of 11" while the control offering the rest was
+ *     labelled "View Full Case Archive", as though the hidden eight were closed.
+ *   - Untitled cases were displayed as "Circulating Media Evidence
+ *     Investigation", inventing a subject for a case whose subject was never
+ *     recorded.
+ *
  * Structure:
  * 1. PAGE HEADER: "CASES" · "Manage and track investigations" · "+ New Case"
  * 2. FILTER / SEARCH BAR:
  *    - Search (case number, title, examiner, description, complaint reference)
  *    - Status (dynamically derived from data)
- *    - Priority (High, Medium, Low)
+ *    - Priority (dynamically derived from data)
  *    - Date (All time, 24h, 7d, 30d)
  *    - Assignment (Lead investigators)
  *    - Verdict (Manipulated, Authentic, Inconclusive, Pending)
  * 3. MAIN CASE TABLE:
  *    - Priority | Case ID | Title / Subject | Status | Evidence | Verdict | Updated | Action
  *    - High-priority / urgent cases naturally rise visually with accent borders & badges
- *    - Compact status & verdict indicators
  *    - Primary row action: "Open Case →" continues into case workflow
  */
 
@@ -26,9 +36,9 @@ import { ErrorBanner } from '../components/Banner'
 import { Empty, Spinner } from '../components/Feedback'
 import { Icon } from '../components/Icon'
 import { Pill, type PillTone } from '../components/Pill'
-import { formatTimestampShort } from '../lib/format'
-import { getFlagshipDemoCases } from '../lib/curated'
+import { NOT_MEASURED, formatTimestampShort } from '../lib/format'
 import type { RoutePath } from '../lib/router'
+import { verdictBandLabel } from '../lib/signals'
 import type { Investigation } from '../state/useInvestigation'
 
 function verdictTone(verdict: string | undefined): PillTone {
@@ -41,6 +51,7 @@ function verdictTone(verdict: string | undefined): PillTone {
 function priorityTone(priority: string | undefined): PillTone {
   if (priority === 'high') return 'error'
   if (priority === 'low') return 'accent'
+  if (!priority) return 'neutral'
   return 'warn'
 }
 
@@ -81,7 +92,6 @@ export function ScreenCases({
   const [dateRange, setDateRange] = useState('all')
   const [assignment, setAssignment] = useState('all')
   const [verdictFilter, setVerdictFilter] = useState('all')
-  const [showAll, setShowAll] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -152,7 +162,7 @@ export function ScreenCases({
       if (status !== 'all' && c.status !== status) return false
 
       // Priority filter
-      if (priority !== 'all' && (c.priority || 'normal') !== priority) return false
+      if (priority !== 'all' && c.priority !== priority) return false
 
       // Assignment / Investigator filter
       if (assignment !== 'all' && c.examiner !== assignment) return false
@@ -205,11 +215,13 @@ export function ScreenCases({
     })
   }, [filtered])
 
-  // Display selection (demo curated view if untampered, or all)
-  const displayCases = useMemo(() => {
-    if (showAll || hasActiveFilters || sortedCases.length <= 5) return sortedCases
-    return getFlagshipDemoCases(sortedCases)
-  }, [sortedCases, showAll, hasActiveFilters])
+  /*
+   * Every case that survives the filters is displayed. There is no curated
+   * subset: `getFlagshipDemoCases` used to cut the queue to three whenever the
+   * filters were untouched, so cases 4..n were invisible on the default view of
+   * the screen whose entire job is to list them.
+   */
+  const displayCases = sortedCases
 
   const openCase = (caseId: string) => {
     onSelectCase(caseId)
@@ -362,7 +374,7 @@ export function ScreenCases({
           </div>
         </div>
 
-        {/* Filter Summary & View Mode Line */}
+        {/* Filter Summary line */}
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
             <span>
@@ -374,17 +386,6 @@ export function ScreenCases({
               </span>
             ) : null}
           </div>
-
-          {cases.length > 5 && !hasActiveFilters ? (
-            <button
-              type="button"
-              className="btn btn--ghost btn--sm"
-              style={{ fontSize: 'var(--text-2xs)', padding: '2px 8px', height: 'auto' }}
-              onClick={() => setShowAll(!showAll)}
-            >
-              {showAll ? 'Show Flagship Demo Queue (3 cases)' : `View Full Case Archive (${cases.length})`}
-            </button>
-          ) : null}
         </div>
       </div>
 
@@ -463,16 +464,24 @@ export function ScreenCases({
                   >
                     {/* Priority */}
                     <td>
-                      <span className={`badge-risk badge-risk--${c.priority || 'medium'}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      {/*
+                        An unrecorded priority is not "NORMAL" -- that tier does
+                        not exist -- and it is not styled as `medium` either.
+                      */}
+                      <span className={`badge-risk${c.priority ? ` badge-risk--${c.priority}` : ''}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                         <span
                           style={{
                             width: 5,
                             height: 5,
                             borderRadius: '50%',
-                            background: pTone === 'error' ? 'var(--danger)' : pTone === 'ok' ? 'var(--ok)' : 'var(--warn)'
+                            background:
+                              pTone === 'error' ? 'var(--danger)'
+                                : pTone === 'ok' ? 'var(--ok)'
+                                  : pTone === 'neutral' ? 'var(--text-faint)'
+                                    : 'var(--warn)',
                           }}
                         />
-                        {(c.priority || 'normal').toUpperCase()}
+                        {c.priority ? c.priority.toUpperCase() : NOT_MEASURED}
                       </span>
                     </td>
 
@@ -494,15 +503,21 @@ export function ScreenCases({
                     {/* Title / Subject */}
                     <td>
                       <div className="stack" style={{ gap: 2, minWidth: 0 }}>
+                        {/*
+                          Was `c.title || 'Circulating Media Evidence
+                          Investigation'`, which put a plausible-looking subject
+                          on every untitled case in the queue.
+                        */}
                         <span
                           style={{
                             fontSize: 'var(--text-xs)',
-                            color: 'var(--text-strong)',
+                            color: c.title ? 'var(--text-strong)' : 'var(--text-muted)',
                             fontWeight: 600,
                             lineHeight: 1.3,
+                            fontStyle: c.title ? undefined : 'italic',
                           }}
                         >
-                          {c.title || 'Circulating Media Evidence Investigation'}
+                          {c.title || 'No title recorded'}
                         </span>
                         {c.examiner ? (
                           <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
@@ -537,12 +552,17 @@ export function ScreenCases({
                     {/* Verdict */}
                     <td>
                       {c.latest_verdict ? (
+                        /*
+                         * The hedged band label, matching every other screen:
+                         * the raw token "AUTHENTIC" overstates a finding that is
+                         * only ever "no manipulation evidence found".
+                         */
                         <Pill variant={verdictTone(c.latest_verdict)}>
-                          {c.latest_verdict.replace(/_/g, ' ')}
+                          {verdictBandLabel(c.latest_verdict)}
                         </Pill>
                       ) : (
                         <span style={{ color: 'var(--text-faint)', fontSize: 'var(--text-2xs)' }}>
-                          PENDING ANALYSIS
+                          NOT YET ANALYSED
                         </span>
                       )}
                     </td>

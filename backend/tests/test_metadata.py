@@ -10,7 +10,7 @@ import uuid
 
 from fastapi.testclient import TestClient
 
-from tests.helpers import jpeg_bytes, jpeg_with_exif_bytes, mp4_bytes, png_bytes
+from tests.helpers import jpeg_bytes, jpeg_with_exif_bytes, mov_bytes, mp4_bytes, png_bytes
 
 
 def _upload(client: TestClient, data: bytes, name: str, mime: str = "image/jpeg"):
@@ -98,6 +98,35 @@ def test_video_container_metadata_is_extracted(client: TestClient) -> None:
     assert payload["container"]["height"] == 360
     assert payload["timestamps"]["container_created_at"] == "2026-01-15T09:30:00Z"
     assert "container-level only" in payload["limitations"]
+
+
+def test_quicktime_is_recorded_as_quicktime_not_as_mp4(client: TestClient) -> None:
+    """A .mov must not be filed as video/mp4.
+
+    MOV and MP4 share the ISO-BMFF box layout, so a sniffer that ignores the
+    ``ftyp`` brand records the wrong container format against the evidence -- and
+    then warns that the *correct* declared type disagrees with what it detected.
+    Container format is a metadata claim about the file; a wrong one is a wrong
+    forensic fact, however small.
+    """
+    response = _upload(client, mov_bytes(seed=7), "bodycam.mov", "video/quicktime")
+    assert response.status_code == 201, response.text
+    body = response.json()
+    evidence = body["evidence"]
+
+    assert evidence["media_type"] == "video"
+    assert evidence["mime_type"] == "video/quicktime"
+    # The declared type matched the detected one, so there is nothing to warn about.
+    assert not [w for w in body.get("warnings", []) if "does not match" in w]
+
+    payload = client.get(f"/api/cases/{body['case']['case_id']}/metadata").json()[
+        "items"
+    ][0]["metadata"]
+    assert payload["media_type"] == "video"
+    assert payload["container"]["major_brand"] == "qt  "
+    # The same walker reads QuickTime: the geometry is still there to be read.
+    assert payload["container"]["width"] == 640
+    assert payload["container"]["height"] == 360
 
 
 def test_metadata_is_persisted_and_cached(client: TestClient) -> None:

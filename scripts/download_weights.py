@@ -21,8 +21,10 @@ experiments with a checkpoint you built yourself.
 Environment
 -----------
 ``PRAMAAN_WEIGHTS_MODALITIES``      csv of image,video,audio. Default ``image``.
+                                    ``none`` provisions nothing (for an instance
+                                    too small to load any checkpoint).
 ``PRAMAAN_IMAGE_WEIGHTS_URL``       explicit URL, overrides the release asset.
-``PRAMAAN_VIDEO_WEIGHTS_URL``       (video shares the image checkpoint)
+``PRAMAAN_VIDEO_WEIGHTS_URL``       (no video checkpoint is published; see manifest)
 ``PRAMAAN_AUDIO_WEIGHTS_URL``
 ``PRAMAAN_WEIGHTS_RELEASE_TAG``     release tag to pull assets from.
 ``PRAMAAN_WEIGHTS_RELEASE_REPO``    ``owner/repo`` holding the release.
@@ -70,6 +72,14 @@ MANIFEST_PATH = REPO_WEIGHTS_DIR / "model_manifest.json"
 
 ALL_MODALITIES = ("image", "video", "audio")
 DEFAULT_MODALITIES = ("image",)
+#: Values of ``PRAMAAN_WEIGHTS_MODALITIES`` that mean "provision nothing".
+#: An empty string cannot mean that -- unset and empty are indistinguishable in a
+#: build environment, and the default has to stay ``image`` -- so a deployment
+#: that deliberately ships no checkpoints (a 512 MB instance cannot load either
+#: model) needs a word for it. Without one, such a build either downloads 347 MB
+#: it can never load or fails on ``modalities: none  not declared in the
+#: manifest``.
+NO_MODALITIES = ("none", "off", "disabled")
 
 URL_ENV = {
     "image": "PRAMAAN_IMAGE_WEIGHTS_URL",
@@ -183,7 +193,25 @@ def download(url: str, dest: Path, entry: dict) -> tuple[bool, str]:
 
 
 def provision(modality: str, entry: dict, release: dict, *, args) -> tuple[str, str]:
-    """Return ``(status, detail)`` for one modality. Status is ok/missing/failed."""
+    """Return ``(status, detail)`` for one modality.
+
+    Status is ok / missing / unpublished / failed. ``unpublished`` is a declared
+    state, not an error: the manifest says no checkpoint exists for this
+    modality, so there is nothing to download and nothing to verify. Video was
+    previously declared with the image checkpoint's filename and digest, so this
+    script downloaded 347 MB of Swin-B image weights "for video" and reported it
+    provisioned.
+    """
+    if str(entry.get("status", "published")).lower() == "unpublished":
+        print(f"\n--- {modality} ---")
+        print("    [UNPUBLISHED] the manifest declares no checkpoint for this modality")
+        detail = str(entry.get("status_detail") or "").strip()
+        if detail:
+            print(f"    {detail}")
+        print(f"    Nothing downloaded. The {modality} detector will report "
+              f"INSUFFICIENT_EVIDENCE.")
+        return "unpublished", "no checkpoint is published for this modality"
+
     filename = entry.get("checkpoint_filename")
     if not filename:
         return "failed", "manifest entry declares no checkpoint_filename"
@@ -261,6 +289,12 @@ def main() -> int:
             for item in os.getenv("PRAMAAN_WEIGHTS_MODALITIES", "").split(",")
             if item.strip()
         ]
+        if env_list and all(item in NO_MODALITIES for item in env_list):
+            print("=== PRAMAAN model asset provisioning ===")
+            print(f"modalities  : none (PRAMAAN_WEIGHTS_MODALITIES={env_list[0]})")
+            print("[NOTE] no checkpoints requested, so none were downloaded. Every")
+            print("[NOTE] modality reports UNAVAILABLE and is excluded from fusion.")
+            return 0
         wanted = env_list or list(DEFAULT_MODALITIES)
 
     print("=== PRAMAAN model asset provisioning ===")
@@ -270,7 +304,9 @@ def main() -> int:
     print(f"strict      : {strict}")
     WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # video and image share a checkpoint; provision each distinct file once.
+    # Each distinct file is provisioned once. (Nothing shares a checkpoint today:
+    # video used to declare the image one, which is why this de-duplication
+    # exists. A modality with no checkpoint_filename is never a sharer.)
     results: dict[str, tuple[str, str]] = {}
     by_filename: dict[str, tuple[str, str]] = {}
     for modality in wanted:
@@ -279,23 +315,25 @@ def main() -> int:
             results[modality] = ("failed", "not declared in the manifest")
             print(f"\n--- {modality} ---\n    [FAIL] not declared in the manifest")
             continue
-        filename = entry.get("checkpoint_filename", "")
-        if filename in by_filename:
+        filename = entry.get("checkpoint_filename") or ""
+        if filename and filename in by_filename:
             status, detail = by_filename[filename]
             print(f"\n--- {modality}: {filename} ---")
             print(f"    [OK] shares this checkpoint with an earlier modality ({status})")
             results[modality] = (status, detail)
             continue
-        results[modality] = by_filename[filename] = provision(
-            modality, entry, release, args=args
-        )
+        outcome = provision(modality, entry, release, args=args)
+        results[modality] = outcome
+        if filename:
+            by_filename[filename] = outcome
 
     print("\n=== summary ===")
     for modality, (status, detail) in results.items():
-        print(f"  {modality:<6} {status:<8} {detail}")
+        print(f"  {modality:<6} {status:<12} {detail}")
 
     failed = [m for m, (s, _) in results.items() if s == "failed"]
     missing = [m for m, (s, _) in results.items() if s == "missing"]
+    absent = [m for m, (s, _) in results.items() if s == "unpublished"]
     if failed:
         print(f"\n[ERROR] verification/download failed for: {', '.join(failed)}")
         return 1
@@ -305,6 +343,12 @@ def main() -> int:
     if missing:
         print(f"\n[WARN] assets missing for: {', '.join(missing)}.")
         print("[WARN] the detector will report UNAVAILABLE for those modalities.")
+    if absent:
+        # Not a warning about this run: there is no asset to fetch, by design.
+        # Strict mode does not fail on it either -- a build cannot provision a
+        # checkpoint that has never been published.
+        print(f"\n[NOTE] no checkpoint is published for: {', '.join(absent)}.")
+        print("[NOTE] those modalities report INSUFFICIENT_EVIDENCE for every file.")
     return 0
 
 

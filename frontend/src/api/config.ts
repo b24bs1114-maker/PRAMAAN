@@ -9,9 +9,18 @@
 /**
  * Backend origin, from VITE_API_URL.
  *
- * Falls back to the documented local development address so a fresh clone runs
- * with no .env file. The fallback is a localhost address by design -- it can
- * never accidentally point a developer's browser at production.
+ * The fallback is a SAME-ORIGIN PATH, not a localhost address, and not a no-op:
+ * `/api/backend/*` is rewritten to the deployed backend by `vercel.json`, and
+ * proxied to `VITE_API_URL || http://127.0.0.1:8000` by the Vite dev server. So
+ * a fresh clone works with no .env file, and a reviewer whose environment blocks
+ * cross-origin requests can run the app entirely against one origin.
+ *
+ * What that means, and what the previous comment here claimed the opposite of:
+ * leaving VITE_API_URL unset on Vercel does NOT keep the browser local. It
+ * follows the rewrite to whatever host `vercel.json` names -- the production
+ * backend. Set VITE_API_URL explicitly when you need to be certain which
+ * backend you are talking to; API_BASE_URL_IS_EXPLICIT below reports whether
+ * anyone did.
  */
 const RAW_BASE: string =
   (import.meta.env.VITE_API_URL as string | undefined)?.trim() || '/api/backend'

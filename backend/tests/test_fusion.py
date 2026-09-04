@@ -535,3 +535,167 @@ def test_no_signal_at_all_produces_no_score(settings) -> None:
     assert result["signals_available"] == 0
     assert result["confidence"] == fusion.CONFIDENCE_NONE
     assert len(result["excluded_signals"]) == 5
+
+
+# --------------------------------------------------------------------------- #
+# Detector signal admission (PHASE 5) and the five detector states (PHASE 6)
+# --------------------------------------------------------------------------- #
+def test_valid_detector_score_is_included() -> None:
+    signal = fusion.ai_detection_signal(
+        {"status": "OK", "abstained": False, "score": 0.72, "model": "m", "model_version": "1"}
+    )
+    assert signal["status"] == fusion.SIGNAL_OK
+    assert signal["score"] == pytest.approx(0.72)
+    assert signal["evidence_basis"]["availability"] == "scored"
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["ERROR", "UNSUPPORTED_MEDIA", "UNAVAILABLE"],
+)
+def test_non_ok_status_never_contributes_a_score(status: str) -> None:
+    """A stray number on a failed payload is not a measurement.
+
+    The previous admission test was `(status == STATUS_OK or not abstained)`. The
+    `or` meant any payload that simply did not declare an abstention was treated
+    as OK, so an ERROR payload still carrying a leftover score was fused in as a
+    valid assessed signal.
+    """
+    signal = fusion.ai_detection_signal({"status": status, "score": 0.91})
+    assert signal["status"] != fusion.SIGNAL_OK
+    assert signal["score"] is None
+
+
+def test_explicit_abstention_is_not_overridden_by_an_ok_status() -> None:
+    """Abstention is a valid forensic outcome; the detector's own word is final."""
+    signal = fusion.ai_detection_signal(
+        {"status": "OK", "abstained": True, "score": 0.44, "latency_ms": 12.0}
+    )
+    assert signal["status"] == fusion.SIGNAL_INCONCLUSIVE
+    assert signal["score"] is None
+    assert signal["evidence_basis"]["availability"] == "ran_and_declined"
+
+
+@pytest.mark.parametrize("bad_score", [None, "0.5", float("nan"), float("inf"), 1.5, -0.1, True])
+def test_unusable_score_on_an_ok_payload_is_a_detector_fault(bad_score) -> None:
+    """A score must be a finite real number in 0..1 or it is not a score.
+
+    `True` is in this list deliberately: `isinstance(True, int)` is true in
+    Python, so a boolean would otherwise have been fused in as the score 1.0.
+    """
+    signal = fusion.ai_detection_signal(
+        {"status": "OK", "abstained": False, "score": bad_score}
+    )
+    assert signal["score"] is None
+    assert signal["status"] != fusion.SIGNAL_OK
+
+
+def test_five_detector_states_stay_distinguishable() -> None:
+    """PHASE 6: not-installed, disabled, ran-and-declined and scored are separate.
+
+    All four non-scored outcomes are excluded from the fused mean, so the score is
+    unaffected; what must survive is the RECORD of which one happened. A reader
+    cannot weigh a verdict if "we own no model" and "our model looked and would
+    not say" print the same sentence.
+    """
+    from app.services import detector as detector_service
+
+    not_installed = fusion.ai_detection_signal(
+        {"status": "UNAVAILABLE", "abstained": True,
+         "detail": detector_service.UNAVAILABLE_EXPLANATION}
+    )
+    disabled = fusion.ai_detection_signal(
+        {"status": "UNAVAILABLE", "abstained": True,
+         "detail": f"{detector_service.DISABLED_REASON} {detector_service.UNAVAILABLE_EXPLANATION}"}
+    )
+    declined = fusion.ai_detection_signal(
+        {"status": "UNAVAILABLE", "abstained": True, "latency_ms": 143.7,
+         "detail": detector_service.DECLINED_EXPLANATION}
+    )
+    scored = fusion.ai_detection_signal(
+        {"status": "OK", "abstained": False, "score": 0.31, "inference_ms": 88.1}
+    )
+    stage_never_ran = fusion.ai_detection_signal(None)
+
+    assert not_installed["evidence_basis"]["availability"] == "not_installed"
+    assert disabled["evidence_basis"]["availability"] == "disabled_by_config"
+    assert declined["evidence_basis"]["availability"] == "ran_and_declined"
+    assert scored["evidence_basis"]["availability"] == "scored"
+    assert stage_never_ran["evidence_basis"]["availability"] == "not_installed"
+
+    # Four distinct availability records, and the one that ran is marked as
+    # having run rather than as an absent detector.
+    assert declined["status"] == fusion.SIGNAL_INCONCLUSIVE
+    assert not_installed["status"] == fusion.SIGNAL_UNAVAILABLE
+    assert disabled["status"] == fusion.SIGNAL_UNAVAILABLE
+    assert "disabled by configuration" in disabled["explanation"]
+    assert "ran and returned no score" in declined["explanation"]
+    assert "No detector is installed" in not_installed["explanation"]
+
+    # None of the four excluded states asserts anything about the file.
+    for excluded in (not_installed, disabled, declined, stage_never_ran):
+        assert excluded["score"] is None
+        assert excluded["included"] is False
+
+
+def test_an_excluded_detector_never_drags_the_fused_score_toward_zero(settings) -> None:
+    """NULL is not 0. PHASE 5's renormalisation must hold for every excluded state."""
+    forensics_payload = {
+        "status": "OK",
+        "score": 0.80,
+        "recompression": {},
+        "block_grid": {},
+        "explanation": "x",
+    }
+    for detector_payload in (
+        {"status": "ERROR", "score": 0.0},
+        {"status": "UNAVAILABLE", "abstained": True},
+        {"status": "OK", "abstained": True, "score": 0.0, "latency_ms": 5.0},
+    ):
+        result = fusion.fuse(
+            _signals(
+                detector_payload=detector_payload, forensics_payload=forensics_payload
+            ),
+            settings,
+        )
+        ai = next(s for s in result["signals"] if s["signal_id"] == "ai_detection")
+        assert ai["included"] is False
+        assert ai["contribution"] is None
+        # The forensics score survives untouched; it is not averaged with a zero
+        # that was never measured.
+        assert result["manipulation_score"] == pytest.approx(0.80)
+
+
+def test_a_low_uncalibrated_detector_score_is_never_called_verified(settings) -> None:
+    """An AUTHENTIC band is a non-finding, and must read as one.
+
+    The image checkpoint scores known Midjourney output as low as 0.0245, so a
+    low score genuinely does drive this branch. That is the model's documented
+    weakness and is NOT corrected by moving the threshold. What must hold is that
+    the verdict never upgrades "no evidence of manipulation was found" into a
+    verification of authenticity.
+    """
+    result = fusion.fuse(
+        _signals(
+            detector_payload={
+                "status": "OK",
+                "abstained": False,
+                "score": 0.0245,
+                "model": "SwinB",
+                "model_version": "1",
+            }
+        ),
+        settings,
+    )
+
+    rationale = result["rationale"].lower()
+    assert "not a guarantee that the media is unaltered" in rationale
+    for forbidden in ("verified authentic", "confirmed authentic", "proven", "genuine"):
+        assert forbidden not in rationale
+    # The strongest band this system emits, even here.
+    assert result["confidence"] in {
+        fusion.CONFIDENCE_NONE,
+        fusion.CONFIDENCE_LOW,
+        fusion.CONFIDENCE_MODERATE,
+    }
+    assert result["confidence"] != "high"
