@@ -16,7 +16,10 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import Evidence
 from app.services import audit
+from app.services.dinov2_index import get_dinov2_index
+from app.services.dinov2_service import extract_embedding
 from app.services.index import get_index
+from app.services.storage import StorageError, absolute_path
 
 logger = logging.getLogger("pramaan.indexing")
 
@@ -44,12 +47,42 @@ def rebuild(
     rows = indexable_evidence(session)
     added = index.replace_all([(row.id, row.phash) for row in rows])
 
+    # Rebuild or synchronize DINOv2 visual embedding index
+    dinov2_added = 0
+    if getattr(settings, "enable_dinov2_retrieval", True):
+        try:
+            dinov2_idx = get_dinov2_index(settings)
+            dinov2_entries = []
+            for row in rows:
+                emb = dinov2_idx.get_embedding(row.id)
+                if emb is None:
+                    try:
+                        img_path = absolute_path(row.stored_path, settings)
+                        if img_path.is_file():
+                            emb = extract_embedding(
+                                img_path,
+                                model_name=settings.dinov2_model_name,
+                                device_pref=settings.dinov2_device,
+                                cache_key=row.sha256,
+                            )
+                    except (StorageError, OSError, Exception) as exc:
+                        logger.debug("Failed extracting DINOv2 embedding for %s: %s", row.id, exc)
+                if emb is not None:
+                    dinov2_entries.append((row.id, emb))
+            dinov2_added = dinov2_idx.replace_all(dinov2_entries)
+        except Exception as exc:
+            logger.warning("DINOv2 index rebuild encountered error: %s", exc)
+
     indexed_ids = {row.id for row in rows}
     for row in session.execute(select(Evidence)).scalars():
         row.indexed = row.id in indexed_ids and index.contains(row.id)
     session.flush()
 
-    status = index.status()
+    status_dict = index.status()
+    if getattr(settings, "enable_dinov2_retrieval", True):
+        status_dict["dinov2_index"] = get_dinov2_index(settings).status()
+        status_dict["dinov2_indexed_count"] = dinov2_added
+
     audit.record(
         session,
         event=audit.EVENT_INDEX_UPDATED,
@@ -57,18 +90,20 @@ def rebuild(
         actor=actor,
         details={
             "operation": "rebuild",
-            "indexed_count": status["indexed_count"],
-            "index_version": status["index_version"],
-            "backend": status["backend"],
+            "indexed_count": status_dict["indexed_count"],
+            "dinov2_indexed_count": dinov2_added,
+            "index_version": status_dict["index_version"],
+            "backend": status_dict["backend"],
             "candidates": len(rows),
         },
     )
-    logger.info("Index rebuilt: %d vectors (backend %s)", added, status["backend"])
+    logger.info("Index rebuilt: %d pHash vectors, %d DINOv2 vectors", added, dinov2_added)
     return {
         "status": "rebuilt",
         "added": added,
+        "dinov2_added": dinov2_added,
         "skipped": len(rows) - added,
-        **status,
+        **status_dict,
     }
 
 
@@ -94,10 +129,29 @@ def add_evidence(
         }
 
     added = index.add(evidence.id, evidence.phash)
+
+    # Index DINOv2 embedding idempotently
+    if getattr(settings, "enable_dinov2_retrieval", True):
+        try:
+            dinov2_idx = get_dinov2_index(settings)
+            if not dinov2_idx.contains(evidence.id):
+                img_path = absolute_path(evidence.stored_path, settings)
+                if img_path.is_file():
+                    emb = extract_embedding(
+                        img_path,
+                        model_name=settings.dinov2_model_name,
+                        device_pref=settings.dinov2_device,
+                        cache_key=evidence.sha256,
+                    )
+                    if emb is not None:
+                        dinov2_idx.add(evidence.id, emb)
+        except Exception as exc:
+            logger.debug("DINOv2 add_evidence skipped: %s", exc)
+
     evidence.indexed = True
     session.flush()
 
-    status = index.status()
+    status_dict = index.status()
     audit.record(
         session,
         event=audit.EVENT_INDEX_UPDATED,
@@ -107,9 +161,9 @@ def add_evidence(
             "operation": "add",
             "evidence_id": evidence.id,
             "already_present": not added,
-            "indexed_count": status["indexed_count"],
-            "index_version": status["index_version"],
-            "backend": status["backend"],
+            "indexed_count": status_dict["indexed_count"],
+            "index_version": status_dict["index_version"],
+            "backend": status_dict["backend"],
         },
     )
     return {
@@ -117,9 +171,12 @@ def add_evidence(
         "added": 1 if added else 0,
         "skipped": 0 if added else 1,
         "detail": None if added else "This evidence id was already in the index.",
-        **status,
+        **status_dict,
     }
 
 
 def status(settings: Settings) -> dict[str, Any]:
-    return get_index(settings).status()
+    stat = get_index(settings).status()
+    if getattr(settings, "enable_dinov2_retrieval", True):
+        stat["dinov2"] = get_dinov2_index(settings).status()
+    return stat

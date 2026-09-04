@@ -31,14 +31,17 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import type { CaseRecord } from '../api/types'
-import { ErrorBanner } from '../components/Banner'
+import type { CaseDeleteResult, CaseRecord } from '../api/types'
+import { Banner, ErrorBanner } from '../components/Banner'
+import { CaseDeleteDialog, DeleteCaseButton } from '../components/CaseDelete'
 import { Empty, Spinner } from '../components/Feedback'
 import { Icon } from '../components/Icon'
 import { Pill, type PillTone } from '../components/Pill'
+import { deletionSummary, removeCase } from '../lib/casedelete'
 import { NOT_MEASURED, formatTimestampShort } from '../lib/format'
 import type { RoutePath } from '../lib/router'
 import { verdictBandLabel } from '../lib/signals'
+import { useCaseDeletion } from '../state/useCaseDeletion'
 import type { Investigation } from '../state/useInvestigation'
 
 function verdictTone(verdict: string | undefined): PillTone {
@@ -84,6 +87,25 @@ export function ScreenCases({
   const [cases, setCases] = useState<CaseRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<unknown>(null)
+
+  /*
+   * The last completed deletion, kept only so the queue can report what the
+   * backend said it removed. Set from the `onDeleted` callback below, which only
+   * runs after a 2xx -- so this can never describe a deletion that did not
+   * happen. Cleared by the operator, not by a timer: the counts are the only
+   * account of an irreversible action, and they should not vanish unread.
+   */
+  const [removed, setRemoved] = useState<{ result: CaseDeleteResult; target: CaseRecord } | null>(
+    null,
+  )
+
+  const deletion = useCaseDeletion((result, target) => {
+    // The backend has confirmed. Drop the row from the queue we are holding
+    // rather than re-listing: a refetch here would hide a backend that answered
+    // 200 while leaving the row in place.
+    setCases((current) => removeCase(current, target.case_id))
+    setRemoved({ result, target })
+  })
 
   // Filters
   const [search, setSearch] = useState(initialQuery)
@@ -389,6 +411,50 @@ export function ScreenCases({
         </div>
       </div>
 
+      {/*
+        The outcome of a completed deletion, in the backend's own numbers. Shown
+        here rather than in the dialog because the dialog closes the moment the
+        delete succeeds, and these counts are the only record the operator gets
+        of what an irreversible action removed.
+      */}
+      {removed ? (
+        <Banner
+          tone="ok"
+          title={`Case #${removed.result.case_number} deleted permanently.`}
+          detail={
+            <div className="stack" style={{ gap: 2 }}>
+              {deletionSummary(removed.result).map((line) => (
+                <span key={line}>{line}</span>
+              ))}
+            </div>
+          }
+          meta={
+            <div className="row" style={{ gap: 12, alignItems: 'center' }}>
+              <span style={{ fontFamily: 'var(--mono)' }}>
+                Recorded at {formatTimestampShort(removed.result.deleted_at)}
+              </span>
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                onClick={() => setRemoved(null)}
+              >
+                Dismiss
+              </button>
+            </div>
+          }
+        >
+          {removed.result.warnings.length > 0 ? (
+            <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+              {removed.result.warnings.map((warning) => (
+                <li key={warning} style={{ color: 'var(--warn)' }}>
+                  {warning}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </Banner>
+      ) : null}
+
       {/* 3. MAIN CASE TABLE */}
       {loading ? (
         <div className="card" style={{ padding: 'var(--space-6)' }}>
@@ -427,7 +493,7 @@ export function ScreenCases({
                 <th style={{ width: 90 }}>Evidence</th>
                 <th style={{ width: 145 }}>Verdict</th>
                 <th style={{ width: 130 }}>Updated</th>
-                <th style={{ width: 110, textAlign: 'right' }}>Action</th>
+                <th style={{ width: 190, textAlign: 'right' }}>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -572,24 +638,35 @@ export function ScreenCases({
                       {formatTimestampShort(c.updated_at || c.created_at)}
                     </td>
 
-                    {/* Row Action: Open Case → */}
+                    {/* Row Actions: Open Case → · Delete */}
                     <td style={{ textAlign: 'right' }}>
-                      <button
-                        type="button"
-                        className="btn btn--ghost btn--sm"
-                        style={{
-                          fontSize: '11.5px',
-                          padding: '3px 8px',
-                          color: 'var(--accent-bright)',
-                          fontWeight: 600,
-                        }}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          openCase(c.case_id)
-                        }}
+                      <div
+                        className="row"
+                        style={{ gap: 6, justifyContent: 'flex-end', alignItems: 'center' }}
                       >
-                        Open Case →
-                      </button>
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          style={{
+                            fontSize: '11.5px',
+                            padding: '3px 8px',
+                            color: 'var(--accent-bright)',
+                            fontWeight: 600,
+                          }}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            openCase(c.case_id)
+                          }}
+                        >
+                          Open Case →
+                        </button>
+                        {/*
+                          The destructive control opens a dialog; it never deletes
+                          on this click. `c` is the real row, so the dialog shows
+                          the case number the backend issued.
+                        */}
+                        <DeleteCaseButton target={c} onClick={deletion.ask} />
+                      </div>
                     </td>
                   </tr>
                 )
@@ -598,6 +675,18 @@ export function ScreenCases({
           </table>
         </div>
       )}
+
+      {/*
+        One dialog for the whole queue. It renders nothing until a row's delete
+        button names a target, and its copy comes from `CaseDelete` so the queue
+        and the dossier describe the same consequence identically.
+      */}
+      <CaseDeleteDialog
+        state={deletion.state}
+        onTyped={deletion.type}
+        onCancel={deletion.dismiss}
+        onConfirm={deletion.confirm}
+      />
     </div>
   )
 }

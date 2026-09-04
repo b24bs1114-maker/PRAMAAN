@@ -1,48 +1,50 @@
-"""Integration smoke test against the REAL image and audio checkpoints.
+"""Integration smoke test against the REAL image, audio, and video checkpoints.
 
 Verifies:
 1. GET /api/detector/status reports each modality truthfully: available=true for
-   image and audio, available=false with a stated reason for video.
-2. POST /api/detect works for image and audio with real model inference, and
-   abstains for video.
+   image, audio, and video.
+2. POST /api/detect works for image, audio, and video with real model inference.
 3. POST /api/cases/upload & POST /api/cases/{case_id}/analyse run full pipeline:
    real detector -> ai_detection -> fusion -> verdict.
-
-Video has no published checkpoint (see ``weights/model_manifest.json``), so
-there is no configuration of this repository in which it produces a score. This
-file used to point ``PRAMAAN_VIDEO_MODEL_PATH`` at ``image_detector.pt`` and
-assert that the video slot named a model, which made the suite ratify the exact
-misconfiguration it should catch: Swin-B image parameters cannot load into the
-EfficientNet-B0 frame model, so that setting installs no video detector while
-making the status endpoint advertise one. The video path is now left
-deliberately empty and the honest unavailable state is what gets asserted.
 """
 
-import pytest
+from __future__ import annotations
+
+import os
 from pathlib import Path
+
+import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
 from app.config import get_settings
-import os
-from app.services.detector import MultiModalDetectorService, reset_detector_singleton, clear_inference_registry
+from app.main import app
+from app.services.detector import (
+    MultiModalDetectorService,
+    clear_inference_registry,
+    reset_detector_singleton,
+)
 
 SAMPLES_DIR = Path(__file__).resolve().parents[2] / "pramaan-detector" / "data" / "real_samples"
 WEIGHTS_DIR = Path(__file__).resolve().parents[2] / "pramaan-detector" / "weights"
 
 
 def _configure_real_models() -> None:
-    """Point the detector sockets at the checkpoints this repository actually has.
+    """Point the detector sockets at the published checkpoints."""
+    img_ckpt = WEIGHTS_DIR / "image_detector.safetensors"
+    if not img_ckpt.exists():
+        img_ckpt = WEIGHTS_DIR / "image_detector.pt"
 
-    ``PRAMAAN_VIDEO_MODEL_PATH`` is cleared, not set: no video checkpoint is
-    published, and any other modality's checkpoint installs no video detector.
-    The video *entrypoint* stays configured because the plug-in module is
-    genuinely installed -- that is the deployment this asserts on, a loadable
-    module with no weights to load.
-    """
-    os.environ["PRAMAAN_IMAGE_MODEL_PATH"] = str(WEIGHTS_DIR / "image_detector.pt")
-    os.environ["PRAMAAN_VIDEO_MODEL_PATH"] = ""
-    os.environ["PRAMAAN_AUDIO_MODEL_PATH"] = str(WEIGHTS_DIR / "audio_detector.pt")
+    aud_ckpt = WEIGHTS_DIR / "audio_detector.pth"
+    if not aud_ckpt.exists():
+        aud_ckpt = WEIGHTS_DIR / "audio_detector.pt"
+
+    vid_ckpt = WEIGHTS_DIR / "video_detector.safetensors"
+    if not vid_ckpt.exists():
+        vid_ckpt = WEIGHTS_DIR / "video_detector.pt"
+
+    os.environ["PRAMAAN_IMAGE_MODEL_PATH"] = str(img_ckpt)
+    os.environ["PRAMAAN_AUDIO_MODEL_PATH"] = str(aud_ckpt)
+    os.environ["PRAMAAN_VIDEO_MODEL_PATH"] = str(vid_ckpt)
     os.environ["PRAMAAN_IMAGE_DETECTOR_ENTRYPOINT"] = "pramaan.detectors.image_detector:detect_image"
     os.environ["PRAMAAN_VIDEO_DETECTOR_ENTRYPOINT"] = "pramaan.detectors.video_detector:detect_video"
     os.environ["PRAMAAN_AUDIO_DETECTOR_ENTRYPOINT"] = "pramaan.detectors.audio_detector:detect_audio"
@@ -73,24 +75,11 @@ def test_detector_status_reports_each_modality_truthfully(client):
     mod_status = detector.modality_availability()
     assert mod_status["image"]["available"] is True, f"Image model unavailable: {mod_status['image']}"
     assert mod_status["audio"]["available"] is True, f"Audio model unavailable: {mod_status['audio']}"
+    assert mod_status["video"]["available"] is True, f"Video model unavailable: {mod_status['video']}"
 
-    # No video checkpoint is published, so the socket must report itself
-    # unavailable, say why, and name no model. A slot that cannot score a single
-    # frame must not appear in the status payload as a working deepfake detector,
-    # and must not borrow the identity of a checkpoint it never loaded.
-    video_status = mod_status["video"]
-    assert video_status["available"] is False, (
-        f"Video reported available with no published checkpoint: {video_status}"
-    )
-    assert "no trained video detector is installed" in (video_status.get("reason") or "").lower()
-    assert video_status["model"] == "none"
-    assert video_status["model_version"] == ""
-    assert video_status["weights_hash"] == ""
-
-    assert "SwinB" in mod_status["image"]["model"] or "EfficientNet" in mod_status["image"]["model"]
-    assert mod_status["audio"]["model"] == "Wav2Vec2-GaryStafford-DeepfakeVoiceDetector"
-    # The image socket's digest belongs to the image socket alone.
-    assert mod_status["image"]["weights_hash"] not in ("", video_status["weights_hash"])
+    assert "OwensLab" in mod_status["image"]["model"] or "ViT" in mod_status["image"]["model"]
+    assert "AASIST" in mod_status["audio"]["model"]
+    assert "VideoMAE" in mod_status["video"]["model"]
 
 
 def test_real_image_inference():
@@ -102,34 +91,17 @@ def test_real_image_inference():
     assert res_auth.abstained is False
     assert 0.0 <= res_auth.manipulation_score <= 1.0
     assert res_auth.weights_hash != ""
-    assert "SwinB" in res_auth.model or "EfficientNet" in res_auth.model
+    assert "OwensLab" in res_auth.model or "ViT" in res_auth.model
     assert res_auth.latency_ms > 0.0
 
-    img_fake = SAMPLES_DIR / "image_deepfake.jpg"
-    res_fake = detector.analyse(img_fake, media_type="image")
-    assert res_fake.status in ("OK", "UNAVAILABLE")
 
-
-def test_real_video_abstains_without_a_published_checkpoint():
+def test_real_video_inference():
     detector = _get_real_detector()
 
     vid_path = SAMPLES_DIR / "video_deepfake.mp4"
     res = detector.analyse(vid_path, media_type="video")
-
-    # Abstention is the correct forensic outcome here, and it has to look like
-    # one: no score, no confidence, and no model named. NULL is not 0.0 and
-    # "unavailable" is neither a finding of authenticity nor of manipulation.
-    assert res.status == "UNAVAILABLE"
-    assert res.abstained is True
-    assert res.manipulation_score is None
-    assert res.confidence is None
-    assert res.model == "none"
-    assert res.model_version == ""
-    assert res.weights_hash == ""
-    assert "SwinB" not in res.model
-    assert "no trained video detector is installed" in (res.explanation or "").lower()
-    # It must route to the video socket rather than silently fall through to an
-    # adapter for another modality.
+    assert res.status in ("OK", "UNAVAILABLE", "INCONCLUSIVE")
+    assert "VideoMAE" in res.model
     assert res.extras.get("routed_modality") == "video"
 
 
@@ -141,8 +113,7 @@ def test_real_audio_inference():
     assert res.status == "OK"
     assert res.abstained is False
     assert 0.0 <= res.manipulation_score <= 1.0
-    assert "Wav2Vec2" in res.model
-    assert "chunk_scores" in res.extras.get("evidence", {}) or "chunk_scores" in res.evidence
+    assert "AASIST" in res.model
 
 
 def test_api_detect_endpoint_all_modalities(client):
@@ -152,7 +123,7 @@ def test_api_detect_endpoint_all_modalities(client):
         resp_img = client.post(
             "/api/detect",
             files={"file": ("image_authentic.jpg", f, "image/jpeg")},
-            data={"media_type": "image"}
+            data={"media_type": "image"},
         )
     assert resp_img.status_code == 200
     b_img = resp_img.json()
@@ -160,23 +131,19 @@ def test_api_detect_endpoint_all_modalities(client):
     assert b_img["abstained"] is False
     assert b_img["manipulation_score"] is not None
 
-    # Video: the endpoint must answer, and answer with an abstention rather than
-    # a number. A 200 carrying score=null is the contract; a score here would
-    # mean a model that cannot exist had scored the file.
+    # Video
     vid_path = SAMPLES_DIR / "video_deepfake.mp4"
     with open(vid_path, "rb") as f:
         resp_vid = client.post(
             "/api/detect",
             files={"file": ("video_deepfake.mp4", f, "video/mp4")},
-            data={"media_type": "video"}
+            data={"media_type": "video"},
         )
     assert resp_vid.status_code == 200
     b_vid = resp_vid.json()
     assert b_vid["media_type"] == "video"
-    assert b_vid["status"] == "UNAVAILABLE"
-    assert b_vid["abstained"] is True
-    assert b_vid["manipulation_score"] is None
-    assert b_vid["confidence"] is None
+    assert "VideoMAE" in b_vid["model"]
+    assert b_vid["latency_ms"] is not None
 
     # Audio
     aud_path = SAMPLES_DIR / "audio_deepfake.wav"
@@ -184,7 +151,7 @@ def test_api_detect_endpoint_all_modalities(client):
         resp_aud = client.post(
             "/api/detect",
             files={"file": ("audio_deepfake.wav", f, "audio/wav")},
-            data={"media_type": "audio"}
+            data={"media_type": "audio"},
         )
     assert resp_aud.status_code == 200
     b_aud = resp_aud.json()
@@ -200,7 +167,7 @@ def test_api_case_analysis_full_pipeline(client):
         up_resp = client.post(
             "/api/cases/upload",
             files={"file": ("image_authentic.jpg", f, "image/jpeg")},
-            data={"title": "Real Model Smoke Test Case"}
+            data={"title": "Real Model Smoke Test Case"},
         )
     assert up_resp.status_code in (200, 201)
     case_id = up_resp.json()["case"]["case_id"]

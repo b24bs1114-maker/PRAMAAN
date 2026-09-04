@@ -94,6 +94,13 @@ class Settings(BaseSettings):
     near_duplicate_max_distance: int = 12              # Hamming, candidate cut-off
     strong_duplicate_max_distance: int = 6             # Hamming, high-confidence band
 
+    # --- DINOv2 visual retrieval ---------------------------------------------
+    enable_dinov2_retrieval: bool = True
+    dinov2_model_name: str = "facebook/dinov2-small"
+    dinov2_embedding_dim: int = 384
+    dinov2_similarity_threshold: float = 0.70
+    dinov2_device: str = "auto"                        # auto | cpu | mps | cuda
+
     # --- Fusion weights (transparent, configurable) ---------------------------
     # Relative weights; normalised across whichever signals are available.
     fusion_weight_ai_detection: float = 0.35
@@ -115,9 +122,9 @@ class Settings(BaseSettings):
     enable_ai_detector: bool = True
     detector_backend: Literal["auto", "null"] = "auto"
     detector_model_path: str = ""
-    image_model_path: str = ""
-    video_model_path: str = ""
-    audio_model_path: str = ""
+    image_model_path: str = str(PROJECT_ROOT / "pramaan-detector" / "weights" / "image_detector.safetensors")
+    video_model_path: str = str(PROJECT_ROOT / "pramaan-detector" / "weights" / "video_detector.safetensors")
+    audio_model_path: str = str(PROJECT_ROOT / "pramaan-detector" / "weights" / "audio_detector.pth")
     image_weights_url: str = ""
 
     # --- Model asset provisioning --------------------------------------------
@@ -155,9 +162,9 @@ class Settings(BaseSettings):
     detector_offline: bool = True
 
     # Inference entrypoints, one per modality, as "module:callable".
-    image_detector_entrypoint: str = ""
-    video_detector_entrypoint: str = ""
-    audio_detector_entrypoint: str = ""
+    image_detector_entrypoint: str = "app.services.pramaan_detector_adapter:infer_image"
+    video_detector_entrypoint: str = "app.services.pramaan_detector_adapter:infer_video"
+    audio_detector_entrypoint: str = "app.services.pramaan_detector_adapter:infer_audio"
 
     # Inference is the most expensive thing this process does: one Swin-B
     # forward pass costs ~26 MB of activations, and a Grad-CAM pass ~206 MB

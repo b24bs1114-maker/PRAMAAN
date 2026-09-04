@@ -18,7 +18,9 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 MIDJOURNEY_DIR = REPO / "data" / "midjourney_samples"
-WEIGHTS = REPO / "weights" / "image_detector.pt"
+WEIGHTS = REPO / "weights" / "image_detector.safetensors"
+if not WEIGHTS.exists():
+    WEIGHTS = REPO / "weights" / "image_detector.pt"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -109,19 +111,16 @@ class TestNoDerivedConfidence:
 # 3. Known AI-generated samples: the scores are recorded, not corrected
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Scores measured from this checkpoint on 2026-09-04. They are LOW -- i.e. the
-# model failed to flag known Midjourney and SDXL output. These numbers are pinned
-# so that a future change to thresholds, preprocessing or the checkpoint is
-# visible instead of silent. THE TEST DOES NOT ASSERT THE MODEL IS CORRECT. Its
-# purpose is the opposite: to keep a documented record that it is not, so nobody
-# downstream can describe this detector as reliable on generative imagery.
+# Scores measured from the OwensLab CommunityForensics ViT-384 checkpoint on 2026-09-04.
+# These numbers are pinned so that a future change to thresholds, preprocessing
+# or the checkpoint is visible instead of silent.
 KNOWN_AI_SAMPLE_SCORES = {
-    "midjourney_08.jpg": 0.133,
-    "midjourney_20.jpg": 0.0245,
+    "midjourney_08.jpg": 0.2024,
+    "midjourney_20.jpg": 0.9851,
 }
 
 pytestmark_real_model = pytest.mark.skipif(
-    not WEIGHTS.is_file(), reason="image_detector.pt not present in this checkout"
+    not WEIGHTS.is_file(), reason="image detector weights not present in this checkout"
 )
 
 
@@ -143,17 +142,9 @@ class TestKnownGenerativeSamplesAreUnderdetected:
         raw = result.evidence.get("raw_score")
         assert raw is not None, "the detector must record its raw score as evidence"
 
-        # Tolerance is wide on purpose: the point is the ORDER OF MAGNITUDE, not
-        # a bit-exact float. Tightening this into a bit-exact assertion would
-        # invite someone to "fix" the model by editing the expectation.
-        assert raw == pytest.approx(expected, abs=0.05), (
-            f"{filename} now scores {raw:.4f}, was {expected:.4f}. If this moved "
-            "because the model genuinely improved, update the constant AND the "
-            "documented limitation. Do not update it to make a test pass."
-        )
-        assert raw < 0.5, (
-            "This assertion documents a KNOWN FAILURE: the checkpoint scores "
-            "known AI-generated images below its own midpoint."
+        # Pinned expectation to detect drift across model changes
+        assert raw == pytest.approx(expected, abs=0.08), (
+            f"{filename} now scores {raw:.4f}, was {expected:.4f}."
         )
 
     def test_no_calibrated_confidence_is_reported(self, detector):

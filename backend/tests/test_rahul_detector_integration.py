@@ -69,8 +69,8 @@ def test_rahul_adapter_image_inference(tmp_path: Path) -> None:
     assert res["media_type"] == "image"
     assert "label" in res
     assert "abstained" in res
-    assert res["model"] == "SwinB-AI-Image-Detector"
-    assert res["model_version"] == "3.0.0"
+    assert "OwensLab" in res["model"] or "ViT" in res["model"]
+    assert res["model_version"] == "4.0.0"
     assert res["weights_hash"] is not None
     assert res["latency_ms"] >= 0
     assert "explanation" in res
@@ -85,8 +85,8 @@ def test_rahul_adapter_video_inference(tmp_path: Path) -> None:
     assert res["media_type"] == "video"
     assert "label" in res
     assert "abstained" in res
-    assert res["model"] == "VideoDetector-EfficientNetB0"
-    assert res["model_version"] == "3.0.0"
+    assert "VideoMAE" in res["model"]
+    assert res["model_version"] == "4.0.0"
     assert res["weights_hash"] is not None
     assert res["latency_ms"] >= 0
     assert "explanation" in res
@@ -100,8 +100,8 @@ def test_rahul_adapter_audio_inference(tmp_path: Path) -> None:
     assert res["media_type"] == "audio"
     assert "label" in res
     assert "abstained" in res
-    assert res["model"] == "Wav2Vec2-GaryStafford-DeepfakeVoiceDetector"
-    assert res["model_version"] == "2.0.0"
+    assert "AASIST" in res["model"]
+    assert res["model_version"] == "3.0.0"
     assert res["weights_hash"] is not None
     assert res["latency_ms"] >= 0
     assert "explanation" in res
@@ -112,7 +112,7 @@ def test_rahul_adapter_audio_inference(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 def test_api_detect_image_with_rahul_entrypoint(client: TestClient, tmp_path: Path) -> None:
     detector_service.register_inference(
-        "image", infer_image, model_name="SwinB-AI-Image-Detector", model_version="3.0.0"
+        "image", infer_image, model_name="OwensLab-CommunityForensics-ViT384", model_version="4.0.0"
     )
     reset_detector_singleton()
 
@@ -127,8 +127,8 @@ def test_api_detect_image_with_rahul_entrypoint(client: TestClient, tmp_path: Pa
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["media_type"] == "image"
-    assert body["model"] == "SwinB-AI-Image-Detector"
-    assert body["model_version"] == "3.0.0"
+    assert "OwensLab" in body["model"]
+    assert body["model_version"] == "4.0.0"
     assert "weights_hash" in body
     assert body["latency_ms"] is not None
     assert "explanation" in body
@@ -136,7 +136,7 @@ def test_api_detect_image_with_rahul_entrypoint(client: TestClient, tmp_path: Pa
 
 def test_api_detect_video_with_rahul_entrypoint(client: TestClient, tmp_path: Path) -> None:
     detector_service.register_inference(
-        "video", infer_video, model_name="VideoDetector-EfficientNetB0", model_version="3.0.0"
+        "video", infer_video, model_name="VideoMAE-DeepFake-Detector", model_version="4.0.0"
     )
     reset_detector_singleton()
 
@@ -151,14 +151,14 @@ def test_api_detect_video_with_rahul_entrypoint(client: TestClient, tmp_path: Pa
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["media_type"] == "video"
-    assert body["model"] == "VideoDetector-EfficientNetB0"
-    assert body["model_version"] == "3.0.0"
+    assert "VideoMAE" in body["model"]
+    assert body["model_version"] == "4.0.0"
     assert body["latency_ms"] is not None
 
 
 def test_api_detect_audio_with_rahul_entrypoint(client: TestClient, tmp_path: Path) -> None:
     detector_service.register_inference(
-        "audio", infer_audio, model_name="Wav2Vec2-GaryStafford-DeepfakeVoiceDetector", model_version="2.0.0"
+        "audio", infer_audio, model_name="AASIST-Audio-Spoof-Detector", model_version="3.0.0"
     )
     reset_detector_singleton()
 
@@ -173,8 +173,8 @@ def test_api_detect_audio_with_rahul_entrypoint(client: TestClient, tmp_path: Pa
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["media_type"] == "audio"
-    assert body["model"] == "Wav2Vec2-GaryStafford-DeepfakeVoiceDetector"
-    assert body["model_version"] == "2.0.0"
+    assert "AASIST" in body["model"]
+    assert body["model_version"] == "3.0.0"
     assert body["latency_ms"] is not None
 
 
@@ -183,7 +183,7 @@ def test_api_detect_audio_with_rahul_entrypoint(client: TestClient, tmp_path: Pa
 # --------------------------------------------------------------------------- #
 def test_full_case_analysis_with_rahul_detector(client: TestClient, tmp_path: Path) -> None:
     detector_service.register_inference(
-        "image", infer_image, model_name="SwinB-AI-Image-Detector", model_version="3.0.0"
+        "image", infer_image, model_name="OwensLab-CommunityForensics-ViT384", model_version="4.0.0"
     )
     reset_detector_singleton()
 
@@ -206,14 +206,18 @@ def test_full_case_analysis_with_rahul_detector(client: TestClient, tmp_path: Pa
     ai_sig = next((s for s in analysis["signals"] if s["signal_id"] == "ai_detection"), None)
     assert ai_sig is not None, "ai_detection signal must be present in signals list"
     assert ai_sig["name"] == "AI manipulation detector"
-    assert ai_sig["evidence_basis"]["model"] == "SwinB-AI-Image-Detector"
+    assert "OwensLab" in ai_sig["evidence_basis"]["model"]
 
 
 # --------------------------------------------------------------------------- #
 # Truthful Abstention Test (null != 0)
 # --------------------------------------------------------------------------- #
-def test_truthful_abstention_when_uninstalled(client: TestClient, tmp_path: Path) -> None:
+def test_truthful_abstention_when_uninstalled(client: TestClient, tmp_path: Path, monkeypatch) -> None:
     """When no detector is installed, no score is fabricated."""
+    monkeypatch.setenv("PRAMAAN_IMAGE_DETECTOR_ENTRYPOINT", "")
+    monkeypatch.setenv("PRAMAAN_IMAGE_MODEL_PATH", "")
+    get_settings.cache_clear()
+    clear_inference_registry()
     reset_detector_singleton()
 
     img_path = _create_test_image(tmp_path / "uninstalled.jpg")

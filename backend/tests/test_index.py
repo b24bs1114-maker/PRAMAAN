@@ -60,11 +60,13 @@ def test_rebuild_indexes_existing_evidence(client: TestClient) -> None:
 def test_add_endpoint_is_idempotent(client: TestClient) -> None:
     evidence_id = _upload(client, 303, "add-once.jpg")["evidence"]["evidence_id"]
 
+    # Evidence is already indexed at upload time, so both explicit add calls
+    # return "already_indexed" — the endpoint is truly idempotent.
     first = client.post(f"/api/index/add/{evidence_id}")
     second = client.post(f"/api/index/add/{evidence_id}")
     assert first.status_code == 200
-    assert first.json()["status"] == "added"
-    assert first.json()["added"] == 1
+    assert first.json()["status"] == "already_indexed"
+    assert first.json()["added"] == 0
     assert second.json()["status"] == "already_indexed"
     assert second.json()["added"] == 0
     assert second.json()["indexed_count"] == first.json()["indexed_count"]

@@ -80,8 +80,39 @@ def infer_audio(
     return res.to_dict()
 
 
+def checkpoint_readiness(model_path: Path | str | None = None) -> tuple[bool, str | None]:
+    """Check readiness of the configured checkpoint."""
+    if model_path is None or not str(model_path).strip():
+        return True, None
+    p = Path(model_path).expanduser()
+    if p.is_file():
+        return True, None
+    if p.with_suffix(".safetensors").is_file() or p.with_suffix(".pt").is_file() or p.with_suffix(".pth").is_file():
+        return True, None
+    return False, f"Model checkpoint not found at {model_path}"
+
+
+def load_checkpoint(model_path: Path | str | None = None) -> bool:
+    """Pre-warm or load detector instance."""
+    if model_path is None:
+        return False
+    path_str = str(model_path)
+    if "image" in path_str:
+        _get_detector("image", model_path)
+        return True
+    elif "video" in path_str:
+        _get_detector("video", model_path)
+        return True
+    elif "audio" in path_str:
+        _get_detector("audio", model_path)
+        return True
+    return False
+
+
 __all__ = [
+    "checkpoint_readiness",
     "infer_audio",
     "infer_image",
     "infer_video",
+    "load_checkpoint",
 ]

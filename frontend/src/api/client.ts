@@ -39,6 +39,7 @@ import type {
   AnalysisResponse,
   AuditTrail,
   AuditVerification,
+  CaseDeleteResult,
   CaseRecord,
   DashboardSummary,
   DetectorStatus,
@@ -131,6 +132,27 @@ export function listCases(signal?: AbortSignal): Promise<{ count: number; cases:
 
 export function getCase(caseId: string, signal?: AbortSignal): Promise<CaseRecord> {
   return request<CaseRecord>(`/api/cases/${encodeURIComponent(caseId)}`, { signal })
+}
+
+/**
+ * Delete a case permanently, with everything it owns.
+ *
+ * This is a hard delete, not a tombstone: the case row, its evidence, analysis
+ * results, matches, timeline events and reports go, the stored files and index
+ * vectors go, and a `CASE_DELETED` entry is appended to the audit chain that
+ * outlives the case. The resolved promise is the backend's measured account of
+ * what it removed -- callers should show `warnings` rather than assume a clean
+ * result, because a post-commit filesystem problem lands there while the delete
+ * itself has already succeeded.
+ *
+ * A second delete of the same id rejects with a 404 `ApiError`. Nothing here
+ * translates that into success.
+ */
+export function deleteCase(caseId: string, signal?: AbortSignal): Promise<CaseDeleteResult> {
+  return request<CaseDeleteResult>(`/api/cases/${encodeURIComponent(caseId)}`, {
+    method: 'DELETE',
+    signal,
+  })
 }
 
 export function listEvidence(

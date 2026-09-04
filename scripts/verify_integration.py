@@ -10,6 +10,12 @@ then asserts the things the UI actually depends on:
   * the error paths return the statuses the UI branches on (400/404/413/422)
   * CORS headers are present for an allowed origin and absent for a foreign one,
     including on an error response
+  * a case can be created, populated, analysed, reported on and then *deleted*
+    end to end -- and after the delete the case is gone from every read route,
+    its files and index vectors are gone from storage, unrelated cases and the
+    shared corpus are untouched, the CASE_DELETED entry is still readable, the
+    chain still verifies, and a second delete is a 404 rather than a silent
+    success
 
 It also writes every real response to a recordings file so the frontend's own
 client can be replayed against genuine payloads rather than hand-written mocks
@@ -843,6 +849,365 @@ def verify_cors(client: TestClient) -> None:
     )
 
 
+# --- Deletion (the full destructive chain) ------------------------------------
+
+# Distinct bytes from the workflow fixtures: an upload of identical bytes into
+# the same case is deduplicated, and a case with one evidence row would not show
+# that a delete removes *all* of a case's evidence.
+DELETE_CASE_BYTES = jpeg_with_exif_bytes(seed=SEED + 7, size=(400, 300))
+DELETE_EXTRA_BYTES = encode(make_image(360, 270, seed=SEED + 8), "JPEG", 80)
+
+
+def verify_case_deletion(client: TestClient, surviving_case_id: str | None) -> dict[str, Any]:
+    """CREATE -> ADD EVIDENCE -> VERIFY -> DELETE -> VERIFY EVERYTHING.
+
+    Runs on a case of its own so the workflow case (and every recording taken
+    from it) survives. What this proves that the backend unit tests cannot: the
+    whole chain holds through the real HTTP surface, in the order the UI drives
+    it, and the audit entry for a deleted case is still readable and still
+    verifiable afterwards through the routes a client can actually call.
+
+    Returns the context the frontend harness needs to replay the same delete.
+    """
+    settings = get_settings()
+    context: dict[str, Any] = {}
+
+    # 1. CREATE CASE -- by uploading the first exhibit, as the UI does.
+    created = client.post(
+        "/api/cases/upload",
+        files={"file": ("delete-me-exhibit-1.jpg", DELETE_CASE_BYTES, "image/jpeg")},
+        data={
+            "title": "Deletion verification case",
+            "description": "Created solely to be deleted by the verifier",
+            "examiner": "automated",
+        },
+    )
+    if not check(
+        created.status_code == 201,
+        "deletion: CREATE CASE -> 201",
+        f"HTTP {created.status_code}",
+    ):
+        return context
+    case = created.json()["case"]
+    case_id = case["case_id"]
+    case_number = case["case_number"]
+
+    # 2. ADD EVIDENCE -- a second, different exhibit in the same case.
+    added = client.post(
+        "/api/cases/upload",
+        files={"file": ("delete-me-exhibit-2.jpg", DELETE_EXTRA_BYTES, "image/jpeg")},
+        data={"case_id": case_id},
+    )
+    check(
+        added.status_code == 201 and added.json().get("duplicate") is False,
+        "deletion: ADD EVIDENCE -> 201 (a second, distinct exhibit)",
+        f"HTTP {added.status_code}",
+    )
+
+    # 3. VERIFY CASE EXISTS, and give it real collateral to lose: an analysis
+    #    (analysis_results, matches, timeline events) and a rendered report.
+    fetched = client.get(f"/api/cases/{case_id}")
+    record("GET", f"/api/cases/{case_id}", fetched)
+    check(
+        fetched.status_code == 200 and fetched.json()["case_id"] == case_id,
+        "deletion: VERIFY CASE EXISTS -> 200",
+        f"HTTP {fetched.status_code}",
+    )
+    context["deleted_case"] = fetched.json() if fetched.status_code == 200 else None
+    context["deleted_case_id"] = case_id
+    context["deleted_case_number"] = case_number
+
+    # Recorded under a marker rather than the bare path so the plain
+    # `GET /api/cases` recording keeps whatever the earlier checks captured.
+    # The frontend harness replays this pair to prove the queue's local removal
+    # lands on the same list the backend itself reports after the delete.
+    listed_before = record("GET", "/api/cases#beforedelete", client.get("/api/cases"))
+    check(
+        any(c["case_id"] == case_id for c in listed_before.get("cases", [])),
+        "deletion: the new case is in GET /api/cases before the delete",
+        f"{listed_before.get('count')} cases",
+    )
+
+    evidence_before = client.get(f"/api/cases/{case_id}/evidence")
+    evidence_ids = [e["evidence_id"] for e in evidence_before.json().get("evidence", [])]
+    check(
+        evidence_before.status_code == 200 and len(evidence_ids) == 2,
+        "deletion: the case owns both exhibits before the delete",
+        f"{len(evidence_ids)} evidence rows",
+    )
+
+    analysed = client.post(f"/api/cases/{case_id}/analyse")
+    check(
+        analysed.status_code == 200,
+        "deletion: the case is analysed first (so there is derived data to remove)",
+        f"HTTP {analysed.status_code}",
+    )
+    reported = client.post(f"/api/cases/{case_id}/report", json={"examiner": "automated"})
+    check(
+        reported.status_code in (200, 201),
+        "deletion: the case has a rendered report (so there is a PDF to remove)",
+        f"HTTP {reported.status_code}",
+    )
+
+    # 4. Snapshot the filesystem and the index while the case still exists.
+    case_dir = settings.evidence_dir / "cases" / case_id
+    files_before = sorted(p for p in case_dir.rglob("*") if p.is_file()) if case_dir.is_dir() else []
+    check(
+        len(files_before) >= 2,
+        "deletion: the case's stored files are on disk before the delete",
+        f"{len(files_before)} files in {case_dir.name}",
+    )
+    report_pdf: Path | None = None
+    if reported.status_code in (200, 201):
+        report_pdf = settings.reports_dir / reported.json()["filename"]
+        check(
+            report_pdf.is_file(),
+            "deletion: the report PDF is on disk before the delete",
+            report_pdf.name,
+        )
+    indexed_before = client.get("/api/index/status").json().get("indexed_count")
+
+    # 5. DELETE THE CASE.
+    response = client.delete(f"/api/cases/{case_id}")
+    body = record("DELETE", f"/api/cases/{case_id}", response)
+    if not check(
+        response.status_code == 200,
+        "deletion: DELETE /api/cases/{id} -> 200",
+        f"HTTP {response.status_code} {str(body)[:120]}",
+    ):
+        return context
+    expect_keys(
+        body,
+        {
+            "status",
+            "case_id",
+            "case_number",
+            "title",
+            "examiner",
+            "deleted_at",
+            "deleted_evidence_count",
+            "deleted",
+            "storage",
+            "index",
+            "audit",
+            "warnings",
+        },
+        "CaseDeleteResponse",
+    )
+    expect_keys(
+        body["deleted"],
+        {
+            "evidence",
+            "analysis_results",
+            "matches",
+            "matches_owned_by_other_cases",
+            "timeline_events",
+            "timeline_events_detached",
+            "reports",
+        },
+        "CaseDeleteCounts",
+    )
+    expect_keys(
+        body["storage"],
+        {
+            "evidence_files_removed",
+            "evidence_files_missing",
+            "report_files_removed",
+            "report_files_missing",
+            "case_directory",
+            "case_directory_removed",
+        },
+        "CaseDeleteStorage",
+    )
+    expect_keys(
+        body["index"], {"vectors_removed", "index_version", "backend", "rebuild_required"}, "CaseDeleteIndex"
+    )
+
+    expect_keys(
+        body["audit"],
+        {
+            "audit_id",
+            "seq",
+            "event",
+            "timestamp",
+            "actor",
+            "previous_hash",
+            "row_hash",
+            "retained",
+            "case_rows_retained",
+        },
+        "CaseDeleteAudit",
+    )
+    check(
+        body["status"] == "deleted"
+        and body["case_id"] == case_id
+        and body["case_number"] == case_number,
+        "deletion: the response identifies the case it deleted",
+        f"{body['status']} {body['case_number']}",
+    )
+    check(
+        body["deleted"]["evidence"] == 2 and body["deleted_evidence_count"] == 2,
+        "deletion: both evidence rows are reported removed",
+        f"deleted.evidence={body['deleted']['evidence']} top={body['deleted_evidence_count']}",
+    )
+    check(
+        body["deleted"]["reports"] >= 1,
+        "deletion: the report row is reported removed",
+        f"reports={body['deleted']['reports']}",
+    )
+    check(
+        body["warnings"] == [],
+        "deletion: a clean delete reports no warnings",
+        f"warnings={body['warnings']}",
+    )
+
+    # 6. VERIFY CASE IS GONE -- through every route that reads a case.
+    gone = client.get(f"/api/cases/{case_id}")
+    record("GET", f"/api/cases/{case_id}#deleted", gone)
+    check(gone.status_code == 404, "deletion: GET the deleted case -> 404", f"HTTP {gone.status_code}")
+    check(
+        client.get(f"/api/cases/{case_id}/evidence").status_code == 404,
+        "deletion: GET the deleted case's evidence -> 404",
+    )
+    check(
+        client.post(f"/api/cases/{case_id}/analyse").status_code == 404,
+        "deletion: analysing the deleted case -> 404",
+    )
+    listed_after = record("GET", "/api/cases#afterdelete", client.get("/api/cases"))
+    check(
+        all(c["case_id"] != case_id for c in listed_after.get("cases", [])),
+        "deletion: the case is no longer listed in GET /api/cases",
+        f"{listed_after.get('count')} cases remain",
+    )
+    check(
+        {c["case_id"] for c in listed_after.get("cases", [])}
+        == {c["case_id"] for c in listed_before.get("cases", [])} - {case_id},
+        "deletion: the list lost exactly the deleted case and nothing else",
+        f"{listed_before.get('count')} -> {listed_after.get('count')}",
+    )
+
+    # 7. VERIFY CASE-OWNED STORAGE HANDLED -- and only that storage.
+    check(
+        not case_dir.exists() and body["storage"]["case_directory_removed"] is True,
+        "deletion: the case's evidence directory is gone from disk",
+        f"exists={case_dir.exists()} reported={body['storage']['case_directory_removed']}",
+    )
+    check(
+        all(not p.exists() for p in files_before)
+        and body["storage"]["evidence_files_removed"] == len(files_before),
+        "deletion: every stored evidence file the case owned is unlinked",
+        f"removed={body['storage']['evidence_files_removed']} of {len(files_before)}",
+    )
+    if report_pdf is not None:
+        check(
+            not report_pdf.exists() and body["storage"]["report_files_removed"] >= 1,
+            "deletion: the case's report PDF is unlinked",
+            f"removed={body['storage']['report_files_removed']} exists={report_pdf.exists()}",
+        )
+    corpus_dir = settings.evidence_dir / "corpus"
+    check(
+        corpus_dir.is_dir() and any(corpus_dir.rglob("*")),
+        "deletion: the shared corpus bucket is untouched",
+        f"exists={corpus_dir.is_dir()}",
+    )
+
+    # 8. VERIFY THE INDEX lost exactly this case's vectors.
+    indexed_after = client.get("/api/index/status").json().get("indexed_count")
+    check(
+        isinstance(indexed_before, int)
+        and isinstance(indexed_after, int)
+        and indexed_after == indexed_before - body["index"]["vectors_removed"],
+        "deletion: the perceptual index dropped exactly the vectors it reported",
+        f"{indexed_before} -> {indexed_after}, removed={body['index']['vectors_removed']}",
+    )
+    check(
+        isinstance(indexed_after, int) and indexed_after >= len(GEN_BYTES),
+        "deletion: the seeded corpus lineage is still indexed",
+        f"indexed_count={indexed_after}",
+    )
+
+    # 9. VERIFY THE CASE_DELETED AUDIT EVENT survives the case, and is readable
+    #    through a route -- not only inside the delete response.
+    trail = client.get("/api/audit", params={"case_id": case_id, "limit": 500})
+    retained = trail.json().get("events", []) if trail.status_code == 200 else []
+    deletion_events = [e for e in retained if e.get("event") == "CASE_DELETED"]
+    check(
+        len(deletion_events) == 1,
+        "deletion: exactly one CASE_DELETED entry exists for the deleted case",
+        f"{len(deletion_events)} of {len(retained)} retained rows",
+    )
+    if deletion_events:
+        entry = deletion_events[0]
+        details = entry.get("details") or {}
+        check(
+            entry["audit_id"] == body["audit"]["audit_id"]
+            and entry["seq"] == body["audit"]["seq"]
+            and entry["row_hash"] == body["audit"]["row_hash"],
+            "deletion: the retained entry is the one the delete response reported",
+            f"seq={entry['seq']}",
+        )
+        check(
+            details.get("case_number") == case_number
+            and details.get("deleted_evidence_count") == 2
+            and details.get("deleted_at") == body["deleted_at"]
+            and isinstance(details.get("deleted_rows"), dict),
+            "deletion: the audit entry carries case number, timestamp and counts",
+            f"details keys={sorted(details)[:6]}",
+        )
+    check(
+        len(retained) == body["audit"]["case_rows_retained"],
+        "deletion: the retained row count matches what the response reported",
+        f"read={len(retained)} reported={body['audit']['case_rows_retained']}",
+    )
+
+    # 10. VERIFY THE AUDIT CHAIN IS STILL VALID after the delete.
+    verified = client.post("/api/audit/verify", params={"record": "false"})
+    check(
+        verified.status_code == 200 and verified.json().get("valid") is True,
+        "deletion: the whole audit chain still verifies after the delete",
+        f"HTTP {verified.status_code} valid={verified.json().get('valid')}"
+        f" first_invalid={verified.json().get('first_invalid_seq')}",
+    )
+
+    # 11. VERIFY OTHER CASES AND THEIR EVIDENCE ARE UNAFFECTED.
+    if surviving_case_id:
+        other = client.get(f"/api/cases/{surviving_case_id}")
+        check(
+            other.status_code == 200,
+            "deletion: the unrelated workflow case still exists",
+            f"HTTP {other.status_code}",
+        )
+        other_evidence = client.get(f"/api/cases/{surviving_case_id}/evidence")
+        check(
+            other_evidence.status_code == 200
+            and len(other_evidence.json().get("evidence", [])) >= 1,
+            "deletion: the unrelated case keeps all of its evidence",
+            f"{len(other_evidence.json().get('evidence', []))} rows",
+        )
+        other_audit = client.post(f"/api/cases/{surviving_case_id}/audit/verify")
+        check(
+            other_audit.status_code == 200 and other_audit.json().get("valid") is True,
+            "deletion: the unrelated case's audit chain still verifies",
+            f"valid={other_audit.json().get('valid')}",
+        )
+
+    # 12. A SECOND DELETE MUST 404 -- deleting nothing is not a success.
+    repeat = client.delete(f"/api/cases/{case_id}")
+    repeat_body = record("DELETE", f"/api/cases/{case_id}#repeat", repeat)
+    check(
+        repeat.status_code == 404,
+        "deletion: deleting the same case again -> 404 (never silent success)",
+        f"HTTP {repeat.status_code}",
+    )
+    check(
+        isinstance(repeat_body, dict) and "error" in repeat_body,
+        "deletion: the repeat delete returns the standard error envelope",
+        f"keys={keys_of(repeat_body)}",
+    )
+
+    return context
+
+
 # --- Route table -------------------------------------------------------------
 
 # Every path the frontend's API client can construct, as a route template.
@@ -853,6 +1218,7 @@ CLIENT_ROUTES: list[tuple[str, str]] = [
     ("POST", "/api/cases/upload"),
     ("GET", "/api/cases"),
     ("GET", "/api/cases/{case_id}"),
+    ("DELETE", "/api/cases/{case_id}"),
     ("GET", "/api/cases/{case_id}/evidence"),
     ("POST", "/api/cases/{case_id}/analyse"),
     ("POST", "/api/cases/{case_id}/verdict"),
@@ -894,6 +1260,9 @@ def main() -> int:
         context = run_workflow(client)
         verify_error_paths(client, context.get("case_id"))
         verify_cors(client)
+        # Last: it deletes a case of its own, and the checks above must run
+        # against a workspace this has not modified.
+        context.update(verify_case_deletion(client, context.get("case_id")))
 
     # Written where the frontend harness looks for it. /reports is git-ignored,
     # which matters: recordings contain a real (if synthetic) case.

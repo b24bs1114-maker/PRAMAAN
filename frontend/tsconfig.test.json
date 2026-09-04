@@ -1,0 +1,18 @@
+/*
+ * Typechecking for tests/, which tsconfig.app.json deliberately leaves out of
+ * the build. The contract tests import the real client and the real components,
+ * so they are subject to the same strictness as src -- otherwise the one file
+ * asserting the API contract would be the only file allowed to lie about it.
+ *
+ * The runner (tests/run-contract.mjs) bundles with esbuild, which strips types
+ * without checking them. This is the check:
+ *
+ *   npm run typecheck:tests
+ */
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src", "tests"]
+}

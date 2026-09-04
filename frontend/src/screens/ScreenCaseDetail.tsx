@@ -23,12 +23,14 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import type { AuditEvent, CaseRecord, Evidence } from '../api/types'
 import { ErrorBanner } from '../components/Banner'
+import { CaseDeleteDialog, DeleteCaseButton } from '../components/CaseDelete'
 import { Empty, Spinner } from '../components/Feedback'
 import { Icon } from '../components/Icon'
 import { Pill, type PillTone } from '../components/Pill'
 import { NOT_MEASURED, formatTimestampShort, orPlaceholder, shortHash } from '../lib/format'
 import type { RoutePath } from '../lib/router'
 import { verdictBandLabel } from '../lib/signals'
+import { useCaseDeletion } from '../state/useCaseDeletion'
 import { isReady, type Investigation } from '../state/useInvestigation'
 
 function priorityTone(priority: string | undefined): PillTone {
@@ -70,6 +72,15 @@ export function ScreenCaseDetail({
   const [auditError, setAuditError] = useState<unknown>(null)
 
   const currentCaseId = caseId || caseRecord?.case_id || null
+
+  /*
+   * Deleting from the dossier leaves the screen: once the backend confirms, the
+   * case this screen is about no longer exists, and every panel below would be
+   * describing a case that is gone. The queue then re-lists from the backend, so
+   * the case's absence there is the confirmation -- not a message this screen
+   * wrote on its way out.
+   */
+  const deletion = useCaseDeletion(() => onNavigate('cases'))
 
   useEffect(() => {
     if (!currentCaseId) return
@@ -238,14 +249,23 @@ export function ScreenCaseDetail({
           Back to Cases
         </button>
 
-        <button
-          type="button"
-          className="btn btn--ghost btn--sm"
-          onClick={() => onNavigate('intake')}
-        >
-          <Icon name="settings" size={14} />
-          Edit Case
-        </button>
+        <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onClick={() => onNavigate('intake')}
+          >
+            <Icon name="settings" size={14} />
+            Edit Case
+          </button>
+
+          {/*
+            Only offered once the real case record is in hand: the dialog requires
+            the case number the backend issued, and there is nothing to type back
+            if the record has not loaded.
+          */}
+          {c ? <DeleteCaseButton target={c} onClick={deletion.ask} label="Delete Case" /> : null}
+        </div>
       </div>
 
       {/* 2. CASE META BAR */}
@@ -624,6 +644,13 @@ export function ScreenCaseDetail({
           {nextAction.btn}
         </button>
       </div>
+
+      <CaseDeleteDialog
+        state={deletion.state}
+        onTyped={deletion.type}
+        onCancel={deletion.dismiss}
+        onConfirm={deletion.confirm}
+      />
     </div>
   )
 }

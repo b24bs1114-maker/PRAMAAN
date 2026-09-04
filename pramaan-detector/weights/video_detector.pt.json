@@ -1,0 +1,12 @@
+{
+  "model_name": "VideoMAE-DeepFake-Detector",
+  "model_version": "4.0.0",
+  "positive_index": 1,
+  "num_frames": 16,
+  "frame_size": [
+    224,
+    224
+  ],
+  "weights_sha256": "293c668a5d3289d3162902d8cac6687cd11551cf2358768bad126de32b6d7f29",
+  "weights_size_bytes": 344937328
+}

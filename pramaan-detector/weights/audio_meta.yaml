@@ -1,0 +1,29 @@
+system:
+  name: "AASIST"
+  slug: "aasist"
+  description: >
+    AASIST: audio anti-spoofing using integrated spectro-temporal graph
+    attention networks. Sinc-convolution front-end, RawNet2-style residual
+    encoder, and heterogeneous stacking graph attention over spectral and
+    temporal sub-graphs with a learnable readout. Official clovaai/aasist
+    ASVspoof2019 LA pretrained checkpoint, FP32, deterministic
+    first-64600-sample window (no random crop).
+  code: "https://github.com/clovaai/aasist"
+  checkpoint: "https://huggingface.co/SpeechAntiSpoofingBenchmarks/AASIST/blob/e842653505c2832ac9f46bbf56173b0f54ef82a7/AASIST.pth"
+  params_millions: 0.297866
+  paper:
+    arxiv_id: "2110.01200"
+    url: "https://arxiv.org/abs/2110.01200"
+    bibtex: |
+      @inproceedings{jung2022aasist,
+        title={{AASIST}: Audio Anti-Spoofing Using Integrated Spectro-Temporal Graph Attention Networks},
+        author={Jung, Jee-weon and Heo, Hee-Soo and Tak, Hemlata and Shim, Hye-jin and Chung, Joon Son and Lee, Bong-Jin and Yu, Ha-Jin and Evans, Nicholas},
+        booktitle={ICASSP 2022 - 2022 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
+        pages={6367--6371},
+        year={2022},
+        organization={IEEE}
+      }
+notes: >
+  Official AASIST variant only (not AASIST-L). Deterministic first-64600-sample
+  window (no random crop), matching clovaai/aasist data_utils.pad() used at eval.
+  Checkpoint mirrored to SpeechAntiSpoofingBenchmarks/AASIST (pinned).

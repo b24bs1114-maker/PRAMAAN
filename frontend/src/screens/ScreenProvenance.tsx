@@ -29,7 +29,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import type { MatchesResponse, Origin, PropagationResponse } from '../api/types'
+import type { MatchCandidate, MatchesResponse, Origin, PropagationResponse } from '../api/types'
 import { ErrorBanner } from '../components/Banner'
 import { Empty, Spinner } from '../components/Feedback'
 import { Icon } from '../components/Icon'
@@ -173,6 +173,28 @@ export function ScreenProvenance({
     )
   }
 
+  // Auto-fetch candidates when case is selected or loaded
+  useEffect(() => {
+    if (currentCaseId) {
+      runCandidateSearch()
+    }
+  }, [currentCaseId])
+
+  const candidatesList = useMemo(() => {
+    if (!effectiveMatches?.queries) return []
+    const seen = new Set<string>()
+    const list: MatchCandidate[] = []
+    for (const q of effectiveMatches.queries) {
+      for (const c of q.candidates || []) {
+        if (!seen.has(c.evidence_id)) {
+          seen.add(c.evidence_id)
+          list.push(c)
+        }
+      }
+    }
+    return list
+  }, [effectiveMatches])
+
   return (
     <div className="screen stack" style={{ gap: 'var(--space-4)' }}>
       {/* 1. TOP: CASE CONTEXT & 6-PHASE STEPPER */}
@@ -261,7 +283,7 @@ export function ScreenProvenance({
           {/* Box 1: EARLIEST KNOWN INSTANCE */}
           <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)' }}>
             <span className="label" style={{ color: 'var(--text-strong)' }}>
-              EARLIEST KNOWN INSTANCE
+              EARLIEST KNOWN INSTANCE IN THE INDEXED EVIDENCE CORPUS
             </span>
 
             {origin ? (
@@ -269,15 +291,14 @@ export function ScreenProvenance({
                 <div className="grid-3col" style={{ gap: 12, background: 'var(--surface-2)', padding: '12px 16px', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
                   <div className="stack" style={{ gap: 2 }}>
                     <span style={{ fontSize: '10px', textTransform: 'uppercase', fontFamily: 'var(--mono)', color: 'var(--text-faint)', fontWeight: 700 }}>
-                      RECORDED PLATFORM
+                      SOURCE DOMAIN / PLATFORM
                     </span>
-                    {/*
-                      The platform is whatever was recorded at ingest, verbatim.
-                      It is not inferred, and there is no default: an unrecorded
-                      platform reads "Not recorded", never a named service.
-                    */}
-                    <span style={{ fontSize: 'var(--text-xs)', fontWeight: 700, color: origin.platform ? 'var(--text-strong)' : 'var(--text-muted)' }}>
-                      {origin.platform || 'Not recorded'}
+                    <span style={{ fontSize: 'var(--text-xs)', fontWeight: 700, color: 'var(--text-strong)' }}>
+                      {origin.platform?.startsWith('web:') || origin.platform?.startsWith('http')
+                        ? `PUBLIC WEB DISCOVERY (${origin.platform})`
+                        : origin.platform
+                        ? `INTERNAL EVIDENCE CORPUS (${origin.platform})`
+                        : 'INTERNAL EVIDENCE CORPUS'}
                     </span>
                   </div>
 
@@ -370,8 +391,58 @@ export function ScreenProvenance({
           {/* Box 2: HORIZONTAL LINEAGE NODE GRAPH */}
           <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)' }}>
             <span className="label" style={{ color: 'var(--text-strong)' }}>
-              LINEAGE PROPAGATION TIMELINE
+              PROVENANCE TIMELINE
             </span>
+
+            {nodes.length > 1 ? (
+              <div
+                className="row"
+                style={{
+                  gap: 8,
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  padding: '8px 12px',
+                  background: 'var(--surface-2)',
+                  borderRadius: 'var(--radius)',
+                  border: '1px solid var(--border)',
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: '10px',
+                    textTransform: 'uppercase',
+                    color: 'var(--text-faint)',
+                    fontFamily: 'var(--mono)',
+                    fontWeight: 800,
+                    letterSpacing: '0.06em',
+                  }}
+                >
+                  SEQUENCE:
+                </span>
+                {nodes.map((n, i) => (
+                  <span
+                    key={n.evidence_id}
+                    className="row"
+                    style={{ gap: 6, alignItems: 'center', fontSize: 'var(--text-xs)', fontFamily: 'var(--mono)' }}
+                  >
+                    <span
+                      style={{
+                        fontWeight: 700,
+                        color:
+                          n.evidence_id === earliestEvidenceId
+                            ? '#38bdf8'
+                            : n.is_case_evidence
+                            ? '#ef4444'
+                            : 'var(--text-strong)',
+                      }}
+                    >
+                      {n.filename}
+                    </span>
+                    {i < nodes.length - 1 ? <span style={{ color: 'var(--text-faint)', fontWeight: 700 }}>→</span> : null}
+                  </span>
+                ))}
+              </div>
+            ) : null}
 
             {nodes.length > 0 ? (
               <div
@@ -635,11 +706,109 @@ export function ScreenProvenance({
         </div>
       </div>
 
-      {/* 4. DISCLOSURE FOR NEAR-DUPLICATE TABLE & TECHNICAL ARTEFACTS */}
+      {/* 3. RELATED / NEAR-DUPLICATE CANDIDATES */}
+      <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)' }}>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+          <div className="stack" style={{ gap: 2 }}>
+            <span className="label" style={{ color: 'var(--text-strong)' }}>
+              RELATED / NEAR-DUPLICATE CANDIDATES ({candidatesList.length})
+            </span>
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              Retrieved through DINOv2 visual embedding retrieval and verified against perceptual hashes (pHash/dHash/aHash).
+            </span>
+          </div>
+          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <Pill variant={candidatesList.length > 0 ? 'ok' : 'neutral'}>
+              {candidatesList.length} {candidatesList.length === 1 ? 'candidate' : 'candidates'}
+            </Pill>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={runCandidateSearch}
+              disabled={searching}
+            >
+              {searching ? <Spinner label="Searching..." /> : <Icon name="search" size={13} />}
+              Re-run Search
+            </button>
+          </div>
+        </div>
+
+        {candidatesList.length > 0 ? (
+          <div className="table-wrapper" style={{ overflowX: 'auto' }}>
+            <table className="table" style={{ width: '100%', fontSize: 'var(--text-xs)' }}>
+              <thead>
+                <tr>
+                  <th>FILE / EVIDENCE ID</th>
+                  <th>VISUAL SIMILARITY</th>
+                  <th>PERCEPTUAL DISTANCE</th>
+                  <th>MATCH BASIS</th>
+                  <th>TIMESTAMP</th>
+                  <th>CORPUS / PLATFORM</th>
+                  <th>TRANSFORMATION</th>
+                </tr>
+              </thead>
+              <tbody>
+                {candidatesList.map((cand) => (
+                  <tr key={cand.evidence_id}>
+                    <td>
+                      <div className="stack" style={{ gap: 2 }}>
+                        <span style={{ fontWeight: 700, color: 'var(--text-strong)' }}>{cand.filename}</span>
+                        <code style={{ fontSize: '10px', color: 'var(--text-faint)' }}>{cand.evidence_id}</code>
+                      </div>
+                    </td>
+                    <td>
+                      <span style={{ fontWeight: 700, color: cand.similarity >= 0.9 ? 'var(--ok-bright)' : 'var(--accent-bright)' }}>
+                        {formatSimilarity(cand.similarity)}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{ fontFamily: 'var(--mono)', color: 'var(--text-strong)' }}>
+                        {formatDistance(cand.distance)}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                        {cand.match_basis || (cand.distance === 0 ? 'Exact SHA-256 byte match' : 'Multi-hash verified')}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{ fontSize: '11px', fontFamily: 'var(--mono)', color: 'var(--text-muted)' }}>
+                        {formatTimestamp(cand.observed_at || cand.timestamp)}
+                      </span>
+                    </td>
+                    <td>
+                      <span style={{ fontSize: '11px', color: 'var(--text-strong)' }}>
+                        {cand.platform?.startsWith('web:') || cand.platform?.startsWith('http')
+                          ? `PUBLIC WEB DISCOVERY (${cand.platform})`
+                          : cand.platform
+                          ? `INTERNAL EVIDENCE CORPUS (${cand.platform})`
+                          : 'INTERNAL EVIDENCE CORPUS'}
+                      </span>
+                    </td>
+                    <td>
+                      <Pill variant="neutral">
+                        {orPlaceholder(cand.transformation)}
+                      </Pill>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: 'var(--radius)', textAlign: 'center' }}>
+            <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>
+              {searching ? 'Searching indexed evidence corpus...' : 'No near-duplicate candidates retrieved from the indexed evidence corpus for this item.'}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* 4. DISCLOSURE FOR TOPOLOGICAL GRAPH & TECHNICAL DETAILS */}
       <details className="disclosure card" style={{ padding: 'var(--space-3) var(--space-4)' }}>
         <summary style={{ fontWeight: 700, fontSize: 'var(--text-sm)' }}>
           <Icon name="arrow-right" size={13} className="disclosure__chevron" />
-          Near-Duplicate Candidates &amp; Topological Graph ({effectiveMatches?.total_candidates ?? 0} candidates)
+          Topological Lineage Graph &amp; Technical Details ({nodes.length} nodes, {propData?.graph?.edges?.length ?? 0} edges)
         </summary>
         <div className="disclosure__panel stack" style={{ gap: 'var(--space-4)', marginTop: 'var(--space-3)' }}>
           {/*

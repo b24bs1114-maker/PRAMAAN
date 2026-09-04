@@ -3,12 +3,13 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "PRAMAAN investigation console — frontend for the forensic media provenance API",
+  "description": "PRAMAAN investigation console \u2014 frontend for the forensic media provenance API",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "typecheck:tests": "tsc --noEmit -p tsconfig.test.json",
     "verify:contract": "node tests/run-contract.mjs"
   },
   "dependencies": {

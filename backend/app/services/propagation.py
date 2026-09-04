@@ -241,6 +241,8 @@ def _origin(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
         "is_synthetic": earliest["is_synthetic"],
         "discovered_by": earliest["discovered_by"],
         "distance_to_case_evidence": earliest["distance_to_case_evidence"],
+        "similarity_to_case_evidence": earliest.get("similarity_to_case_evidence"),
+        "transformation": earliest.get("transformation"),
         "is_absolute_origin": False,
         "tied_earliest_evidence_ids": tied,
         "timestamp_is_tied": len(tied) > 1,

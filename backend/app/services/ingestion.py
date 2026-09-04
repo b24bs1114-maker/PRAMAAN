@@ -8,16 +8,17 @@ bytes on disk, fingerprinted, persisted, and recorded in the audit log.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, BinaryIO
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import ROLE_CASE_EVIDENCE, ROLE_CORPUS, Case, Evidence
+from app.models import ROLE_CASE_EVIDENCE, ROLE_CORPUS, AuditLog, Case, Evidence
 from app.services import audit
 from app.services.hashing import (
     PERCEPTUAL_ALGORITHM,
@@ -45,16 +46,53 @@ class IngestResult:
     warnings: list[str]
 
 
+CASE_NUMBER_PREFIX = "PRAMAAN"
+_CASE_NUMBER_SUFFIX = re.compile(rf"^{CASE_NUMBER_PREFIX}-\d{{8}}-(\d+)$")
+
+
+def _highest_issued_sequence(session: Session, prefix: str) -> int:
+    """Highest sequence ever issued under ``prefix`` -- including deleted cases.
+
+    Live rows alone are not enough. A case can be deleted, but its audit rows
+    cannot be, and every ``CASE_CREATED`` event carries the number that was
+    handed out. Reading both means a number is never issued twice on the same
+    day, so the retained trail cannot end up describing two different cases under
+    one human-facing case number.
+    """
+    issued: list[str | None] = list(
+        session.execute(
+            select(Case.case_number).where(Case.case_number.like(f"{prefix}%"))
+        ).scalars()
+    )
+    recorded = AuditLog.details["case_number"].as_string()
+    issued += list(
+        session.execute(
+            select(recorded).where(
+                AuditLog.event == audit.EVENT_CASE_CREATED,
+                recorded.like(f"{prefix}%"),
+            )
+        ).scalars()
+    )
+    highest = 0
+    for number in issued:
+        match = _CASE_NUMBER_SUFFIX.match(number or "")
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return highest
+
+
 def generate_case_number(session: Session) -> str:
-    """Human-facing case number: PRAMAAN-YYYYMMDD-NNNN (daily sequence)."""
+    """Human-facing case number: PRAMAAN-YYYYMMDD-NNNN (daily sequence).
+
+    The sequence is one past the highest ever *issued* today, not the number of
+    cases that currently exist. Counting live rows would re-issue a number the
+    moment a case was deleted: the next insert would collide with a surviving
+    case and be rejected by the unique constraint, and any number that did get
+    through would appear against two different cases in the audit trail.
+    """
     today = utcnow().strftime("%Y%m%d")
-    prefix = f"PRAMAAN-{today}-"
-    count = session.execute(
-        select(func.count())
-        .select_from(Case)
-        .where(Case.case_number.like(f"{prefix}%"))
-    ).scalar_one()
-    return f"{prefix}{count + 1:04d}"
+    prefix = f"{CASE_NUMBER_PREFIX}-{today}-"
+    return f"{prefix}{_highest_issued_sequence(session, prefix) + 1:04d}"
 
 
 def create_case(

@@ -140,6 +140,8 @@ def main() -> int:
     print("index")
     print(f"  backend       : {result['backend']}")
     print(f"  indexed_count : {result['indexed_count']}")
+    if "dinov2_indexed_count" in result:
+        print(f"  dinov2_count  : {result['dinov2_indexed_count']}")
     print(f"  index_version : {result['index_version']}")
     print(f"  path          : {result['index_path']}")
     if result.get("notes"):

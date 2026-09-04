@@ -175,7 +175,7 @@ class TestImageDetector:
         r = ImageDetector().detect(tmp_jpg)
         assert r.media_type == "image"
         assert r.latency_ms > 0
-        assert "SwinB" in r.model or "EfficientNetB0" in r.model or r.model.startswith("ImageForensicNet")
+        assert "OwensLab" in r.model or "ViT" in r.model or "CommunityForensics" in r.model or "SwinB" in r.model or "ImageForensicNet" in r.model
 
     def test_png_supported(self, tmp_png):
         from pramaan.detectors.image_detector import ImageDetector
@@ -304,7 +304,7 @@ class TestAudioDetector:
         r = AudioDetector().detect(tmp_wav)
         assert r.media_type == "audio"
         assert r.latency_ms > 0
-        assert "Wav2Vec2" in r.model or r.model.startswith("AudioForensicNet")
+        assert "AASIST" in r.model or "Wav2Vec2" in r.model or r.model.startswith("AudioForensicNet")
 
     def test_score_in_range(self, tmp_wav):
         from pramaan.detectors.audio_detector import AudioDetector

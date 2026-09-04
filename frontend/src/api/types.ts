@@ -147,6 +147,95 @@ export interface UploadResponse {
   warnings: string[]
 }
 
+// --- Case deletion -----------------------------------------------------------
+
+/**
+ * Rows removed from each table, counted by the backend before the delete ran.
+ *
+ * Two fields describe collateral in *other* cases and exist so the UI can say so
+ * out loud. A match row is filed under one case but references two evidence
+ * rows, so deleting this case's evidence removes match rows owned by other cases
+ * (`matches_owned_by_other_cases`); those cases keep all their own evidence and
+ * only lose the cross-case comparison. `timeline_events.evidence_id` is
+ * ON DELETE SET NULL, so a surviving case's timeline row is detached rather than
+ * deleted (`timeline_events_detached`).
+ */
+export interface CaseDeleteCounts {
+  evidence: number
+  analysis_results: number
+  matches: number
+  matches_owned_by_other_cases: number
+  timeline_events: number
+  timeline_events_detached: number
+  reports: number
+}
+
+/**
+ * What the delete did on disk.
+ *
+ * A file recorded in the database but already gone is counted in `*_missing`
+ * rather than failing the operation, so these two pairs need not sum to the row
+ * counts above.
+ */
+export interface CaseDeleteStorage {
+  evidence_files_removed: number
+  evidence_files_missing: number
+  report_files_removed: number
+  report_files_missing: number
+  case_directory: string | null
+  case_directory_removed: boolean
+}
+
+/** Perceptual-index cleanup. `rebuild_required` means POST /api/index/rebuild. */
+export interface CaseDeleteIndex {
+  vectors_removed: number
+  index_version: number | null
+  backend: string | null
+  rebuild_required: boolean
+}
+
+/**
+ * The CASE_DELETED chain entry, echoed back so the UI can show it was recorded.
+ *
+ * `retained` is always true and `case_rows_retained` is the number of audit rows
+ * that still reference the deleted case id: audit history survives the case.
+ */
+export interface CaseDeleteAudit {
+  audit_id: string
+  seq: number
+  event: string
+  timestamp: string
+  actor: string
+  previous_hash: string
+  row_hash: string
+  retained: boolean
+  case_rows_retained: number
+}
+
+/**
+ * Result of DELETE /api/cases/{case_id}.
+ *
+ * Every number is measured by the backend. `deleted_evidence_count` duplicates
+ * `deleted.evidence` at the top level for clients that predate the breakdown.
+ * `warnings` is where a post-commit problem surfaces -- the rows and the audit
+ * entry are already committed at that point, so a file that could not be removed
+ * is reported here instead of turning a completed delete into an error.
+ */
+export interface CaseDeleteResult {
+  status: string
+  case_id: string
+  case_number: string
+  title: string | null
+  examiner: string | null
+  deleted_at: string
+  deleted_evidence_count: number
+  deleted: CaseDeleteCounts
+  storage: CaseDeleteStorage
+  index: CaseDeleteIndex
+  audit: CaseDeleteAudit
+  warnings: string[]
+}
+
 // --- Matches -----------------------------------------------------------------
 
 export interface MatchCandidate {
@@ -155,6 +244,9 @@ export interface MatchCandidate {
   similarity: number
   phash_distance: number
   dhash_distance: number | null
+  ahash_distance?: number | null
+  dinov2_similarity?: number | null
+  match_basis?: string | null
   source_id: string | null
   parent_id: string | null
   generation: number | null

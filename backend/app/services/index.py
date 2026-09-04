@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -271,6 +272,40 @@ class PerceptualIndex:
             self._touch()
             self.save()
             return len(ids)
+
+    def remove(self, evidence_ids: Iterable[str]) -> int:
+        """Drop specific ids from the index. Returns how many were removed.
+
+        Needed because evidence can be deleted (a case is deleted) while the
+        index is a *global* artefact shared with every other case. Leaving the
+        vectors behind would make the index return candidates whose evidence rows
+        no longer exist, which reads as a match the database cannot explain.
+
+        Ids that are not present are ignored -- removal is idempotent, so a
+        partially-indexed case deletes cleanly. Every surviving vector keeps its
+        hash; only the removed rows are dropped, and the save is atomic.
+        """
+        wanted = {row for row in evidence_ids if row}
+        if not wanted:
+            return 0
+        with self._lock:
+            self._ensure_loaded()
+            keep = [i for i, row in enumerate(self._ids) if row not in wanted]
+            removed = self.count - len(keep)
+            if removed == 0:
+                return 0
+            self._ids = [self._ids[i] for i in keep]
+            self._vectors = (
+                np.ascontiguousarray(self._vectors[keep], dtype=np.uint8)
+                if keep
+                else np.zeros((0, VECTOR_BYTES), dtype=np.uint8)
+            )
+            # A flat FAISS index has no stable id-based removal, and positions
+            # shift after a delete, so it is rebuilt from the surviving vectors.
+            self._rebuild_faiss()
+            self._touch()
+            self.save()
+            return removed
 
     def contains(self, evidence_id: str) -> bool:
         with self._lock:

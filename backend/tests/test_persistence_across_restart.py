@@ -46,6 +46,7 @@ INGEST_EVENTS = (
     "EVIDENCE_INGESTED",
     "HASH_CALCULATED",
     "PERCEPTUAL_HASH_CALCULATED",
+    "INDEX_UPDATED",
 )
 
 #: The chain construction. Recorded here so that changing it -- to a Merkle tree,

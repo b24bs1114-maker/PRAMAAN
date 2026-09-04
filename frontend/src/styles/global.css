@@ -722,14 +722,19 @@ code,
 /* Dashboard Layout Grids */
 .dashboard-main-split-grid {
   display: grid;
-  grid-template-columns: 380px 1fr;
+  /* minmax(0, …), not a bare 1fr: the flexible track's automatic minimum is the
+     min-content width of the card inside it, which is set by the widest
+     unbreakable content (the 200px donut beside its legend). With `1fr` the
+     track held that minimum and the card overflowed the page instead of the
+     card shrinking. */
+  grid-template-columns: 380px minmax(0, 1fr);
   gap: var(--space-3);
   align-items: stretch;
 }
 
 @media (max-width: 1100px) {
   .dashboard-main-split-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -794,21 +799,24 @@ code,
   text-transform: uppercase;
 }
 
+/* minmax(0, …) throughout, for the reason documented on .quick-action-card
+   below: __desc is `white-space: nowrap`, so a bare 1fr track cannot shrink
+   past the full label and the row pushes the page sideways. */
 .dashboard-quick-actions-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
 @media (max-width: 1024px) {
   .dashboard-quick-actions-grid {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 580px) {
   .dashboard-quick-actions-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -824,6 +832,10 @@ code,
   cursor: pointer;
   text-align: left;
   transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1), border-color 160ms ease, box-shadow 160ms ease;
+  /* A grid item keeps a content-based automatic minimum, so without this the
+     card stays as wide as its longest nowrap label regardless of the track. */
+  min-width: 0;
+  overflow: hidden;
 }
 
 .quick-action-card:hover {
@@ -898,6 +910,22 @@ code,
   gap: 16px;
   padding: 10px 0;
   flex: 1;
+  min-width: 0;
+}
+
+/* Below this width the 200px donut and its legend no longer fit side by side,
+   and the row's min-content width was pushing the card past the viewport. Stack
+   them instead of shrinking the legend: the verdict labels are the honest
+   wording for each disposition, so they wrap rather than truncate. */
+@media (max-width: 620px) {
+  .risk-overview-body {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .risk-donut-box {
+    align-self: center;
+  }
 }
 
 .risk-donut-box {
@@ -1115,21 +1143,30 @@ code,
   gap: 12px;
 }
 
+/* A five-up strip of real filenames, which are arbitrarily long and contain no
+   break opportunities ("Screen Recording 2026-09-02 at 2.15.12 PM.mov"). Tracks
+   must therefore be minmax(0, 1fr), not 1fr: bare `1fr` means minmax(auto, 1fr),
+   whose floor is the item's min-content width, and .recent-activity-tile__desc
+   is `white-space: nowrap`, so its min-content width is the *whole* filename.
+   The tracks then refused to shrink, the grid grew past the card and the whole
+   document gained a horizontal scrollbar. `minmax(0, 1fr)` alone is not enough:
+   a grid item keeps an automatic content-based minimum, so the tile needs
+   `min-width: 0` as well before the ellipsis below can ever engage. */
 .recent-activity-horizontal-feed {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
 }
 
 @media (max-width: 1100px) {
   .recent-activity-horizontal-feed {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 600px) {
   .recent-activity-horizontal-feed {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -1141,6 +1178,10 @@ code,
   display: flex;
   align-items: center;
   gap: 10px;
+  /* Shrink with the track (see above), and clip rather than paint outside the
+     card if any future child still manages to exceed it. */
+  min-width: 0;
+  overflow: hidden;
 }
 
 .recent-activity-tile__icon {
@@ -1178,6 +1219,10 @@ code,
   font-size: 10px;
   color: var(--text-muted);
   font-family: var(--mono);
+  /* Wrap rather than truncate: a recorded timestamp and size are forensic
+     facts, so they stay fully readable at narrow widths. `anywhere` keeps an
+     unbreakable token from pushing the tile wider than its track. */
+  overflow-wrap: anywhere;
 }
 
 

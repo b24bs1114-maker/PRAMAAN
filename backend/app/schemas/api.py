@@ -86,6 +86,102 @@ class EvidenceListGlobalResponse(ApiModel):
     evidence: list[EvidenceOut]
 
 
+class CaseDeleteCounts(ApiModel):
+    """Rows actually removed from each table, counted before the delete ran.
+
+    ``matches_owned_by_other_cases`` is the honest part: a match row is owned by
+    one case but references two evidence rows, which may belong to a different
+    case. Deleting this case's evidence therefore removes match rows filed under
+    *other* cases. That is required for referential integrity -- a match to
+    evidence that no longer exists is unverifiable -- so it is counted and
+    reported rather than left as a silent side effect. Those other cases keep all
+    of their own evidence; only the cross-case comparison is dropped, and
+    ``POST /api/index/rebuild`` plus a re-run of matching regenerates it.
+
+    ``timeline_events_detached`` is the same disclosure for timeline rows:
+    ``timeline_events.evidence_id`` is ``ON DELETE SET NULL``, so a *surviving*
+    case whose reconstructed propagation referenced this case's evidence keeps
+    its row but loses the link. Nothing belonging to that case is deleted.
+    """
+
+    evidence: int
+    analysis_results: int
+    matches: int
+    matches_owned_by_other_cases: int
+    timeline_events: int
+    timeline_events_detached: int
+    reports: int
+
+
+class CaseDeleteStorage(ApiModel):
+    """What happened on disk. Missing files are reported, not treated as errors.
+
+    A file recorded in the database but already gone from disk is counted in
+    ``*_missing`` instead of failing the delete: the database row is the
+    authoritative record and it is being removed either way.
+    """
+
+    evidence_files_removed: int
+    evidence_files_missing: int
+    report_files_removed: int
+    report_files_missing: int
+    case_directory: str | None = None
+    case_directory_removed: bool = False
+
+
+class CaseDeleteIndex(ApiModel):
+    """Perceptual-index cleanup. The index is derived and always rebuildable."""
+
+    vectors_removed: int
+    index_version: int | None = None
+    backend: str | None = None
+    rebuild_required: bool = False
+
+
+class CaseDeleteAudit(ApiModel):
+    """The ``CASE_DELETED`` chain entry, echoed back so it can be verified.
+
+    ``retained`` is always true: ``audit_logs.case_id`` carries no foreign key to
+    ``cases``, so audit rows outlive the case they describe and the hash chain
+    stays continuous. ``case_rows_retained`` is how many audit rows still
+    reference this case id after the delete -- the case's whole history.
+    """
+
+    audit_id: str
+    seq: int
+    event: str
+    timestamp: str
+    actor: str
+    previous_hash: str
+    row_hash: str
+    retained: bool = True
+    case_rows_retained: int
+
+
+class CaseDeleteResponse(ApiModel):
+    """Result of ``DELETE /api/cases/{case_id}``.
+
+    Every number here is measured, never assumed: counts come from the rows that
+    existed at delete time, and the storage/index sections report what the
+    filesystem and index operations actually did. ``deleted_evidence_count``
+    duplicates ``deleted.evidence`` at the top level because it predates the
+    detailed breakdown and clients already read it.
+    """
+
+    status: str
+    case_id: str
+    case_number: str
+    title: str | None = None
+    examiner: str | None = None
+    deleted_at: str
+    deleted_evidence_count: int
+    deleted: CaseDeleteCounts
+    storage: CaseDeleteStorage
+    index: CaseDeleteIndex
+    audit: CaseDeleteAudit
+    warnings: list[str] = []
+
+
 class DashboardSummaryResponse(ApiModel):
     """Aggregates over the case file, plus the per-capability system state.
 
@@ -178,8 +274,15 @@ class OriginOut(ApiModel):
     platform: str | None = None
     generation: int | None = None
     source_id: str | None = None
+    role: str | None = None
+    discovered_by: str | None = None
+    distance_to_case_evidence: int | None = None
+    similarity_to_case_evidence: float | None = None
+    transformation: str | None = None
     is_synthetic: bool = False
     is_absolute_origin: bool = False
+    tied_earliest_evidence_ids: list[str] = []
+    timestamp_is_tied: bool = False
     caveat: str
 
 

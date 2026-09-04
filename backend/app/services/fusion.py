@@ -225,6 +225,7 @@ def ai_detection_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
     basis = {
         "model": payload.get("model"),
         "model_version": payload.get("model_version"),
+        "weights_hash": payload.get("weights_hash"),
         "adapter": payload.get("adapter"),
         "detector_status": status,
         "availability": availability,
@@ -234,6 +235,7 @@ def ai_detection_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
         # and folding that into the per-file time overstates it. ``None`` means
         # either no load happened on this call or the adapter cannot split them.
         "model_load_ms": payload.get("model_load_ms"),
+        "score_direction": "Higher value [0.0 to 1.0] indicates higher likelihood of AI manipulation/generation",
     }
 
     # Inclusion requires BOTH a genuinely OK status AND a usable score. The
