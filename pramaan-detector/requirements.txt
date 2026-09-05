@@ -7,6 +7,7 @@ numpy>=1.24.0
 # audio
 librosa>=0.10.0
 soundfile>=0.12.0
+scipy>=1.10.0  # resampling in the audio loader (direct import, not transitive)
 
 # video (optional — one of these must be present)
 opencv-python>=4.8.0

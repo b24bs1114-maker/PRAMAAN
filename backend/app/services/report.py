@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -58,22 +59,51 @@ REPORT_VERSION = "1.0"
 RENDERER_REPORTLAB = "reportlab"
 RENDERER_BUILTIN = "builtin-minipdf"
 
+# Audit rows printed in the case timeline. Truncation is stated in the document
+# whenever it happens, so a short table is never mistaken for a short history.
+TIMELINE_ROW_LIMIT = 8
+
+# Same honesty rule for the other printed tables: a truncated listing always
+# says how much was held back and where the full set lives.
+MATCH_ROW_LIMIT = 8
+ISSUE_ROW_LIMIT = 8
+
 TITLE = "PRAMAAN DIGITAL EVIDENCE EXAMINATION REPORT"
 
 DOCUMENT_STATUS = (
-    "PROTOTYPE OUTPUT -- Not a certified forensic opinion. Thresholds and weights "
-    "are demonstration defaults and have not been validated against a forensic "
-    "reference dataset. Findings require qualified examiner review."
+    "PROTOTYPE OUTPUT -- This is prototype output and is not a certified forensic "
+    "opinion. The thresholds and weights it applies are demonstration defaults: "
+    "they have not been validated against a forensic reference dataset, so no "
+    "error rate is known for them. Every finding requires qualified examiner "
+    "review."
 )
 
+# Stamped on every page, under the page number, by both renderers.
+FOOTER = "PRAMAAN prototype output -- not a certified forensic opinion"
+
 LIMITATIONS = (
-    "Limitations: Scores are model outputs, not calibrated probabilities, and no error "
-    "rate is known for this configuration. Excluded signals are not treated as zero. "
-    "Missing metadata/C2PA is not evidence of manipulation. Near-duplicate candidates "
-    "measure visual similarity and do not establish derivation or origin. A detector "
-    "that did not run is not a finding of authenticity and not a finding of "
-    "manipulation. The audit chain is tamper evidence, not tamper proof: it is a linear "
-    "SHA-256 hash chain that detects retrospective edits to rows it already covers."
+    "This document is prototype output and is not a certified forensic opinion; "
+    "it does not speak to the admissibility of anything it describes.",
+    "The thresholds and fusion weights applied here are demonstration defaults. "
+    "They have not been validated against a forensic reference dataset, so no "
+    "error rate is known for them and the verdict carries no measured accuracy.",
+    "Scores are model outputs, not calibrated probabilities. A fused score of "
+    "0.80 does not mean an 80% chance of manipulation.",
+    "A signal that did not run is excluded from the fused score rather than "
+    "counted as zero, and the share of declared weight actually covered is "
+    "reported alongside every verdict.",
+    "Absent metadata is not evidence of manipulation, and neither is an absent "
+    "C2PA manifest: ordinary handling by messaging apps and social platforms "
+    "strips both from most media.",
+    "Near-duplicate candidates are perceptual similarity matches within the "
+    "locally indexed corpus. They do not establish that one file was derived "
+    "from another, and the corpus is not the world.",
+    "The earliest instance named here is the earliest one indexed locally. "
+    "Timestamps are as recorded by upstream systems and were not independently "
+    "corroborated.",
+    "The audit chain is tamper evidence, not tamper proof: it shows that stored "
+    "rows are internally consistent, and cannot prove that no row was ever "
+    "removed together with its successors.",
 )
 
 
@@ -87,7 +117,12 @@ def renderer_status() -> dict[str, Any]:
             "reportlab_available": False,
             "reason": f"reportlab not importable ({type(exc).__name__}: {exc})",
             "writer": pdf.WRITER,
-            "note": "Rendered by PRAMAAN's built-in minimal PDF writer.",
+            "note": (
+                "Rendered by PRAMAAN's built-in minimal PDF writer. Both renderers "
+                "lay out the same block list, so the content of the report -- every "
+                "section, value and caveat -- is identical either way; only the "
+                "typography differs."
+            ),
         }
     return {
         "renderer": RENDERER_REPORTLAB,
@@ -98,20 +133,83 @@ def renderer_status() -> dict[str, Any]:
     }
 
 
-def _fmt(value: Any) -> str:
+# --------------------------------------------------------------------------- #
+# Missing-value vocabulary.
+#
+# This report never substitutes a plausible-looking value for a measurement that
+# was not taken, an identifier that was not recorded, or a relationship that was
+# not established. Every gap is printed in one of these exact words instead, so
+# a reader can tell "we measured this" from "this does not exist here".
+# --------------------------------------------------------------------------- #
+NOT_AVAILABLE = "Not available"
+NOT_COMPUTED = "Not computed"
+NOT_ESTABLISHED = "Not established"
+NOT_RECORDED = "Not recorded"
+NOT_ASSESSED = "Not assessed"
+NOT_ASSIGNED = "Not assigned"
+VERDICT_NOT_ASSESSED = "NOT ASSESSED"
+
+# Values the detector layer uses to mean "nothing is installed" or "unknown".
+# They are identifiers of an absence, so the report prints them as an absence
+# rather than passing them off as the identity of a model that ran.
+PLACEHOLDER_IDENTITIES = frozenset({"", "-", "0", "n/a", "na", "none", "null", "unknown"})
+
+
+def _number(value: Any) -> bool:
+    """True only for real numeric measurements (bools are not measurements)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _identity(value: Any) -> str | None:
+    """A recorded identifier, or ``None`` when the value only marks an absence."""
     if value is None:
-        return "not available"
-    if isinstance(value, bool):
-        return "True" if value else "False"
-    if isinstance(value, float):
-        return f"{value:.4f}"
-    if isinstance(value, (list, tuple)):
-        return ", ".join(str(v) for v in value) if value else "none"
-    return str(value)
+        return None
+    text = str(value).strip()
+    return None if text.lower() in PLACEHOLDER_IDENTITIES else text
 
 
 def _score(value: Any) -> str:
-    return "-" if value is None else f"{float(value):.4f}"
+    """A score, or a statement that no score was computed. Never a stand-in."""
+    return f"{float(value):.4f}" if _number(value) else NOT_COMPUTED
+
+
+def _text(value: Any, missing: str = NOT_AVAILABLE) -> str:
+    if value is None:
+        return missing
+    return str(value).strip() or missing
+
+
+def _count(value: Any) -> str:
+    return f"{int(value):,}" if isinstance(value, int) and not isinstance(value, bool) else NOT_AVAILABLE
+
+
+def _pct(value: Any) -> str:
+    return f"{float(value) * 100:.0f}%" if _number(value) else NOT_AVAILABLE
+
+
+def _ms(value: Any, missing: str = NOT_RECORDED) -> str:
+    return f"{float(value):.2f} ms" if _number(value) else missing
+
+
+def _clock(value: Any) -> str:
+    """HH:MM:SS from a recorded UTC timestamp; NOT_RECORDED if there is none."""
+    if value is None:
+        return NOT_RECORDED
+    text = (iso(value) or "") if isinstance(value, datetime) else str(value)
+    return text[11:19] or NOT_RECORDED
+
+
+def _stamp(value: Any) -> str:
+    """A full ISO-8601 UTC timestamp, printed exactly as it was recorded.
+
+    Nothing is trimmed: a reader comparing the document against the API response
+    or the audit trail needs the same string, to the same precision, that those
+    return.
+    """
+    if value is None:
+        return NOT_RECORDED
+    text = (iso(value) or "") if isinstance(value, datetime) else str(value)
+    return text.strip() or NOT_RECORDED
 
 
 #: Rendered wherever the record holds no value. The report is a forensic
@@ -234,9 +332,10 @@ def build_blocks(
     items = collected["items"]
     primary_item = items[0] if items else None
 
-    # Pick primary verdict info
+    # Pages 1 and 2 describe the first evidence item. Where a field is absent it
+    # stays absent: nothing here supplies a stand-in value.
     verdict_dict = primary_item["verdict"] if primary_item else {}
-    verdict_str = str(verdict_dict.get("verdict") or "INSUFFICIENT_EVIDENCE")
+    verdict_str = str(verdict_dict.get("verdict") or VERDICT_NOT_ASSESSED)
     fused_score = verdict_dict.get("manipulation_score")
     avail_sig = verdict_dict.get("signals_available", 0)
     # The declared signal count comes from fusion. Defaulting it to 5 printed
@@ -271,32 +370,86 @@ def build_blocks(
     elif "MANIPULATED" in verdict_str:
         ai_score = detector_payload.get("score")
         ai_str = f"The model returned {_score(ai_score)} manipulation likelihood." if ai_score is not None else ""
+    avail_sig = verdict_dict.get("signals_available")
+    total_sig = verdict_dict.get("signals_total")
+    cov_pct = _pct(verdict_dict.get("signal_coverage"))
+    if _number(avail_sig) and _number(total_sig):
+        coverage_phrase = f"{int(avail_sig)} / {int(total_sig)} signals available"
+    else:
+        coverage_phrase = "Signals available: not recorded"
+
+    thresholds = verdict_dict.get("thresholds") or {}
+    manipulated_at = thresholds.get("manipulated_at_or_above")
+    authentic_at = thresholds.get("authentic_at_or_below")
+    if not _number(manipulated_at):
+        manipulated_at = settings.verdict_manipulated_threshold
+    if not _number(authentic_at):
+        authentic_at = settings.verdict_authentic_threshold
+
+    primary_evidence = primary_item["evidence"] if primary_item else None
+    detector_payload = primary_item["detector"] if primary_item else {}
+
+    # Declared weights, as recorded on the primary verdict (or as configured when
+    # there is no verdict). These are configuration, not a finding.
+    declared_weights = verdict_dict.get("declared_weights") or settings.fusion_weights
+
+    # Signals, exactly as the fusion layer reported them.
+    signals_list = [s for s in (verdict_dict.get("signals") or []) if isinstance(s, dict)]
+    contributing = [
+        s for s in signals_list if s.get("included") and _number(s.get("contribution"))
+    ]
+    leading = max(contributing, key=lambda s: float(s["contribution"]), default=None)
+    if leading is None:
+        leading_line = "Leading contributor: none - no signal produced a measurement"
+    else:
+        leading_line = (
+            "Leading contributor: "
+            f"{_text(leading.get('name') or leading.get('signal_id'))} "
+            f"(contribution {_score(leading.get('contribution'))})"
+        )
+
+    # Executive finding. A threshold comparison is only stated when a score was
+    # actually computed, and the fusion layer's own rationale is quoted verbatim.
+    rationale = _text(verdict_dict.get("rationale"), "")
+    if primary_item is None:
         exec_finding = (
-            f"AI-generated/manipulated evidence detected. {ai_str} "
-            f"The PRAMAAN fusion score is {_score(fused_score)}, above the manipulated threshold of {settings.verdict_manipulated_threshold:.2f}. "
-            "This result is a decision aid for examiner review, not a certification."
+            "No evidence has been ingested for this case. No signal was measured, no "
+            "score was computed and no verdict was reached. This document records that "
+            "absence; it is not a finding of authenticity or of manipulation."
+        )
+    elif "MANIPULATED" in verdict_str:
+        exec_finding = (
+            f"Fused score {_score(fused_score)} is at or above the manipulated threshold "
+            f"of {float(manipulated_at):.2f}, computed from {coverage_phrase.lower()} "
+            f"covering {cov_pct} of declared weight. This result is a decision aid for "
+            "examiner review, not a certification."
         )
     elif "AUTHENTIC" in verdict_str:
         exec_finding = (
-            "No evidence of AI generation or synthetic manipulation was detected across the assessed signals. "
-            f"The PRAMAAN fusion score is {_score(fused_score)}, at or below the authentic threshold of {settings.verdict_authentic_threshold:.2f}. "
-            "This result is a decision aid for examiner review, not a certification."
+            "No evidence of AI generation or synthetic manipulation was found by the "
+            f"signals that produced a measurement. Fused score {_score(fused_score)} is "
+            f"at or below the authentic threshold of {float(authentic_at):.2f}, computed "
+            f"from {coverage_phrase.lower()} covering {cov_pct} of declared weight. "
+            "Signals that did not run are excluded, not treated as clean."
         )
     else:
         exec_finding = (
-            "Ambiguous or insufficient forensic signal measurements were obtained. "
-            f"The PRAMAAN fusion score is {_score(fused_score)}. "
-            "This result is a decision aid for examiner review, not a certification."
+            f"No verdict was reached. Fused score: {_score(fused_score)}. "
+            f"{coverage_phrase}, covering {cov_pct} of declared weight. Signals that were "
+            "absent, inconclusive or unavailable are reported as such and carry no score, "
+            "so this is an absence of evidence rather than evidence of either finding."
         )
+    if rationale:
+        exec_finding = f"{exec_finding} Fusion rationale: {rationale}"
+
 
     # -----------------------------------------------------------------------
-    # PAGE 1: OVERALL ASSESSMENT & EVIDENCE SNAPSHOT
+    # SECTION 1 -- SUMMARY OF FINDINGS
     # -----------------------------------------------------------------------
     blocks.append({
         "type": "page_header",
         "case_number": case.case_number,
-        "title": _or_none(case.title, "No case title recorded"),
-        "page_num": 1,
+        "title": _text(case.title, "Untitled case"),
     })
     blocks.append({
         "type": "notice",
@@ -314,39 +467,47 @@ def build_blocks(
             ["EVIDENCE", f"{len(items)} items"],
         ],
     })
+    blocks.append({"type": "heading", "text": "1. Summary of findings"})
     blocks.append({
         "type": "verdict_card",
         "verdict": verdict_str,
-        "score_line": f"Fused score {_score(fused_score)} | {avail_sig} / {total_sig_str} signals available | Coverage {cov_pct}",
-        "leading": _leading_contributor(verdict_dict),
+        "score_line": (
+            f"Fused score {_score(fused_score)} | {coverage_phrase} | Coverage {cov_pct}"
+        ),
+        "leading": leading_line,
     })
-    blocks.append({"type": "heading", "text": "EXECUTIVE FINDING"})
+    if primary_item is not None:
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                "The verdict above is the verdict for "
+                f"{_text(primary_evidence.filename, NOT_RECORDED)}, the first item "
+                "ingested for this case. It is not a case-wide verdict: each item "
+                "carries its own, listed below and examined in section 2."
+            ),
+        })
     blocks.append({"type": "paragraph", "text": exec_finding})
 
-    blocks.append({"type": "heading", "text": "EVIDENCE SNAPSHOT"})
-    snapshot_rows = []
-    for it in items:
-        v = it["verdict"]
-        ev = it["evidence"]
-        row_total = v.get("signals_total")
-        row_cov = v.get("signal_coverage")
-        snapshot_rows.append([
-            ev.filename,
-            str(v.get("verdict") or "UNASSESSED"),
-            _score(v.get("manipulation_score")),
-            # ASCII separator on purpose. ReportLab reverse-maps U+2022 onto
-            # WinAnsi 0x7F, which is undefined in that encoding, so a bullet came
-            # out of the renderer as a missing glyph ("4 / 5 <?> 85%"); the
-            # built-in writer has no bullet at all and substitutes "?".
-            "{} / {} | {}".format(
-                v.get("signals_available", 0),
-                row_total if isinstance(row_total, int) else "-",
-                f"{float(row_cov) * 100:.0f}%" if isinstance(row_cov, (int, float)) else "-",
-            ),
-        ])
-    if not snapshot_rows:
-        snapshot_rows = [["No evidence items", "—", "—", "—"]]
+    # Case identity and document timing. generated_at is printed verbatim, to the
+    # same precision the API response carries it, so a reader can compare.
+    blocks.append({
+        "type": "kv",
+        "rows": [
+            ["Case number", _text(case.case_number)],
+            ["Report ID", _text(report_id)],
+            ["Case created", _text(iso(case.created_at), NOT_RECORDED)],
+            ["Report generated", _text(collected["generated_at"], NOT_RECORDED)],
+            ["Evidence items", str(len(items))],
+            ["Report version", REPORT_VERSION],
+        ],
+    })
 
+    # -----------------------------------------------------------------------
+    # SECTION 2 -- EVIDENCE EXAMINED
+    # -----------------------------------------------------------------------
+    blocks.append({"type": "heading", "text": "2. Evidence examined"})
+
+    blocks.append({"type": "heading", "text": "2.1 Evidence:"})
     blocks.append({
         "type": "table",
         "columns": ["Evidence", "Verdict", "Score", "Coverage"],
@@ -356,10 +517,178 @@ def build_blocks(
         "widths": [2.8, 2.0, 1.0, 1.6],
         "rows": snapshot_rows,
     })
+    if items:
+        # One identity block per item. The value column is wide enough that a
+        # full 64-character SHA-256 fits on a single line, so a reader can
+        # compare the document against the API byte for byte.
+        for it in items:
+            ev = it["evidence"]
+            blocks.append({
+                "type": "kv",
+                "rows": [
+                    ["Filename", _text(ev.filename, NOT_RECORDED)],
+                    ["Evidence ID", _text(ev.id), True],
+                    ["SHA-256", _text(ev.sha256, NOT_RECORDED), True],
+                    ["pHash", _text(ev.phash, NOT_COMPUTED), True],
+                ],
+            })
+        no_phash = [it["evidence"] for it in items if not it["evidence"].phash]
+        if no_phash:
+            blocks.append({
+                "type": "paragraph",
+                "text": (
+                    f"{len(no_phash)} of {len(items)} evidence items have no recorded "
+                    "perceptual hash, so no near-duplicate comparison was possible "
+                    "for them. That is a gap in coverage, not a finding about the files."
+                ),
+            })
+    else:
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                "No evidence has been ingested for this case. Evidence items: 0. "
+                "Nothing was examined, so nothing is reported."
+            ),
+        })
 
-    blocks.append({"type": "heading", "text": "CASE IDENTITY"})
+    blocks.append({"type": "heading", "text": "2.2 Per-item verdicts"})
     blocks.append({
-        "type": "kv_grid",
+        "type": "paragraph",
+        "text": (
+            "The verdict, rationale and arithmetic below are the fusion layer's own "
+            "recorded output for every item -- quoted, not re-derived. A signal that "
+            "produced no measurement carries no score; it is never printed as zero."
+        ),
+    })
+    if items:
+        for it in items:
+            v = it["verdict"]
+            ev = it["evidence"]
+            item_verdict = str(v.get("verdict") or VERDICT_NOT_ASSESSED)
+            avail = v.get("signals_available")
+            total = v.get("signals_total")
+            if _number(avail) and _number(total):
+                cov_line = (
+                    f"{int(avail)} / {int(total)} signals available, "
+                    f"covering {_pct(v.get('signal_coverage'))} of declared weight"
+                )
+            else:
+                cov_line = "Signals available: not recorded"
+            blocks.append({
+                "type": "kv",
+                "rows": [
+                    ["Item", _text(ev.filename, NOT_RECORDED)],
+                    ["Verdict", item_verdict],
+                    ["Fused score", _score(v.get("manipulation_score"))],
+                    ["Coverage", cov_line],
+                    ["Arithmetic", _text(v.get("arithmetic"), NOT_COMPUTED), True],
+                    ["Rationale", _text(v.get("rationale"), NOT_RECORDED)],
+                ],
+            })
+    else:
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                "No verdict was computed for any item, because no evidence has been "
+                "ingested for this case."
+            ),
+        })
+
+    # Signal breakdown for the primary item: one row per signal the fusion layer
+    # reported, carrying that signal's own name, status and score exactly as
+    # recorded. A signal that produced no measurement shows no score: it is never
+    # printed as zero, and its absence is never restated as a finding.
+    blocks.append({"type": "heading", "text": "2.3 Signal breakdown (primary item)"})
+    if signals_list:
+        matrix_rows = []
+        for sig in signals_list:
+            signal_id = str(sig.get("signal_id") or "")
+            role = "Primary" if signal_id in fusion_service.PRIMARY_SIGNALS else "Secondary"
+            matrix_rows.append([
+                _text(sig.get("name") or signal_id),
+                _text(sig.get("status"), NOT_ASSESSED),
+                _score(sig.get("score")),
+                f"{role} / {'included' if sig.get('included') else 'excluded'}",
+            ])
+        blocks.append({
+            "type": "table",
+            "columns": ["Signal", "Status", "Score", "Role"],
+            "widths": [2.6, 1.4, 1.0, 1.4],
+            "rows": matrix_rows,
+        })
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                "The signals above are the ones recorded for "
+                f"{_text(primary_evidence.filename, NOT_RECORDED) if primary_evidence else 'no item'}, "
+                "the first item ingested for this case. Each signal's own explanation, "
+                "as recorded, follows."
+            ),
+        })
+        for sig in signals_list:
+            blocks.append({
+                "type": "kv",
+                "rows": [
+                    [
+                        _text(sig.get("name") or sig.get("signal_id"), "Signal"),
+                        _text(sig.get("explanation"), "No explanation was recorded."),
+                    ]
+                ],
+            })
+    else:
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                "No signal was recorded for this case, so no signal breakdown is "
+                "shown. Each signal that did not run is excluded from fusion and "
+                "carries no score -- an unrun signal is not a zero."
+            ),
+        })
+
+    # Model record: the detector identity exactly as the status API records it.
+    # The status layer reports "none"/"0"/"null" when no model is installed, and
+    # the document must agree with it verbatim -- mapping a recorded value to a
+    # different phrase here would make the report contradict the status endpoint
+    # a reader is told to check it against. Only a genuinely absent value (never
+    # recorded at all) is printed as Not recorded.
+    blocks.append({"type": "heading", "text": "2.4 Model record"})
+    det_status = collected["detector_status"]
+    model_name = detector_payload.get("model") if detector_payload.get("model") is not None else det_status.get("model")
+    model_version = (
+        detector_payload.get("model_version")
+        if detector_payload.get("model_version") is not None
+        else det_status.get("model_version")
+    )
+    adapter_id = (
+        detector_payload.get("adapter")
+        if detector_payload.get("adapter") is not None
+        else det_status.get("adapter")
+    )
+    latency = detector_payload.get("inference_ms")
+    if not _number(latency):
+        latency = detector_payload.get("latency_ms")
+    # Both identities are printed: the adapter that analysed this item (recorded
+    # on the stored detector result) and the adapter the status layer currently
+    # reports. They legitimately differ -- an unavailable dispatcher is reported
+    # as "null" by the status API -- and the document must agree with both.
+    status_adapter = det_status.get("adapter")
+    recorded_adapter = (
+        detector_payload.get("adapter")
+        if detector_payload.get("adapter") is not None
+        else status_adapter
+    )
+    detector_available = det_status.get("available")
+    if detector_available is True:
+        availability = "Available"
+    elif detector_available is False:
+        availability = "UNAVAILABLE - " + _text(
+            det_status.get("unavailable_because") or det_status.get("reason"),
+            "no reason was recorded",
+        )
+    else:
+        availability = NOT_RECORDED
+    blocks.append({
+        "type": "kv",
         "rows": [
             ["Case number", case.case_number, "Report version", REPORT_VERSION],
             # Full ISO-8601 with the Z designator. Truncating to 19 characters and
@@ -384,8 +713,30 @@ def build_blocks(
                 "Renderer",
                 renderer_status()["writer"],
             ],
+            ["Model", _text(model_name, NOT_RECORDED)],
+            ["Version", _text(model_version, NOT_RECORDED)],
+            ["Adapter (status)", _text(status_adapter, NOT_RECORDED)],
+            ["Adapter (recorded for this item)", _text(recorded_adapter, NOT_RECORDED)],
+            ["Interface version", _text(det_status.get("interface_version"), NOT_RECORDED)],
+            ["Weights digest", _text(detector_payload.get("weights_hash") or "", NOT_RECORDED), True],
+            ["Inference latency", _ms(latency)],
+            ["Detector availability", availability],
+            ["Fusion version", _text(
+                verdict_dict.get("fusion_version"),
+                fusion_service.FUSION_VERSION,
+            )],
         ],
     })
+    if detector_available is not True:
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                "No AI-manipulation detector is available in this deployment, so the "
+                "AI-detection signal was not measured. It is excluded from fusion and "
+                "is not a negative result: a missing measurement is never read as a "
+                "finding of authenticity or of manipulation."
+            ),
+        })
 
     # Every exhibit, identified by the two things that identify it: the evidence
     # id the audit chain refers to, and the SHA-256 of the bytes. Only the primary
@@ -410,13 +761,13 @@ def build_blocks(
     blocks.append({"type": "pagebreak"})
 
     # -----------------------------------------------------------------------
-    # PAGE 2: FORENSIC FINDINGS & SIGNAL MATRIX
+    # SECTION 3 -- NEAR-DUPLICATE CANDIDATES
     # -----------------------------------------------------------------------
     blocks.append({
         "type": "page_header",
         "case_number": case.case_number,
-        "title": "Forensic findings",
-        "page_num": 2,
+        "title": "Near-duplicate candidates & earliest known instance",
+        "page_num": 3,
     })
 
     blocks.append({"type": "heading", "text": "SIGNAL MATRIX"})
@@ -451,13 +802,87 @@ def build_blocks(
         ])
     if not matrix_rows:
         matrix_rows = [["No signals recorded", "-", "-", "-", "Fusion produced no signal record for this exhibit."]]
+    blocks.append({"type": "heading", "text": "3. Near-duplicate candidates"})
+    matches = collected["matches"]
+    match_queries = [q for q in (matches.get("queries") or []) if isinstance(q, dict)]
+    if _number(matches.get("total_candidates")):
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                f"Near-duplicate retrieval ran for {len(match_queries)} of {len(items)} "
+                f"evidence items and retained {int(matches.get('total_candidates'))} "
+                "candidates in total. These are perceptual-similarity matches within the "
+                "locally indexed corpus: they do not establish that one file was derived "
+                "from another, and the corpus is not the world."
+            ),
+        })
+    else:
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                "No near-duplicate search result is recorded for this case, so no "
+                "candidate is listed. That means the search was not recorded here -- "
+                "it is not a finding that no near-duplicates exist."
+            ),
+        })
+    candidate_rows: list[list[str]] = []
+    for query in match_queries:
+        for cand in query.get("candidates") or []:
+            if not isinstance(cand, dict):
+                continue
+            distance = cand.get("distance")
+            candidate_rows.append([
+                _text(query.get("filename"), NOT_RECORDED),
+                _text(cand.get("filename"), NOT_RECORDED),
+                (
+                    f"{int(distance)} (pHash)"
+                    if _number(distance)
+                    else NOT_RECORDED
+                ),
+                _text(cand.get("confidence_band"), NOT_RECORDED),
+                _text(cand.get("platform"), NOT_AVAILABLE),
+            ])
+    if candidate_rows:
+        shown_candidates = candidate_rows[:MATCH_ROW_LIMIT]
+        blocks.append({
+            "type": "table",
+            "columns": ["Query item", "Candidate", "Distance", "Band", "Platform"],
+            "widths": [1.8, 1.8, 1.2, 1.4, 1.0],
+            "rows": shown_candidates,
+        })
+        if len(candidate_rows) > len(shown_candidates):
+            blocks.append({
+                "type": "paragraph",
+                "text": (
+                    f"Showing the first {len(shown_candidates)} of "
+                    f"{len(candidate_rows)} retained candidates; the full set is "
+                    "served by the matching endpoints and is not truncated there."
+                ),
+            })
+    else:
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                "No candidates were retained for any item. An empty result is the "
+                "search outcome for this corpus and thresholds, not proof that no "
+                "near-duplicate exists outside it."
+            ),
+        })
 
-    blocks.append({
-        "type": "table",
-        "columns": ["Signal", "Status", "Score", "Role", "Finding"],
-        "widths": [2.2, 1.4, 0.9, 1.1, 2.6],
-        "rows": matrix_rows,
-    })
+    # -----------------------------------------------------------------------
+    # SECTION 4 -- EARLIEST KNOWN INSTANCE AND PROPAGATION
+    # -----------------------------------------------------------------------
+    blocks.append({"type": "heading", "text": "4. Earliest known instance and propagation"})
+    propagation = collected["propagation"]
+    origin = propagation.get("origin") or {}
+    origin_name = _identity(origin.get("filename"))
+    total_candidates = matches.get("total_candidates")
+    if not _number(total_candidates):
+        corpus_cell = "Search result not recorded"
+    elif int(total_candidates) == 0:
+        corpus_cell = "Searched, none retained"
+    else:
+        corpus_cell = f"{int(total_candidates)} candidates retained"
 
     blocks.append({"type": "heading", "text": "FUSION & INTERPRETATION"})
     # The weights that were actually applied, read from the verdict record. The
@@ -519,6 +944,44 @@ def build_blocks(
             ],
         ]
     })
+    if origin_name:
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                f"{origin_name} is the earliest known instance in the indexed evidence "
+                "corpus, not the absolute real-world origin. Earlier copies may exist "
+                "outside the corpus, and the recorded timestamp may itself be "
+                "inaccurate."
+            ),
+        })
+        origin_ts = _stamp(origin.get("timestamp"))
+        if origin_ts != NOT_RECORDED:
+            blocks.append({
+                "type": "kv",
+                "rows": [
+                    ["Earliest instance", _text(origin_name)],
+                    ["Recorded timestamp", origin_ts, True],
+                    ["Timestamp source", _text(origin.get("timestamp_source"), NOT_RECORDED)],
+                    ["Platform", _text(origin.get("platform"), NOT_AVAILABLE)],
+                ],
+            })
+    else:
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                "No earliest known instance was established in the indexed evidence "
+                "corpus: the reconstruction found no dated instance of this evidence, "
+                "so no origin is claimed here -- neither corpus-scoped nor absolute "
+                "real-world origin. The current file is not presented as the earliest "
+                "instance, and the absence of a lineage is not evidence about the file."
+            ),
+        })
+    prop_notes = propagation.get("notes") or []
+    if prop_notes:
+        blocks.append({
+            "type": "bullets",
+            "items": [str(n) for n in prop_notes],
+        })
 
     blocks.append({"type": "heading", "text": "EVIDENCE INTEGRITY"})
     if primary_evidence:
@@ -538,7 +1001,9 @@ def build_blocks(
             ) + f" (dimensions {NOT_RECORDED.lower()})"
         phash_str = f"{_or_none(primary_evidence.phash)} / {_or_none(primary_evidence.dhash)}"
         blocks.append({
-            "type": "kv",
+            "type": "table",
+            "columns": ["Time (UTC)", "Instance", "Observed on", "Discovered by"],
+            "widths": [1.5, 2.4, 1.2, 1.5],
             "rows": [
                 ["SHA-256", primary_evidence.sha256, True],
                 ["Dimensions", dim_str],
@@ -555,8 +1020,22 @@ def build_blocks(
                 ],
             ]
         })
+        if len(timeline) > len(shown_tl):
+            blocks.append({
+                "type": "paragraph",
+                "text": (
+                    f"Showing the first {len(shown_tl)} of {len(timeline)} recorded "
+                    "timeline events; the full reconstruction is served by the "
+                    "propagation endpoint."
+                ),
+            })
     else:
-        blocks.append({"type": "paragraph", "text": "No evidence details available."})
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                "No propagation timeline events are recorded for this case."
+            ),
+        })
 
     blocks.append({"type": "heading", "text": "MODEL RECORD"})
     det_status = collected["detector_status"]
@@ -601,109 +1080,180 @@ def build_blocks(
                 _ms(load_ms) if load_ms is not None else "Not loaded on this call",
             ],
             ["Weights SHA-256", _or_none(_identity("weights_hash"), NOT_RECORDED), True],
-        ]
+        ],
     })
-
-    blocks.append({"type": "heading", "text": "REVIEW NOTE"})
+    
+    
+    blocks.append({
+        "type": "table",
+        "columns": ["Declared signal weight (configuration)", "Weight"],
+        "widths": [5.0, 1.0],
+        "rows": weights_rows,
+    })
     blocks.append({
         "type": "paragraph",
-        "text": "Missing metadata, missing C2PA, and absence of a near-duplicate are not treated as evidence of authenticity or manipulation. The fused verdict reflects only the signals that produced measurements."
+        "text": (
+            "These weights and the verdict thresholds are demonstration defaults, "
+            "not validated science. No error rate is known for them. "
+            + fusion_service.CAVEAT
+        ),
     })
 
     blocks.append({"type": "pagebreak"})
 
     # -----------------------------------------------------------------------
-    # PAGE 3: PROVENANCE, AUDIT & EXAMINER REVIEW
+    # SECTION 6 -- AUDIT TRAIL
     # -----------------------------------------------------------------------
     blocks.append({
         "type": "page_header",
         "case_number": case.case_number,
-        "title": "Provenance, audit & examiner review",
-        "page_num": 3,
+        "title": "Audit trail & document integrity",
+        "page_num": 4,
     })
 
-    blocks.append({"type": "heading", "text": "PROVENANCE & LINEAGE"})
-    origin = collected["propagation"].get("origin") or {}
-    origin_filename = origin.get("filename")
+    blocks.append({"type": "heading", "text": "6. Audit trail"})
     blocks.append({
-        "type": "lineage_flow",
-        "current": primary_evidence.filename if primary_evidence else "No evidence item",
-        "corpus": "No retained candidate" if not collected["matches"].get("total_candidates") else f"{collected['matches'].get('total_candidates')} candidates",
-        # Falling back to the current file labelled this exhibit as the earliest
-        # known instance even when propagation found nothing to compare it with.
-        # No prior instance in the corpus is a distinct statement from "this file
-        # is the earliest one", and only the first is supported by the record.
-        "earliest": _or_none(origin_filename, "No earlier instance in corpus"),
+        "type": "paragraph",
+        "text": (
+            "Every action in PRAMAAN is appended to a hash chain: each row's hash "
+            "covers the previous row's hash and the row's own content, so stored "
+            "history is tamper evidence -- it can show stored rows are internally "
+            "consistent, and cannot prove that no row was ever removed together "
+            "with its successors."
+        ),
     })
-    lineage_note = (
-        "Origin wording is deliberately scoped: earliest known instance in the "
-        "indexed evidence corpus. It is not a claim of absolute real-world origin."
-    )
-    if origin.get("timestamp_is_tied"):
-        # Otherwise the diagram above names one file as the earliest instance
-        # while the record only establishes that several share the same recorded
-        # time -- the ordering among them was a deterministic tie-break, not a
-        # measurement.
-        tied = origin.get("tied_earliest_evidence_ids") or []
-        lineage_note += (
-            f" {len(tied)} instances share the earliest recorded timestamp "
-            f"({origin.get('timestamp')}), so which of them came first is NOT "
-            "established by the record; the instance named above was selected "
-            "deterministically."
-        )
-    blocks.append({"type": "paragraph", "text": lineage_note})
-
-    blocks.append({"type": "heading", "text": "AUDIT INTEGRITY"})
     verification = collected["verification"]
-    total_rows = verification.get("total_rows")
-    case_rows = verification.get("case_rows")
+    chain_valid = verification.get("valid")
+    if chain_valid is True:
+        chain_status = "VALID"
+    elif chain_valid is False:
+        chain_status = "INVALID"
+    else:
+        chain_status = VERDICT_NOT_ASSESSED
+    first_invalid = verification.get("first_invalid_seq")
+    if _number(first_invalid):
+        first_invalid_text = f"Row {int(first_invalid)}"
+    elif chain_valid is True:
+        first_invalid_text = "None - no row failed verification"
+    else:
+        first_invalid_text = NOT_AVAILABLE
     blocks.append({
         "type": "kv",
         "rows": [
-            ["CHAIN STATUS", "VALID" if verification.get("valid") else "INVALID"],
-            # Counts are read from the verification result or reported as absent.
-            # The old defaults claimed 1,105 rows in the chain and 32 for the
-            # case whenever verification returned neither -- a count of records
-            # that were never written, in the section attesting to the integrity
-            # of the record.
-            ["ROWS IN CHAIN", f"{total_rows:,}" if isinstance(total_rows, int) else NOT_RECORDED],
-            ["ROWS FOR CASE", str(case_rows) if isinstance(case_rows, int) else NOT_RECORDED],
-            ["FIRST INVALID ROW", str(verification.get("first_invalid_seq") or "None")],
-            # Printed in full. An abbreviated "a1b2c3d4e5f6...9f8e7d" cannot be
-            # checked against anything: re-verifying the chain, or comparing this
-            # document with the audit endpoint, needs all 64 characters. The kv
-            # renderer sets it in Courier and wraps it rather than clipping.
-            ["HEAD HASH", audit_head or NOT_RECORDED, True],
-            # The chain's fixed starting value, so a reader can confirm the head
-            # was reached from a known genesis rather than an arbitrary seed.
-            ["GENESIS HASH", audit.GENESIS_HASH, True],
-        ]
+            ["CHAIN STATUS", chain_status],
+            ["ALGORITHM", _text(verification.get("algorithm"), "Not recorded")],
+            ["GENESIS HASH", _text(verification.get("genesis_hash"), "0" * 64), True],
+            ["HEAD HASH (at generation)", _text(audit_head, NOT_RECORDED), True],
+            ["ROWS IN CHAIN", _count(verification.get("total_rows"))],
+            ["ROWS FOR CASE", _count(verification.get("case_rows"))],
+            ["FIRST INVALID ROW", first_invalid_text],
+        ],
     })
+    issues = [i for i in (verification.get("issues") or []) if isinstance(i, dict)]
+    if issues:
+        shown_issues = issues[:ISSUE_ROW_LIMIT]
+        blocks.append({
+            "type": "table",
+            "columns": ["Seq", "Problem", "Detail"],
+            "widths": [0.8, 1.7, 4.0],
+            "rows": [
+                [
+                    _count(i.get("seq")),
+                    _text(i.get("problem"), NOT_RECORDED),
+                    _text(i.get("detail"), NOT_RECORDED),
+                ]
+                for i in shown_issues
+            ],
+        })
+        if len(issues) > len(shown_issues):
+            blocks.append({
+                "type": "paragraph",
+                "text": (
+                    f"Showing the first {len(shown_issues)} of {len(issues)} issues; "
+                    "the full set is served by the audit verify endpoint."
+                ),
+            })
+    # Case events with their real row hashes. Truncation is stated.
+    audit_events = [e for e in (verification.get("events") or []) if isinstance(e, dict)]
+    if audit_events:
+        shown = audit_events[:TIMELINE_ROW_LIMIT]
+        blocks.append({
+            "type": "table",
+            "columns": ["Seq", "Time (UTC)", "Event", "Actor", "Row hash (first 24)"],
+            "widths": [0.7, 1.5, 1.7, 1.0, 1.7],
+            "rows": [
+                [
+                    _count(ev.get("seq")),
+                    _stamp(ev.get("timestamp")),
+                    _text(ev.get("event"), "").upper() or NOT_RECORDED,
+                    _text(ev.get("actor"), NOT_RECORDED),
+                    _text(ev.get("row_hash"), NOT_RECORDED)[:24],
+                ]
+                for ev in shown
+            ],
+            "mono_columns": [4],
+        })
+        if len(audit_events) > len(shown):
+            blocks.append({
+                "type": "paragraph",
+                "text": (
+                    f"Showing the first {len(shown)} of {len(audit_events)} audit "
+                    "events recorded for this case; the full trail is served by the "
+                    "audit endpoint and is not truncated there."
+                ),
+            })
+    else:
+        blocks.append({
+            "type": "paragraph",
+            "text": (
+                "No audit events are recorded for this case, so no timeline is shown. "
+                "That means nothing was recorded, not that nothing happened."
+            ),
+        })
 
-    blocks.append({"type": "heading", "text": "CASE TIMELINE"})
-    t_rows = []
-    for ev in (verification.get("events") or [])[:6]:
-        ts = str(ev.get("timestamp") or "")[11:19]
-        t_rows.append([
-            ts or NOT_RECORDED,
-            str(ev.get("event") or "").upper() or NOT_RECORDED,
-            _or_none(ev.get("actor")),
-        ])
-    if not t_rows:
-        # No invented timeline. The previous fallback printed four events at
-        # 12:53:09-12:54:25 attributed to "api" for any case whose chain returned
-        # no events, which reads as a custody record of things that did not
-        # happen at times that were never recorded.
-        t_rows = [["-", "NO AUDIT EVENTS RECORDED FOR THIS CASE", "-"]]
-
+    # -----------------------------------------------------------------------
+    # SECTION 7 -- INTEGRITY OF THIS DOCUMENT
+    # -----------------------------------------------------------------------
+    blocks.append({"type": "heading", "text": "7. Integrity of this document"})
     blocks.append({
-        "type": "table",
-        "columns": ["TIME", "EVENT", "ACTOR"],
-        "widths": [1.5, 4.5, 1.8],
-        "rows": t_rows,
+        "type": "paragraph",
+        "text": (
+            "This PDF's own SHA-256 digest and size in bytes are recorded in the "
+            "audit chain in the REPORT_GENERATED row written when this document was "
+            "produced. A document cannot contain its own digest: the row's hash "
+            "covers the digest of the bytes on disk, so the pairing is verifiable "
+            "outside this file by recomputing sha256 over the downloaded bytes and "
+            "checking the chain."
+        ),
+    })
+    blocks.append({
+        "type": "kv",
+        "rows": [
+            ["Report ID", _text(report_id)],
+            ["Audit head hash at generation", _text(audit_head, NOT_RECORDED), True],
+            ["Chain verified at generation", chain_status],
+            ["Report version", REPORT_VERSION],
+        ],
     })
 
-    blocks.append({"type": "heading", "text": "EXAMINER REVIEW"})
+    # -----------------------------------------------------------------------
+    # SECTION 8 -- LIMITATIONS
+    # -----------------------------------------------------------------------
+    blocks.append({"type": "heading", "text": "8. Limitations"})
+    blocks.append({
+        "type": "paragraph",
+        "text": DOCUMENT_STATUS,
+    })
+    blocks.append({
+        "type": "bullets",
+        "items": list(LIMITATIONS),
+    })
+
+    # -----------------------------------------------------------------------
+    # SECTION 9 -- EXAMINER
+    # -----------------------------------------------------------------------
+    blocks.append({"type": "heading", "text": "9. Examiner"})
+    assigned_examiner = _text(examiner or case.examiner, NOT_ASSIGNED)
     blocks.append({
         "type": "kv",
         "rows": [
@@ -732,7 +1282,17 @@ def build_blocks(
 
     blocks.append({
         "type": "paragraph",
-        "text": LIMITATIONS
+        "text": (
+            "This document is machine-generated and unreviewed. No examiner has "
+            "accepted, amended or rejected it: the decision boxes are unticked "
+            "because no review decision exists to report. "
+            + (
+                f"{assigned_examiner} is the examiner assigned to the case, which is not a "
+                "sign-off on these findings."
+                if _identity(examiner or case.examiner)
+                else "No examiner is assigned to this case."
+            )
+        ),
     })
 
     return blocks
@@ -778,7 +1338,7 @@ def render(
         title=TITLE,
         author=examiner or "PRAMAAN",
         subject=f"Case {case.case_number}",
-        footer=footer,
+        footer=FOOTER,
         created=created,
     )
     return data, pages, RENDERER_BUILTIN
@@ -998,7 +1558,7 @@ def _render_reportlab(
         canvas.drawRightString(letter[0] - 54, 18, label)
         canvas.restoreState()
 
-    doc_template.build(story, onFirstPage=stamp, onLaterPages=stamp)
+    doc_template.build(story, canvasmaker=_FooterCanvas)
     return buffer.getvalue(), doc_template.page
 
 

@@ -1,12 +1,29 @@
 {
+<<<<<<< HEAD
   "manifest_version": "3.0.0",
   "project": "PRAMAAN Multi-Modal Digital Forensic AI & Provenance Stack",
   "updated_at": "2026-09-04T12:00:00Z",
   "release": {
     "repo": "b24bs1114-maker/PRAMAAN",
     "tag": "models-v2",
+=======
+  "manifest_version": "2.0.1",
+  "project": "PRAMAAN Multi-Modal Deepfake Detector",
+  "updated_at": "2026-09-04T00:00:00Z",
+  "_comment": [
+    "Single source of truth for model assets. scripts/download_weights.py and",
+    "scripts/verify_model_assets.py both read this file: filenames, sizes and",
+    "SHA-256 digests here are what a build downloads and verifies. The digests",
+    "below were computed from the installed checkpoints -- do not edit them by",
+    "hand; re-run scripts/verify_model_assets.py --no-load after replacing a",
+    "checkpoint and copy the printed digest in."
+  ],
+  "release": {
+    "repo": "b24bs1114-maker/PRAMAAN",
+    "tag": "round1-model",
+>>>>>>> 7f3c6c1 (Finalize backend handover)
     "asset_url_template": "https://github.com/{repo}/releases/download/{tag}/{asset}",
-    "note": "Per-asset URLs may be overridden with PRAMAAN_<MODALITY>_WEIGHTS_URL; the tag with PRAMAAN_WEIGHTS_RELEASE_TAG."
+    "note": "Per-asset URLs may be overridden with PRAMAAN_<MODALITY>_WEIGHTS_URL; the tag with PRAMAAN_WEIGHTS_RELEASE_TAG. round1-model is the only published release; it carries image_detector.pt only. audio_detector.pt is not published, so audio stays UNAVAILABLE until a release carries it; video has no purpose-trained checkpoint (see the video entry's checkpoint_compatibility)."
   },
   "models": {
     "image": {
