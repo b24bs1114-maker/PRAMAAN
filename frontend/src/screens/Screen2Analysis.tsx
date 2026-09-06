@@ -19,9 +19,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type {
+  AssessmentState,
   DetectorStatus,
   DetectResult,
   Evidence,
+  ExecutionStatus,
   MetadataResponse,
   Signal,
   StoredVerdictResponse,
@@ -40,14 +42,18 @@ import { NOT_MEASURED, formatBytes, formatScore, formatWeight, shortHash } from 
 import { isImageMedia } from '../lib/media'
 import type { RoutePath } from '../lib/router'
 import {
+  assessmentStateLabel,
+  assessmentStateTone,
   confidenceBandLabel,
   confidenceBandNote,
+  executionStatusLabel,
   isExcluded,
   signalPillVariant,
   statusLabel,
   verdictBandLabel,
   verdictPillTone,
   verdictTone,
+  type VerdictTone,
 } from '../lib/signals'
 import { isReady, type Investigation } from '../state/useInvestigation'
 
@@ -114,20 +120,119 @@ function AnalysisMediaPreview({
 }
 
 interface AssessmentEvidence {
+  state: AssessmentState
+  stateLabel: string
+  stateTone: VerdictTone
+  conclusive: boolean
+  executionStatus: ExecutionStatus
+  executionStatusLabel: string
+  taskScope: string
+  policyId: string
+  policyVersion: string
+  stateNote: string
+  reasonCodes: string[]
+  limitations: string[]
   leading: { name: string; detail: string; score: number | null; contribution: number | null } | null
   supporting: Array<{ name: string; detail: string; score: number | null; contribution: number | null }>
   conflicting: Array<{ name: string; detail: string; score: number | null; contribution: number | null }>
   unavailable: Array<{ name: string; reason: string; status: string; isAbstained: boolean }>
+  observations: Array<{ name: string; detail: string; score: number | null; role: string }>
 }
 
-function synthesizeAssessment(
+function resolveAssessmentView(
   verdict: Verdict,
   signals: Signal[],
   exclusionReasons: Map<string, string>,
 ): AssessmentEvidence {
+  const backend = verdict.assessment
+
+  if (backend) {
+    const state = backend.state
+    const contributing = backend.contributing_checks || []
+    const unavailableList = backend.unavailable_checks || []
+    const observationsList = backend.descriptive_observations || []
+
+    let leading: AssessmentEvidence['leading'] = null
+    const supporting: AssessmentEvidence['supporting'] = []
+    const conflicting: AssessmentEvidence['conflicting'] = []
+
+    if (contributing.length > 0) {
+      // Find leading contributor
+      const sorted = [...contributing].sort(
+        (a, b) => Math.abs(b.contribution ?? 0) - Math.abs(a.contribution ?? 0)
+      )
+      const top = sorted[0]
+      leading = {
+        name: top.name,
+        detail: top.explanation || top.basis?.detail || (top.reason_code ? `Status: ${top.reason_code}` : ''),
+        score: top.score ?? null,
+        contribution: top.contribution ?? null,
+      }
+
+      for (let i = 1; i < sorted.length; i++) {
+        const c = sorted[i]
+        const isConflicting =
+          (state === 'INDICATORS_DETECTED' && c.check_state === 'NO_INDICATORS_DETECTED') ||
+          (state === 'NO_INDICATORS_DETECTED' && c.check_state === 'INDICATORS_DETECTED')
+
+        const item = {
+          name: c.name,
+          detail: c.explanation || c.basis?.detail || (c.reason_code ? `Status: ${c.reason_code}` : ''),
+          score: c.score ?? null,
+          contribution: c.contribution ?? null,
+        }
+
+        if (isConflicting) {
+          conflicting.push(item)
+        } else {
+          supporting.push(item)
+        }
+      }
+    }
+
+    const unavailable: AssessmentEvidence['unavailable'] = unavailableList.map((u) => ({
+      name: u.name,
+      reason: u.reason_code ? `${u.reason_code}: ${u.detail || u.reason_code}` : u.detail || 'Unavailable check',
+      status: u.execution_status,
+      isAbstained: u.execution_status === 'ABSTAINED',
+    }))
+
+    const observations: AssessmentEvidence['observations'] = observationsList.map((o) => ({
+      name: o.name,
+      detail: o.detail || '',
+      score: o.score ?? null,
+      role: o.role || 'DESCRIPTIVE',
+    }))
+
+    return {
+      state,
+      stateLabel: assessmentStateLabel(state),
+      stateTone: assessmentStateTone(state),
+      conclusive: Boolean(backend.conclusive),
+      executionStatus: backend.execution_status || 'COMPLETED',
+      executionStatusLabel: executionStatusLabel(backend.execution_status),
+      taskScope: backend.scope || 'synthetic_media_indicators',
+      policyId: backend.policy_id || 'pramaan.synthetic_media_indicators',
+      policyVersion: backend.policy_version || '1.0',
+      stateNote: backend.state_note || '',
+      reasonCodes: backend.reason_codes || [],
+      limitations: backend.limitations || [],
+      leading,
+      supporting,
+      conflicting,
+      unavailable,
+      observations,
+    }
+  }
+
+  // Legacy fallback when backend verdict has no assessment object
   const vBand = verdict.verdict
-  const manipulatedThreshold = verdict.thresholds?.manipulated_at_or_above ?? 0.6
-  const authenticThreshold = verdict.thresholds?.authentic_at_or_below ?? 0.4
+  const fallbackState: AssessmentState =
+    vBand === 'MANIPULATED'
+      ? 'INDICATORS_DETECTED'
+      : vBand === 'AUTHENTIC'
+        ? 'NO_INDICATORS_DETECTED'
+        : 'INCONCLUSIVE'
 
   const included = signals.filter((s) => s.included && s.score !== null)
   const excluded = signals.filter((s) => !s.included || s.score === null)
@@ -138,96 +243,23 @@ function synthesizeAssessment(
 
   let leading: AssessmentEvidence['leading'] = null
   const supporting: AssessmentEvidence['supporting'] = []
-  const conflicting: AssessmentEvidence['conflicting'] = []
 
-  if (vBand === 'MANIPULATED') {
-    const topManip = sortedIncluded.find((s) => (s.score ?? 0) >= manipulatedThreshold) || sortedIncluded[0]
-    if (topManip) {
-      leading = {
-        name: topManip.name,
-        detail: topManip.explanation,
-        score: topManip.score,
-        contribution: topManip.contribution,
-      }
+  if (sortedIncluded.length > 0) {
+    const top = sortedIncluded[0]
+    leading = {
+      name: top.name,
+      detail: top.explanation,
+      score: top.score,
+      contribution: top.contribution,
     }
-    for (const s of sortedIncluded) {
-      if (s.signal_id === topManip?.signal_id) continue
-      if ((s.score ?? 0) >= manipulatedThreshold) {
-        supporting.push({
-          name: s.name,
-          detail: s.explanation,
-          score: s.score,
-          contribution: s.contribution,
-        })
-      } else if ((s.score ?? 0) <= authenticThreshold) {
-        conflicting.push({
-          name: s.name,
-          detail: s.explanation,
-          score: s.score,
-          contribution: s.contribution,
-        })
-      } else {
-        supporting.push({
-          name: s.name,
-          detail: s.explanation,
-          score: s.score,
-          contribution: s.contribution,
-        })
-      }
-    }
-  } else if (vBand === 'AUTHENTIC') {
-    const topAuth = sortedIncluded.find((s) => (s.score ?? 0) <= authenticThreshold) || sortedIncluded[0]
-    if (topAuth) {
-      leading = {
-        name: topAuth.name,
-        detail: topAuth.explanation,
-        score: topAuth.score,
-        contribution: topAuth.contribution,
-      }
-    }
-    for (const s of sortedIncluded) {
-      if (s.signal_id === topAuth?.signal_id) continue
-      if ((s.score ?? 0) <= authenticThreshold) {
-        supporting.push({
-          name: s.name,
-          detail: s.explanation,
-          score: s.score,
-          contribution: s.contribution,
-        })
-      } else if ((s.score ?? 0) >= manipulatedThreshold) {
-        conflicting.push({
-          name: s.name,
-          detail: s.explanation,
-          score: s.score,
-          contribution: s.contribution,
-        })
-      } else {
-        supporting.push({
-          name: s.name,
-          detail: s.explanation,
-          score: s.score,
-          contribution: s.contribution,
-        })
-      }
-    }
-  } else {
-    if (sortedIncluded.length > 0) {
-      const top = sortedIncluded[0]
-      leading = {
-        name: top.name,
-        detail: top.explanation,
-        score: top.score,
-        contribution: top.contribution,
-      }
-      for (let i = 1; i < sortedIncluded.length; i++) {
-        const s = sortedIncluded[i]
-        supporting.push({
-          name: s.name,
-          detail: s.explanation,
-          score: s.score,
-          contribution: s.contribution,
-        })
-      }
+    for (let i = 1; i < sortedIncluded.length; i++) {
+      const s = sortedIncluded[i]
+      supporting.push({
+        name: s.name,
+        detail: s.explanation,
+        score: s.score,
+        contribution: s.contribution,
+      })
     }
   }
 
@@ -252,7 +284,25 @@ function synthesizeAssessment(
     }
   })
 
-  return { leading, supporting, conflicting, unavailable }
+  return {
+    state: fallbackState,
+    stateLabel: assessmentStateLabel(fallbackState),
+    stateTone: assessmentStateTone(fallbackState),
+    conclusive: vBand !== 'INCONCLUSIVE',
+    executionStatus: 'COMPLETED',
+    executionStatusLabel: 'COMPLETED',
+    taskScope: 'synthetic_media_indicators',
+    policyId: 'pramaan.synthetic_media_indicators.legacy',
+    policyVersion: verdict.fusion_version || 'legacy',
+    stateNote: '',
+    reasonCodes: [],
+    limitations: [],
+    leading,
+    supporting,
+    conflicting: [],
+    unavailable,
+    observations: [],
+  }
 }
 
 export function Screen2Analysis({
@@ -402,9 +452,9 @@ export function Screen2Analysis({
     }
   }
 
-  const assessment = verdict ? synthesizeAssessment(verdict, visibleSignals, exclusionReason) : null
+  const assessment = verdict ? resolveAssessmentView(verdict, visibleSignals, exclusionReason) : null
 
-  const vTone = verdict ? verdictTone(verdict.verdict) : 'warn'
+  const vTone = assessment ? assessment.stateTone : (verdict ? verdictTone(verdict.verdict) : 'warn')
 
   /*
    * No case, no analysis. The same guard every other case-scoped screen has.
@@ -484,12 +534,12 @@ export function Screen2Analysis({
               gap: 'var(--space-3)',
             }}
           >
-            {/* Box 1: FINAL VERDICT */}
+            {/* Box 1: FORENSIC ASSESSMENT & VERDICT */}
             <div
               className="card stack"
               style={{
                 padding: 'var(--space-4)',
-                gap: 6,
+                gap: 8,
                 borderLeft: vTone === 'manipulated'
                   ? '4px solid var(--danger-bright)'
                   : vTone === 'authentic'
@@ -497,7 +547,20 @@ export function Screen2Analysis({
                     : '4px solid var(--warn-bright)',
               }}
             >
-              <span className="label" style={{ color: 'var(--text-muted)' }}>FINAL VERDICT</span>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                <span className="label" style={{ color: 'var(--text-muted)' }}>FORENSIC ASSESSMENT</span>
+                {assessment ? (
+                  <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+                    <Pill variant={assessment.conclusive ? 'ok' : 'warn'}>
+                      {assessment.conclusive ? 'CONCLUSIVE' : 'INCONCLUSIVE'}
+                    </Pill>
+                    <Pill variant={assessment.executionStatus === 'COMPLETED' ? 'neutral' : assessment.executionStatus === 'FAILED' ? 'error' : 'warn'}>
+                      {assessment.executionStatusLabel}
+                    </Pill>
+                  </div>
+                ) : null}
+              </div>
+
               <div
                 style={{
                   fontSize: 'var(--text-xl)',
@@ -506,20 +569,25 @@ export function Screen2Analysis({
                   letterSpacing: '0.04em',
                 }}
               >
-                {verdictBandLabel(verdict.verdict)}
+                {assessment ? assessment.stateLabel : verdictBandLabel(verdict.verdict)}
               </div>
-              {/*
-                Decision-aid wording. "Verified authentic" is not available to
-                this build: the AUTHENTIC band means the assessed signals did not
-                support manipulation, which is a different and weaker statement.
-                An unavailable detector is not evidence of authenticity.
-              */}
+
+              {/* Legacy verdict projection and scope */}
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', color: 'var(--text-muted)', flexWrap: 'wrap', gap: 4 }}>
+                <span className="mono">Legacy verdict: <strong>{verdictBandLabel(verdict.verdict)}</strong></span>
+                {assessment?.taskScope ? (
+                  <span className="mono" style={{ fontSize: '10px' }}>Scope: {assessment.taskScope}</span>
+                ) : null}
+              </div>
+
               <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', lineHeight: 'var(--leading-normal)' }}>
-                {vTone === 'manipulated'
-                  ? 'The assessed signals support manipulation. Decision aid, not a legal conclusion.'
-                  : vTone === 'authentic'
-                    ? 'The assessed signals did not support manipulation. This is not a verification of authenticity.'
-                    : 'Insufficient signal coverage to conclude. Not a finding of authenticity or of manipulation.'}
+                {assessment?.stateNote || (
+                  vTone === 'manipulated'
+                    ? 'The assessed signals support manipulation. Decision aid, not a legal conclusion.'
+                    : vTone === 'authentic'
+                      ? 'The assessed signals did not support manipulation. This is not a verification of authenticity.'
+                      : 'Insufficient signal coverage to conclude. Not a finding of authenticity or of manipulation.'
+                )}
               </span>
             </div>
 
@@ -685,9 +753,16 @@ export function Screen2Analysis({
               <span className="label" style={{ color: 'var(--text-strong)', letterSpacing: '0.06em' }}>
                 WHY THIS ASSESSMENT?
               </span>
-              <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                {available} of {total} signals
-              </span>
+              <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                {assessment?.policyId ? (
+                  <span className="mono" style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                    Policy: {assessment.policyId} (v{assessment.policyVersion})
+                  </span>
+                ) : null}
+                <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                  {available} of {total} signals
+                </span>
+              </div>
             </div>
 
             {verdict.rationale ? (
@@ -699,6 +774,18 @@ export function Screen2Analysis({
                 Assessment derived deterministically from weighted forensic detector signals.
               </p>
             )}
+
+            {/* Reason codes banner if present */}
+            {assessment && assessment.reasonCodes.length > 0 ? (
+              <div className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                <span className="label" style={{ fontSize: '10px', color: 'var(--text-faint)' }}>REASON CODES:</span>
+                {assessment.reasonCodes.map((rc) => (
+                  <Pill key={rc} variant="neutral">
+                    <span className="mono" style={{ fontSize: '10px' }}>{rc}</span>
+                  </Pill>
+                ))}
+              </div>
+            ) : null}
 
             {/* Structured evidence categories -- side-by-side where they fit,
                 wrapping to as many rows as the content needs. */}
@@ -787,6 +874,39 @@ export function Screen2Analysis({
                     </ul>
                   </div>
                 )}
+
+                {/* Descriptive Observations */}
+                {assessment.observations.length > 0 && (
+                  <div style={{ background: 'var(--surface-3)', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
+                    <div className="label" style={{ fontSize: '10px', color: 'var(--text-faint)' }}>
+                      DESCRIPTIVE OBSERVATIONS ({assessment.observations.length})
+                    </div>
+                    <span style={{ fontSize: '10px', color: 'var(--text-faint)', display: 'block', margin: '2px 0 4px' }}>
+                      Reported for examiner review; does not move synthetic-media assessment state.
+                    </span>
+                    <ul style={{ margin: '4px 0 0', paddingLeft: 16, fontSize: '11px', color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                      {assessment.observations.map((o, idx) => (
+                        <li key={idx}>
+                          <strong style={{ color: 'var(--text-strong)' }}>{o.name}</strong>
+                          {o.score !== null ? ` (score: ${formatScore(o.score, 4)})` : ''}
+                          {o.detail ? `: ${o.detail}` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {/* Assessment Limitations if present */}
+            {assessment && assessment.limitations.length > 0 ? (
+              <div style={{ background: 'var(--surface-3)', padding: '8px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', fontSize: '11px', color: 'var(--text-muted)' }}>
+                <span className="label" style={{ fontSize: '10px', color: 'var(--text-faint)', display: 'block', marginBottom: 2 }}>ASSESSMENT LIMITATIONS</span>
+                <ul style={{ margin: 0, paddingLeft: 16, lineHeight: 1.4 }}>
+                  {assessment.limitations.map((lim, idx) => (
+                    <li key={idx}>{lim}</li>
+                  ))}
+                </ul>
               </div>
             ) : null}
 

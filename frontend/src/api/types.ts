@@ -109,10 +109,92 @@ export type VerdictBand =
   | 'INSUFFICIENT_EVIDENCE'
   | string
 
+export type AssessmentState =
+  | 'INDICATORS_DETECTED'
+  | 'NO_INDICATORS_DETECTED'
+  | 'INCONCLUSIVE'
+  | 'NOT_ASSESSED'
+  | string
+
+export type ExecutionStatus = 'COMPLETED' | 'PARTIAL' | 'FAILED' | string
+
+export type CheckExecutionStatus =
+  | 'COMPLETED'
+  | 'ABSTAINED'
+  | 'UNAVAILABLE'
+  | 'FAILED'
+  | 'NOT_APPLICABLE'
+  | 'NOT_REQUESTED'
+  | string
+
+export interface ContributingCheck {
+  check_id: string
+  name: string
+  score: number
+  declared_weight: number
+  effective_weight?: number
+  contribution?: number
+  execution_status: CheckExecutionStatus
+  check_state: string
+  reason_code: string
+  basis?: Record<string, any>
+  explanation?: string | null
+}
+
+export interface UnavailableCheck {
+  check_id: string
+  name: string
+  declared_weight: number
+  execution_status: CheckExecutionStatus
+  reason_code: string | null
+  detail: string
+}
+
+export interface DescriptiveObservation {
+  observation_id: string
+  name: string
+  score: number | null
+  role: string
+  execution_status: CheckExecutionStatus
+  detail: string
+}
+
+export interface Assessment {
+  policy_id: string
+  policy_version: string
+  policy_note?: string
+  scope: string
+  scope_note?: string
+  media_type: string
+  state: AssessmentState
+  state_note?: string
+  conclusive: boolean
+  execution_status: ExecutionStatus
+  execution_note?: string
+  reason_codes: string[]
+  reason_notes?: Record<string, string>
+  score: number | null
+  score_semantics?: string
+  arithmetic?: string | null
+  thresholds?: Record<string, number>
+  eligible_checks: string[]
+  eligible_declared_weight?: number
+  contributed_weight?: number
+  coverage: number
+  coverage_basis?: string
+  contributing_checks: ContributingCheck[]
+  unavailable_checks: UnavailableCheck[]
+  descriptive_observations: DescriptiveObservation[]
+  examiner_conclusion?: Record<string, any> | null
+  examiner_conclusion_note?: string
+  limitations?: string[]
+}
+
 export interface Verdict {
   evidence_id: string
   filename: string
   sha256: string
+  assessment?: Assessment | null
   verdict: VerdictBand
   /** 0..1, higher = more evidence consistent with manipulation. */
   manipulation_score: number | null

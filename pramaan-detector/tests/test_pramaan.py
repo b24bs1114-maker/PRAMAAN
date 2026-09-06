@@ -278,8 +278,8 @@ class TestVideoDetector:
     def test_aggregate_empty_frames(self):
         from pramaan.detectors.video_detector import _aggregate
         score, conf = _aggregate([], 0.0)
-        assert score == pytest.approx(0.5)
-        assert conf == pytest.approx(0.0)
+        assert score is None
+        assert conf is None
 
     def test_aggregate_high_scores(self):
         from pramaan.detectors.video_detector import _aggregate
@@ -358,14 +358,14 @@ class TestAudioDetector:
     def test_aggregate_audio_empty(self):
         from pramaan.detectors.audio_detector import _aggregate_audio
         score, conf = _aggregate_audio([])
-        assert score == pytest.approx(0.5)
-        assert conf == pytest.approx(0.0)
+        assert score is None
+        assert conf is None
 
     def test_aggregate_audio_high(self):
         from pramaan.detectors.audio_detector import _aggregate_audio
         score, conf = _aggregate_audio([0.9, 0.85, 0.88, 0.91, 0.87])
         assert score > 0.5
-        assert conf > 0.0
+        assert conf is None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

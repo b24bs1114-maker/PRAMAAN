@@ -239,6 +239,72 @@ export function verdictBandLabel(band: VerdictBand | string | null | undefined):
 }
 
 /**
+ * Authoritative task-qualified assessment state label.
+ * Rendered from backend Assessment.state.
+ */
+export function assessmentStateLabel(state: string | null | undefined): string {
+  switch (state) {
+    case 'INDICATORS_DETECTED':
+      return 'INDICATORS DETECTED'
+    case 'NO_INDICATORS_DETECTED':
+      return 'NO INDICATORS DETECTED'
+    case 'INCONCLUSIVE':
+      return 'INCONCLUSIVE'
+    case 'NOT_ASSESSED':
+      return 'NOT ASSESSED'
+    case null:
+    case undefined:
+      return 'NOT ASSESSED'
+    default:
+      return String(state).replace(/_/g, ' ')
+  }
+}
+
+export function assessmentStateTone(state: string | null | undefined): VerdictTone {
+  switch (state) {
+    case 'INDICATORS_DETECTED':
+      return 'manipulated'
+    case 'NO_INDICATORS_DETECTED':
+      return 'authentic'
+    case 'INCONCLUSIVE':
+    case 'NOT_ASSESSED':
+    default:
+      return 'inconclusive'
+  }
+}
+
+export function assessmentPillTone(
+  state: string | null | undefined,
+): PillVariant | 'ok' | 'error' {
+  if (!state) return 'neutral'
+  switch (state) {
+    case 'INDICATORS_DETECTED':
+      return 'error'
+    case 'NO_INDICATORS_DETECTED':
+      return 'ok'
+    case 'INCONCLUSIVE':
+      return 'warn'
+    case 'NOT_ASSESSED':
+      return 'neutral'
+    default:
+      return 'neutral'
+  }
+}
+
+export function executionStatusLabel(status: string | null | undefined): string {
+  switch (status) {
+    case 'COMPLETED':
+      return 'COMPLETED'
+    case 'PARTIAL':
+      return 'PARTIAL EXECUTION'
+    case 'FAILED':
+      return 'FAILED EXECUTION'
+    default:
+      return String(status || 'UNKNOWN')
+  }
+}
+
+/**
  * Confidence band, as a word.
  *
  * `Verdict.confidence` is a STRING BAND from the backend -- `none`, `low` or

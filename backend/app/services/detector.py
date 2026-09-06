@@ -74,6 +74,7 @@ import importlib.util
 import inspect
 import json
 import logging
+import math
 import sys
 import threading
 import time
@@ -621,20 +622,36 @@ class DetectorAdapter(ABC):
         elapsed = round((time.perf_counter() - started) * 1000, 2)
         extras = dict(extras or {})
 
-        if score is None:
+        declared_abstained = bool(extras.get("abstained", False))
+        if score is None or declared_abstained:
             # The model ran and declined to answer. Distinct from a crash and
             # distinct from an uninstalled model, but the same consequence: there
             # is no score, so nothing is invented to stand in for one.
+            detail = str(extras.get("explanation") or extras.get("detail") or DECLINED_EXPLANATION)
+            if DECLINED_EXPLANATION[:40] not in detail:
+                detail = f"{detail} {DECLINED_EXPLANATION}"
             return self._abstain(
                 media_type=media_type,
                 status=STATUS_UNAVAILABLE,
-                detail=DECLINED_EXPLANATION,
+                detail=detail,
+                latency_ms=elapsed,
+                model_load_ms=load_ms,
+            )
+
+        if isinstance(score, bool):
+            return self._abstain(
+                media_type=media_type,
+                status=STATUS_ERROR,
+                detail=f"Detector returned a non-numeric score ({score!r}).",
                 latency_ms=elapsed,
                 model_load_ms=load_ms,
             )
 
         try:
-            score_val = round(float(score), 6)
+            score_f = float(score)
+            if not math.isfinite(score_f):
+                raise ValueError(f"Non-finite score {score!r}")
+            score_val = round(score_f, 6)
         except (TypeError, ValueError):
             return self._abstain(
                 media_type=media_type,

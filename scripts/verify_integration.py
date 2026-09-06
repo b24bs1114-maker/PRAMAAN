@@ -1098,9 +1098,9 @@ def verify_verdict(analysis: dict[str, Any]) -> None:
 
     # Excluded signals must be out of the denominator too.
     excluded_weight = sum(
-        s.get("weight", 0) for s in signals if s.get("status") != "OK"
+        s.get("weight", 0) for s in signals if not s.get("included", False)
     )
-    included_weight = sum(s.get("weight", 0) for s in signals if s.get("status") == "OK")
+    included_weight = sum(s.get("weight", 0) for s in signals if s.get("included", False))
     check(
         abs(verdict.get("available_weight", -1) - included_weight) < 1e-6,
         "available_weight equals the sum of contributing weights",

@@ -49,6 +49,26 @@ def test_health_allows_configured_cors_origin(client: TestClient) -> None:
     assert response.headers.get("access-control-allow-origin") == origin
 
 
+def test_health_allows_port_5174_cors_origins(client: TestClient) -> None:
+    for origin in ("http://localhost:5174", "http://127.0.0.1:5174"):
+        response = client.get("/health", headers={"Origin": origin})
+        assert response.status_code == 200
+        assert response.headers.get("access-control-allow-origin") == origin
+
+        # Also verify preflight OPTIONS request
+        preflight = client.options(
+            "/api/auth/me",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "Authorization",
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers.get("access-control-allow-origin") == origin
+
+
+
 def test_unknown_route_returns_error_envelope(client: TestClient) -> None:
     response = client.get("/does-not-exist")
     assert response.status_code == 404
