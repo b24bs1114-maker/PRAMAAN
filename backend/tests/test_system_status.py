@@ -19,6 +19,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from app.api.system import PROTOTYPE_NOTE, READ_ONLY_NOTE
+from app.services import assessment as assessment_service
 from app.services import audit as audit_service
 from app.services import detector as detector_service
 from app.services import fusion as fusion_service
@@ -186,8 +187,91 @@ def test_fusion_configuration_is_reported_exactly_as_configured(
     }
     assert fusion["primary_signals"] == list(fusion_service.PRIMARY_SIGNALS)
     assert fusion["caveat"] == fusion_service.CAVEAT
+    # Fusion measures; it does not decide. The block says so, so nobody reads the
+    # weighted mean as the finding.
+    assert "does not decide" in fusion["decision_authority"]
     # The weights are prototype defaults and the response says so on every read.
     assert PROTOTYPE_NOTE in _status(client)["notes"]
+
+
+def test_the_decision_policy_is_published_in_full(
+    client: TestClient, settings
+) -> None:
+    """The rules that produce a finding are visible, not inferred from findings.
+
+    An examiner has to be able to see which checks were ever *entitled* to
+    decide. A verdict alone cannot distinguish a signal that scored low from a
+    signal that was never allowed to vote, and that distinction is the whole
+    point of the eligible set.
+    """
+    policy = _status(client)["assessment"]
+
+    assert policy["policy_id"] == assessment_service.POLICY_ID
+    assert policy["policy_version"] == assessment_service.POLICY_VERSION
+
+    # Eligibility, stated outright. Both members are task-scoped statements
+    # about how the asset was produced.
+    assert policy["eligible_checks"] == list(assessment_service.ELIGIBLE_CHECKS)
+    assert policy["eligible_checks"] == ["ai_detection", "provenance_c2pa"]
+    note = policy["eligible_checks_note"]
+    assert "Missing EXIF" in note
+    assert "absent C2PA manifest" in note
+    assert "not synthetic-media evidence" in note
+
+    # One scope per modality, each naming its own question, so no model's output
+    # can be read as a universal authenticity claim.
+    assert set(policy["scopes"]) == {"image", "video", "audio"}
+    for media_type, entry in policy["scopes"].items():
+        assert entry["scope"] == assessment_service.scope_for(media_type)
+        assert entry["detail"]
+    assert policy["scopes"]["audio"]["scope"] == (
+        "synthetic_or_spoofed_speech_indicators"
+    )
+
+    # The four task-qualified states, and the two that count as a finding.
+    assert set(policy["states"]) == set(assessment_service.ASSESSMENT_STATES)
+    assert policy["conclusive_states"] == [
+        "INDICATORS_DETECTED",
+        "NO_INDICATORS_DETECTED",
+    ]
+    assert "NOT_ASSESSED" in policy["state_vs_execution_note"]
+
+    # Missingness stays six distinct things all the way out to the client.
+    assert set(policy["check_statuses"]) == set(assessment_service.CHECK_STATUSES)
+    assert "Not a measurement of zero" in policy["check_statuses"]["ABSTAINED"]
+
+    assert set(policy["reason_codes"]) == set(assessment_service.REASON_CODES)
+    assert set(policy["roles"]) == {"DECISIVE", "DESCRIPTIVE"}
+
+    # Thresholds are the deployment's configured ones, republished rather than
+    # restated, and the note admits they are uncalibrated.
+    assert policy["thresholds"] == {
+        "manipulated_at_or_above": settings.verdict_manipulated_threshold,
+        "authentic_at_or_below": settings.verdict_authentic_threshold,
+        "minimum_eligible_coverage": settings.fusion_min_effective_weight,
+    }
+    assert any("calibrated" in text for text in policy["limitations"])
+
+    # Conflict is refused, not resolved by averaging.
+    assert "None." in policy["conflict_policy"]
+    assert "not averaged" in policy["conflict_policy"]
+
+    # Concept D is absent by design, and null rather than borrowed from C.
+    assert policy["examiner_conclusion"] is None
+    assert "never presented as a human judgement" in (
+        policy["examiner_conclusion_note"]
+    )
+
+    # The legacy enum is declared to be a projection, including its lossiness.
+    projection = policy["legacy_projection"]
+    assert projection["mapping"] == dict(
+        assessment_service.LEGACY_VERDICT_BY_STATE
+    )
+    assert projection["mapping"]["NOT_ASSESSED"] == "INSUFFICIENT_EVIDENCE"
+    assert projection["mapping"]["INCONCLUSIVE"] == "INSUFFICIENT_EVIDENCE"
+    assert "never a second decision" in projection["detail"]
+
+    assert "single source" in policy["authority"]
 
 
 def test_status_reports_configuration_and_cannot_change_it(
@@ -264,9 +348,27 @@ def test_vocabularies_are_published_so_the_ui_never_invents_a_label(
         fusion_service.VERDICT_MANIPULATED,
         fusion_service.VERDICT_INSUFFICIENT,
     }
-    assert "not about the media" in (
-        vocabularies["verdicts"][fusion_service.VERDICT_INSUFFICIENT]
+    insufficient_text = vocabularies["verdicts"][fusion_service.VERDICT_INSUFFICIENT]
+    assert "about the analysis" in insufficient_text
+    assert "never about the media" in insufficient_text
+    # The legacy token collapses two different assessment states, and the
+    # vocabulary has to admit that rather than let a client read it as one.
+    assert "INCONCLUSIVE" in insufficient_text
+    assert "NOT_ASSESSED" in insufficient_text
+    assert "assessment.state" in insufficient_text
+
+    # The assessment vocabulary is published alongside the legacy tokens, so a
+    # client can render the four real states without inventing labels.
+    assert set(vocabularies["assessment_states"]) == set(
+        assessment_service.ASSESSMENT_STATES
     )
+    assert set(vocabularies["assessment_reason_codes"]) == set(
+        assessment_service.REASON_CODES
+    )
+    assert set(vocabularies["check_statuses"]) == set(
+        assessment_service.CHECK_STATUSES
+    )
+
     assert set(vocabularies["signal_statuses"]) == {
         fusion_service.SIGNAL_OK,
         fusion_service.SIGNAL_INCONCLUSIVE,
@@ -312,3 +414,72 @@ def test_app_block_states_the_offline_posture(client: TestClient, settings) -> N
     assert app_block["offline"] is True
     assert "no outbound network calls" in app_block["offline_detail"]
     assert app_block["cors_allow_origins"] == list(settings.cors_origins)
+
+
+# --------------------------------------------------------------------------- #
+# Public web discovery: the one stage that leaves the machine
+# --------------------------------------------------------------------------- #
+def test_web_discovery_capability_is_reported_with_a_reason(
+    client: TestClient,
+) -> None:
+    """A settings page must be able to say whether this stage can actually run.
+
+    Not "optional" in the abstract: disabled and uncredentialed are different
+    problems with different fixes, so the block carries both the flag and the
+    explanation. The reason names the environment variable, never its value.
+    """
+    block = _status(client)["capabilities"]["web_discovery"]
+    assert block["available"] is False
+    assert block["enabled"] is False
+    assert "disabled" in block["reason"].lower()
+    assert block["provider"] == "Google Cloud Vision Web Detection"
+
+
+def test_offline_flag_follows_web_discovery_rather_than_being_asserted(
+    client: TestClient,
+) -> None:
+    """The offline claim has to stop being true when the deployment goes online.
+
+    ``offline`` was a hardcoded ``True`` printed beside a detail line promising
+    "no outbound network calls at runtime". Credential public web discovery and
+    that promise is false, but the status page went on making it -- and the
+    settings screen went on rendering "OFFLINE VERIFICATION GUARD: ENFORCED"
+    over a deployment that could reach Google Cloud Vision.
+
+    The online half runs against a throwaway settings copy installed as a
+    dependency override rather than a monkeypatched fixture. The ``settings``
+    fixture is session-scoped and captured once, while other modules in this
+    suite call ``get_settings.cache_clear()``; after one of those runs the
+    fixture object is no longer the instance the app resolves, and patching it
+    would silently assert nothing.
+    """
+    from pydantic import SecretStr
+
+    from app.config import get_settings
+    from app.main import app
+
+    baseline = _status(client)
+    assert baseline["app"]["offline"] is True
+    assert baseline["capabilities"]["web_discovery"]["available"] is False
+
+    credentialed = get_settings().model_copy(
+        update={
+            "pramaan_web_discovery_enabled": True,
+            "google_cloud_vision_api_key": SecretStr("test-key-not-a-real-secret"),
+        }
+    )
+    app.dependency_overrides[get_settings] = lambda: credentialed
+    try:
+        online = _status(client)
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+    assert online["capabilities"]["web_discovery"]["available"] is True
+    assert online["capabilities"]["web_discovery"]["reason"] is None
+    assert online["app"]["offline"] is False
+    assert "except public web discovery" in online["app"]["offline_detail"]
+
+    # And the override is gone: the deployment is offline again for every test
+    # that follows.
+    assert _status(client)["app"]["offline"] is True
+

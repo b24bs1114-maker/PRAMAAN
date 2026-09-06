@@ -58,16 +58,33 @@ def _temporal_score(frame_scores: list[float]) -> float:
     return float(np.clip(np.std(arr) * 4.0, 0.0, 1.0))
 
 
-def _aggregate(frame_scores: list[float], temporal: float) -> tuple[float, float]:
-    """Combine frame scores and temporal score into a single manipulation score."""
+def _aggregate(
+    frame_scores: list[float], temporal: float
+) -> tuple[Optional[float], None]:
+    """Mean frame score blended with temporal variance, or ``None`` if no frames.
+
+    Not on the live path: ``VideoDetector.analyse`` feeds the whole 16-frame clip
+    to VideoMAE and reads its softmax directly, which is the aggregation the model
+    was trained to do. This helper is retained for per-frame experimentation and
+    is exercised by the detector tests.
+
+    Two fabrications removed. An empty frame list returned ``0.5`` -- a score no
+    model produced, sitting exactly on the decision midpoint; it now returns
+    ``None``, which is what "nothing was measured" looks like. And the second
+    element was ``min(abs(combined - 0.5) * 2, 1.0)`` scaled by a frame count,
+    i.e. a confidence derived from the score and from how many frames happened to
+    be sampled. Neither input carries calibration information, so it returns
+    ``None``: this detector publishes no calibrated confidence.
+
+    The ``0.7 * mean + 0.3 * temporal`` blend is likewise unvalidated -- those
+    coefficients were not fitted against a labelled set. It is left as-is rather
+    than replaced with a different invented pair, and its output is a research
+    number, not a signal any assessment reads.
+    """
     if not frame_scores:
-        return 0.5, 0.0
-    arr = np.array(frame_scores)
-    combined = 0.7 * float(arr.mean()) + 0.3 * temporal
-    frame_conf = min(abs(combined - 0.5) * 2.0, 1.0)
-    n_factor = min(len(frame_scores) / 10.0, 1.0)
-    confidence = frame_conf * (0.5 + 0.5 * n_factor)
-    return float(np.clip(combined, 0.0, 1.0)), float(confidence)
+        return None, None
+    combined = 0.7 * float(np.array(frame_scores).mean()) + 0.3 * temporal
+    return float(np.clip(combined, 0.0, 1.0)), None
 
 
 def _count_faces(image: Any) -> int:
@@ -123,7 +140,7 @@ def _load_videomae_model(checkpoint_path: Path) -> tuple[Any, Any, str]:
         pass
 
     if state_dict is None:
-        saved = torch.load(resolved, map_location="cpu", weights_only=False)
+        saved = torch.load(resolved, map_location="cpu", weights_only=True)
         state_dict = saved.get("state_dict", saved) if isinstance(saved, dict) else saved
 
     fixed_sd = {}
@@ -143,8 +160,28 @@ def _load_videomae_model(checkpoint_path: Path) -> tuple[Any, Any, str]:
     return model, processor, "safetensors-strict"
 
 
-def _sample_video_frames(video_path: Path, num_frames: int = NUM_FRAMES) -> tuple[list[np.ndarray], float]:
-    """Sample num_frames uniformly across video duration using OpenCV."""
+def _sample_video_frames(
+    video_path: Path, num_frames: int = NUM_FRAMES
+) -> tuple[list[np.ndarray], float, dict]:
+    """``num_frames`` sampled uniformly over the video, plus what was substituted.
+
+    VideoMAE needs a fixed-length clip, so a video that yields fewer decoded
+    frames than requested has to be padded. The third return value records how
+    that padding happened, because it bounds what the score covers:
+
+    - ``decoded`` -- frames OpenCV actually returned at the sampled indices.
+    - ``repeated`` -- slots filled by duplicating the previous real frame. A
+      duplicate carries no new information; a clip that is mostly duplicates was
+      scored on a fraction of the content the score appears to describe.
+    - ``synthetic`` -- slots filled with a black frame because no real frame had
+      been decoded yet. Black frames are not content from this video at all, and
+      the model's response to them is an artefact of the padding.
+
+    Previously this was silent: a clip padded from two real frames to sixteen
+    produced a score indistinguishable from one measured on sixteen real frames.
+    The caller now reports these counts as evidence and abstains when nothing
+    real was decoded.
+    """
     import cv2
 
     cap = cv2.VideoCapture(str(video_path))
@@ -176,19 +213,28 @@ def _sample_video_frames(video_path: Path, num_frames: int = NUM_FRAMES) -> tupl
 
     cap.release()
 
-    ordered_frames = []
+    ordered_frames: list[np.ndarray] = []
+    sampling = {"requested": int(num_frames), "decoded": 0, "repeated": 0, "synthetic": 0}
     for idx in indices:
         if idx in frames_dict:
             ordered_frames.append(frames_dict[idx])
+            sampling["decoded"] += 1
         elif ordered_frames:
             ordered_frames.append(ordered_frames[-1])
+            sampling["repeated"] += 1
         else:
             ordered_frames.append(np.zeros((224, 224, 3), dtype=np.uint8))
+            sampling["synthetic"] += 1
 
     while len(ordered_frames) < num_frames:
-        ordered_frames.append(ordered_frames[-1] if ordered_frames else np.zeros((224, 224, 3), dtype=np.uint8))
+        if ordered_frames:
+            ordered_frames.append(ordered_frames[-1])
+            sampling["repeated"] += 1
+        else:
+            ordered_frames.append(np.zeros((224, 224, 3), dtype=np.uint8))
+            sampling["synthetic"] += 1
 
-    return ordered_frames[:num_frames], duration
+    return ordered_frames[:num_frames], duration, sampling
 
 
 class VideoDetector:
@@ -264,7 +310,7 @@ class VideoDetector:
             )
 
         try:
-            frames, duration_s = _sample_video_frames(path, NUM_FRAMES)
+            frames, duration_s, sampling = _sample_video_frames(path, NUM_FRAMES)
         except Exception as exc:
             return make_result(
                 media_type="video",
@@ -275,6 +321,27 @@ class VideoDetector:
                 weights_hash=self.weights_hash,
                 latency_ms=round((time.perf_counter() - t0) * 1000, 2),
                 explanation=f"Error decoding video frames: {exc}",
+            )
+
+        # Not one real frame was decoded, so the clip handed to VideoMAE is
+        # entirely black padding. Whatever the model returns for it describes the
+        # padding, not the video, and must not be published as a measurement of
+        # this file.
+        if sampling["decoded"] == 0:
+            return make_result(
+                media_type="video",
+                score=None,
+                confidence=None,
+                model=VIDEO_MODEL_NAME,
+                model_version=VIDEO_MODEL_VERSION,
+                weights_hash=self.weights_hash,
+                latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                explanation=(
+                    "No frame could be decoded from this video, so the clip "
+                    "presented to the model would have been entirely synthetic "
+                    "padding. No score was produced. This is NOT a finding of "
+                    "authenticity and NOT a finding of manipulation."
+                ),
             )
 
         torch = _load_torch()
@@ -299,6 +366,17 @@ class VideoDetector:
             })
 
         explanation = _explain_video(fake_prob, duration_s, len(frames))
+        # A clip padded up from a handful of real frames is scored on less
+        # content than "16 frames" suggests. Say so in the explanation the
+        # examiner reads, not only in the evidence dict.
+        if sampling["repeated"] or sampling["synthetic"]:
+            explanation += (
+                f" Sampling: {sampling['decoded']} of "
+                f"{sampling['requested']} frames were decoded from the file; "
+                f"{sampling['repeated']} were duplicates of a decoded frame and "
+                f"{sampling['synthetic']} were black padding. The score covers "
+                "only the decoded frames."
+            )
 
         res = make_result(
             media_type="video",

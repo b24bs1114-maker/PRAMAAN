@@ -36,7 +36,7 @@ services:
       # Interactive docs are off in production; set ENVIRONMENT=development to
       # get /docs and /redoc back.
       #
-      # The frontend Rahul is building runs on the host, so the browser origin is
+      # The frontend runs on the host, so the browser origin is
       # a host origin, not a container one.
       PRAMAAN_CORS_ALLOW_ORIGINS: >-
         http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000

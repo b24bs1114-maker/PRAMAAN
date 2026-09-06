@@ -33,7 +33,14 @@ import { ErrorBanner } from '../components/Banner'
 import { Empty, Spinner } from '../components/Feedback'
 import { Icon, mediaIcon } from '../components/Icon'
 import { Pill } from '../components/Pill'
-import { NOT_MEASURED, formatBytes, formatTimestampShort, orPlaceholder } from '../lib/format'
+import {
+  NOT_MEASURED,
+  caseStatusLabel,
+  evidenceCountLabel,
+  formatBytes,
+  formatTimestampShort,
+  orPlaceholder,
+} from '../lib/format'
 import type { RoutePath } from '../lib/router'
 import { verdictBandLabel, verdictTone } from '../lib/signals'
 import type { Investigation } from '../state/useInvestigation'
@@ -53,13 +60,16 @@ const DISPOSITION_BANDS = [
 ] as const
 
 export function ScreenDashboard({
-  investigation: _investigation,
+  investigation,
   onNavigate,
   onSelectCase,
+  onNewCase,
 }: {
   investigation: Investigation
   onNavigate: (path: RoutePath, params?: { caseId?: string; filter?: string }) => void
   onSelectCase: (caseId: string) => void
+  /** Start a fresh case: clears prior case state before landing on intake. */
+  onNewCase: () => void
 }) {
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
   const [loading, setLoading] = useState(true)
@@ -108,6 +118,23 @@ export function ScreenDashboard({
   const totalEvidence = summary?.evidence_items_count ?? 0
   const analysed = summary?.analysed_evidence_count ?? 0
   const breakdown = summary?.verdict_breakdown ?? {}
+
+  /*
+   * Two of the four quick actions are case-scoped: a report is rendered for one
+   * case and a custody chain belongs to one case. The Dashboard is not, so with no
+   * case open they used to land on a screen that could only say "no case is open".
+   *
+   * They now state the dependency instead of hiding it, and send the examiner to
+   * the queue to choose. The alternative -- picking the most recently updated case
+   * for them -- would generate a report or open a custody chain for a case nobody
+   * selected, which is not a shortcut a case-management tool gets to take.
+   */
+  const openCaseId = investigation.caseRecord?.case_id ?? null
+  const openCaseNumber = investigation.caseRecord?.case_number ?? null
+  const goCaseScoped = (path: RoutePath) => () => {
+    if (openCaseId) onNavigate(path, { caseId: openCaseId })
+    else onNavigate('cases')
+  }
 
   /** Real per-verdict counts, with the unanalysed remainder as its own band. */
   const dispositions = useMemo(() => {
@@ -167,7 +194,7 @@ export function ScreenDashboard({
           </p>
         </div>
 
-        <button type="button" className="btn-new-case" onClick={() => onNavigate('intake')}>
+        <button type="button" className="btn-new-case" onClick={onNewCase}>
           <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
           <span>New Case</span>
         </button>
@@ -196,21 +223,29 @@ export function ScreenDashboard({
             icon="upload"
             name="Upload Evidence"
             desc="Ingest &amp; seal new media"
-            onClick={() => onNavigate('intake')}
+            onClick={onNewCase}
           />
           <QuickAction
             tone="blue"
             icon="document"
-            name="Generate Report"
-            desc="Backend-rendered forensic PDF"
-            onClick={() => onNavigate('reports')}
+            name="Generate Forensic Report"
+            desc={
+              openCaseNumber
+                ? `Backend-rendered PDF for #${openCaseNumber}`
+                : 'Choose a case first — a report covers one case'
+            }
+            onClick={goCaseScoped('reports')}
           />
           <QuickAction
             tone="purple"
             icon="lock"
-            name="Audit Trail"
-            desc="Verify the custody hash chain"
-            onClick={() => onNavigate('audit')}
+            name="Review Custody Chain"
+            desc={
+              openCaseNumber
+                ? `Recorded custody events for #${openCaseNumber}`
+                : 'Choose a case first — the chain is per case'
+            }
+            onClick={goCaseScoped('audit')}
           />
           <QuickAction
             tone="green"
@@ -233,7 +268,38 @@ export function ScreenDashboard({
           </div>
 
           <div className="risk-overview-body">
-            <div className="risk-donut-box">
+            {totalEvidence === 0 ? (
+              /* An empty ring is not a disposition. With no evidence there is
+                 nothing to apportion, and a grey circle over the word "0" invites
+                 the reading that everything came back clean. Say what is empty,
+                 why, and what would fill it. */
+              <div
+                className="stack"
+                style={{ gap: 'var(--space-3)', padding: 'var(--space-4) 0', flex: 1 }}
+              >
+                <span className="label">NO EVIDENCE INGESTED YET</span>
+                <p
+                  style={{
+                    fontSize: 'var(--text-sm)',
+                    color: 'var(--text-muted)',
+                    margin: 0,
+                    lineHeight: 'var(--leading-relaxed)',
+                  }}
+                >
+                  This panel apportions ingested evidence across the verdict bands the
+                  fusion engine has recorded. Nothing has been sealed into a case yet, so
+                  there is no disposition to show — not an empty one.
+                </p>
+                <div className="btn-row">
+                  <button type="button" className="btn btn--primary" onClick={onNewCase}>
+                    <Icon name="upload" size={15} />
+                    Ingest First Evidence
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="risk-donut-box">
               <svg width="200" height="200" viewBox="0 0 200 200" className="risk-donut-svg-200">
                 <circle
                   cx="100"
@@ -282,8 +348,11 @@ export function ScreenDashboard({
                 </div>
               ))}
             </div>
+              </>
+            )}
           </div>
 
+          {totalEvidence === 0 ? null : (
           <div className="risk-overview-footer">
             <p
               style={{
@@ -298,6 +367,7 @@ export function ScreenDashboard({
               non-finding, not a verification of authenticity.
             </p>
           </div>
+          )}
         </div>
 
         {/* CASE QUEUE — every column is a real field or a placeholder */}
@@ -338,18 +408,17 @@ export function ScreenDashboard({
                     const priority = (c.priority ?? '').toLowerCase()
                     const tone = verdictTone(c.latest_verdict ?? null)
                     return (
+                      /*
+                        Same treatment as the case queue: the row stays a row.
+                        `role="button"` on a `<tr>` takes it out of the table's
+                        own navigation and names it by concatenating every cell.
+                        The click stays for a mouse; the case number is the real
+                        control.
+                      */
                       <tr
                         key={c.case_id}
                         className="priority-case-tr"
                         onClick={() => openCase(c.case_id)}
-                        tabIndex={0}
-                        role="button"
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
-                            openCase(c.case_id)
-                          }
-                        }}
                       >
                         <td>
                           {priority ? (
@@ -363,15 +432,27 @@ export function ScreenDashboard({
                           )}
                         </td>
                         <td>
-                          <span className="priority-case-id-text">
+                          <button
+                            type="button"
+                            className="case-open-btn priority-case-id-text"
+                            onClick={(e) => {
+                              // The row handles the click too; without this the
+                              // case would be opened twice for one press.
+                              e.stopPropagation()
+                              openCase(c.case_id)
+                            }}
+                            title={`Open case ${c.case_number ?? ''}`.trim()}
+                          >
                             #{orPlaceholder(c.case_number)}
+                          </button>
+                        </td>
+                        <td>
+                          <span className="priority-status-text">{caseStatusLabel(c.status)}</span>
+                        </td>
+                        <td>
+                          <span className="priority-evidence-text">
+                            {evidenceCountLabel(c.evidence_count)}
                           </span>
-                        </td>
-                        <td>
-                          <span className="priority-status-text">{orPlaceholder(c.status)}</span>
-                        </td>
-                        <td>
-                          <span className="priority-evidence-text">{c.evidence_count} items</span>
                         </td>
                         <td>
                           {c.latest_verdict ? (

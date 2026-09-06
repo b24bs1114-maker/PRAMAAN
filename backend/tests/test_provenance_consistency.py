@@ -64,6 +64,10 @@ def _upload(client: TestClient, data: bytes, filename: str, case_id: str | None 
     payload = {}
     if case_id:
         payload["case_id"] = case_id
+    else:
+        # Opening a case requires the intake fields the operator fills in.
+        payload["title"] = f"Provenance consistency: {filename}"
+        payload["description"] = "Near-duplicate provenance regression check."
     resp = client.post("/api/cases/upload", files=form, data=payload)
     assert resp.status_code in (200, 201), resp.text
     return resp.json()

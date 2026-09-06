@@ -2,7 +2,7 @@
 
 These tests are the specification for what an external AI engine must provide and
 what the backend guarantees in return. The module-level functions below stand in
-for Rahul's inference code: they are deliberately trivial, because what is under
+for a third-party engine: they are deliberately trivial, because what is under
 test is the socket, not a model.
 
 Nothing here fabricates a detection result for the product to display. Every
@@ -63,7 +63,7 @@ def video_infer(path, *, media_type):
     return {
         "score": 0.9,
         "confidence": 0.77,
-        "model": "rahul-video-net",
+        "model": "test-video-net",
         "model_version": "0.9.0",
         "explanation": "Temporal inconsistency across three segments.",
         "heatmap_available": True,
@@ -74,7 +74,7 @@ def video_infer(path, *, media_type):
 
 
 def audio_infer(path):
-    return {"score": 0.42, "model": "rahul-audio-net", "model_version": "0.2"}
+    return {"score": 0.42, "model": "test-audio-net", "model_version": "0.2"}
 
 
 def declining_infer(path):
@@ -116,7 +116,7 @@ def _write(tmp_path: Path, name: str, data: bytes) -> Path:
 def test_registered_video_model_produces_a_real_result(settings, tmp_path) -> None:
     """Registering an inference callable is the whole video integration."""
     register_inference(
-        "video", video_infer, model_name="rahul-video-net", model_version="0.9.0"
+        "video", video_infer, model_name="test-video-net", model_version="0.9.0"
     )
     service = MultiModalDetectorService(settings)
     clip = _write(tmp_path, "clip.mp4", mp4_bytes())
@@ -127,7 +127,7 @@ def test_registered_video_model_produces_a_real_result(settings, tmp_path) -> No
     assert result.abstained is False
     assert result.manipulation_score == 0.9
     assert result.confidence == 0.77           # the model's own, not derived
-    assert result.model == "rahul-video-net"
+    assert result.model == "test-video-net"
     assert result.model_version == "0.9.0"
     assert result.label == "ai_manipulation_likelihood"
     assert result.media_type == "video"
@@ -152,7 +152,7 @@ def test_registered_audio_model_produces_a_real_result(settings, tmp_path) -> No
 
     assert result.status == STATUS_OK
     assert result.manipulation_score == 0.42
-    assert result.model == "rahul-audio-net"
+    assert result.model == "test-audio-net"
     # The model reported no confidence, so there is none. Not 0.0, not derived.
     assert result.confidence is None
     assert result.extras["routed_adapter"] == "audio_classifier"
@@ -392,7 +392,7 @@ def test_routing_uses_declared_type_then_extension(settings) -> None:
 
 
 def test_status_reports_installed_and_missing_sockets(settings) -> None:
-    register_inference("audio", audio_infer, model_name="rahul-audio-net")
+    register_inference("audio", audio_infer, model_name="test-audio-net")
     reset_detector_singleton()
 
     report = detector_service.status(settings)
@@ -401,7 +401,7 @@ def test_status_reports_installed_and_missing_sockets(settings) -> None:
     assert report["registered_inference"]["audio"]["callable"] == "audio_infer"
     assert report["registered_inference"]["video"] is None
     assert report["modalities"]["audio"]["available"] is True
-    assert report["modalities"]["audio"]["model"] == "rahul-audio-net"
+    assert report["modalities"]["audio"]["model"] == "test-audio-net"
     assert report["modalities"]["video"]["available"] is False
     assert report["modalities"]["video"]["reason"]
     assert set(report["entrypoints"]) == {"image", "video", "audio"}

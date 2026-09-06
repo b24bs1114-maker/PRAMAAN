@@ -3,6 +3,7 @@
  *
  * Responsibilities:
  *   - prefix every path with the configured base URL
+ *   - attach the signed-in operator's bearer token, if there is one
  *   - enforce a timeout via AbortController
  *   - translate every non-2xx status and every transport failure into ApiError
  *   - read the backend's uniform { error, request_id } envelope
@@ -14,6 +15,58 @@
 import { apiUrl, REQUEST_TIMEOUT_MS } from './config'
 import { ApiError, kindForStatus } from './errors'
 import type { ApiErrorEnvelope } from './types'
+
+/**
+ * The bearer token for the signed-in operator, held in module scope.
+ *
+ * The backend runs with `allow_credentials=false`, so there is no cookie to ride
+ * along on requests -- identity travels in an explicit `Authorization` header, and
+ * every transport below has to add it. Keeping it here rather than in React state
+ * means `api.*` functions stay plain async functions, callable from anywhere.
+ *
+ * Deliberately not read from localStorage on demand: `useAuth` owns persistence
+ * and pushes the token in through `setAuthToken`, so there is exactly one place
+ * that decides what the current session is.
+ */
+let authToken: string | null = null
+
+/** Called when a request that *carried* a token was rejected as unauthorised. */
+let onUnauthorized: (() => void) | null = null
+
+/** Attach `token` to every subsequent request, or `null` to send none. */
+export function setAuthToken(token: string | null): void {
+  authToken = token && token.trim() ? token : null
+}
+
+/** The token currently being attached, if any. */
+export function getAuthToken(): string | null {
+  return authToken
+}
+
+/**
+ * Register what to do when the server rejects the token we hold.
+ *
+ * A session can expire or be revoked while a tab sits open. Without this, the UI
+ * would keep a stale token and show an error on every action; with it, the app
+ * drops to the login screen, which is the truthful state.
+ */
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler
+}
+
+function authHeaders(): Record<string, string> {
+  return authToken ? { Authorization: `Bearer ${authToken}` } : {}
+}
+
+/**
+ * Report a 401 on a request that presented a token.
+ *
+ * The guard matters: a failed sign-in is also a 401, but nothing is stale there
+ * and clearing the session would be meaningless noise.
+ */
+function noteUnauthorized(status: number, tokenSent: boolean): void {
+  if (status === 401 && tokenSent) onUnauthorized?.()
+}
 
 /** Pull the message/type/details out of the backend's error envelope. */
 function readEnvelope(body: unknown): {
@@ -97,7 +150,12 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   const onExternalAbort = () => controller.abort()
   options.signal?.addEventListener('abort', onExternalAbort)
 
-  const headers: Record<string, string> = { Accept: 'application/json', ...options.headers }
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    ...authHeaders(),
+    ...options.headers,
+  }
+  const tokenSent = 'Authorization' in headers
   let body: BodyInit | undefined = options.body
   if (body === undefined && options.json !== undefined) {
     body = JSON.stringify(options.json)
@@ -124,7 +182,10 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     options.signal?.removeEventListener('abort', onExternalAbort)
   }
 
-  if (!response.ok) throw await toApiError(response, url)
+  if (!response.ok) {
+    noteUnauthorized(response.status, tokenSent)
+    throw await toApiError(response, url)
+  }
 
   // 204 and other empty bodies.
   if (response.status === 204) return undefined as T
@@ -147,11 +208,13 @@ export async function requestBlob(path: string, options: RequestOptions = {}): P
   const url = apiUrl(path)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? REQUEST_TIMEOUT_MS)
+  const headers = { ...authHeaders(), ...options.headers }
+  const tokenSent = 'Authorization' in headers
   let response: Response
   try {
     response = await fetch(url, {
       method: options.method ?? 'GET',
-      headers: options.headers,
+      headers,
       signal: controller.signal,
       credentials: 'omit',
       mode: 'cors',
@@ -161,7 +224,10 @@ export async function requestBlob(path: string, options: RequestOptions = {}): P
   } finally {
     clearTimeout(timer)
   }
-  if (!response.ok) throw await toApiError(response, url)
+  if (!response.ok) {
+    noteUnauthorized(response.status, tokenSent)
+    throw await toApiError(response, url)
+  }
   return response.blob()
 }
 
@@ -184,12 +250,16 @@ export function upload<T>(
   opts: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {},
 ): Promise<T> {
   const url = apiUrl(path)
+  const token = authToken
   return new Promise<T>((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', url, true)
     xhr.responseType = 'text'
     xhr.timeout = REQUEST_TIMEOUT_MS
     xhr.setRequestHeader('Accept', 'application/json')
+    // Intake is authenticated: the examiner recorded against the evidence is the
+    // operator this token identifies, so an upload without it is refused outright.
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
 
     xhr.upload.onprogress = (event) => {
       opts.onProgress?.({
@@ -222,6 +292,7 @@ export function upload<T>(
         return
       }
       const { message, type, requestId, details } = readEnvelope(parsed)
+      noteUnauthorized(xhr.status, Boolean(token))
       reject(
         new ApiError({
           kind: kindForStatus(xhr.status),

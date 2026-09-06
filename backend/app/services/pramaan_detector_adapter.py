@@ -1,6 +1,6 @@
-"""Rahul's PRAMAAN AI Detector Adapter Bridge.
+"""PRAMAAN AI Detector Adapter Bridge.
 
-Connects Rahul's multi-modal AI detector engine (pramaan-detector) to the
+Connects the multi-modal PRAMAAN detector engine (pramaan-detector) to the
 PRAMAAN backend detector plugin interface for Image, Video, and Audio.
 """
 
@@ -10,13 +10,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("pramaan.detector.rahul_adapter")
+logger = logging.getLogger("pramaan.detector.plugin_adapter")
 
 _detector_instances: dict[tuple[str, str | None], Any] = {}
 
 
 def _get_detector(modality: str, model_path: Path | str | None = None) -> Any:
-    """Retrieve or instantiate a cached Rahul detector for the given modality."""
+    """Retrieve or instantiate a cached detector for the given modality."""
     weights_str = str(Path(model_path).expanduser()) if model_path and str(model_path).strip() else None
     key = (modality, weights_str)
 
@@ -34,13 +34,13 @@ def _get_detector(modality: str, model_path: Path | str | None = None) -> Any:
             from pramaan.detectors.audio_detector import AudioDetector
             instance = AudioDetector(weights_path=weights_str)
         else:
-            raise ValueError(f"Unsupported modality for Rahul detector: {modality}")
+            raise ValueError(f"Unsupported modality for detector plugin: {modality}")
 
         _detector_instances[key] = instance
-        logger.info("Initialized Rahul %s detector with weights: %s", modality, weights_str or "pretrained")
+        logger.info("Initialized %s detector with weights: %s", modality, weights_str or "pretrained")
         return instance
     except Exception as exc:
-        logger.error("Failed to initialize Rahul %s detector: %s", modality, exc)
+        logger.error("Failed to initialize %s detector: %s", modality, exc)
         raise
 
 

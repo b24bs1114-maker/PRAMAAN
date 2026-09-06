@@ -265,6 +265,12 @@ def cold_start(tmp_path_factory) -> dict[str, Any]:
             PRAMAAN_LOG_LEVEL="WARNING",
             PRAMAAN_ENVIRONMENT="production",
             PRAMAAN_DEBUG="false",
+            # Intake is authenticated, so a cold boot has to be able to seed an
+            # operator and sign in as one. Pinned rather than relying on the
+            # shipped placeholders, so this test states what it logs in with.
+            PRAMAAN_SEED_OPERATOR_USERNAME="cold-start-operator",
+            PRAMAAN_SEED_OPERATOR_DISPLAY_NAME="Cold Start Examiner",
+            PRAMAAN_SEED_OPERATOR_PASSWORD="cold-start-password",
         )
         from fastapi.testclient import TestClient
         from app.main import app
@@ -273,11 +279,29 @@ def cold_start(tmp_path_factory) -> dict[str, Any]:
         settings = get_settings()
         with TestClient(app) as client:
             health = client.get("/health").json()
+            signin = client.post(
+                "/api/auth/login",
+                json={
+                    "username": "cold-start-operator",
+                    "password": "cold-start-password",
+                },
+            )
+            signin.raise_for_status()
+            session = signin.json()
+            client.headers["Authorization"] = "Bearer " + session["token"]
+            # Read after signing in, because the index status route is
+            # authenticated -- but still before anything is uploaded, which is
+            # what makes it the empty-store reading this test is about. Health is
+            # the only probe deliberately left open to an unauthenticated caller.
             index_before = client.get("/api/index/status").json()
             with open(sys.argv[2], "rb") as handle:
                 upload = client.post(
                     "/api/cases/upload",
                     files={"file": ("cold-start.jpg", handle.read(), "image/jpeg")},
+                    data={
+                        "title": "Cold start",
+                        "description": "First case opened on an empty store.",
+                    },
                 )
             case = upload.json()
             case_id = case["case"]["case_id"]
@@ -287,7 +311,11 @@ def cold_start(tmp_path_factory) -> dict[str, Any]:
         print(json.dumps({
             "health": health,
             "index_before": index_before,
+            "login_status": signin.status_code,
+            "operator": session["user"],
             "upload_status": upload.status_code,
+            "case_number": case["case"]["case_number"],
+            "case_examiner": case["case"]["examiner"],
             "sha256": case["evidence"]["sha256"],
             "phash": case["evidence"]["phash"],
             "matches": matches,
@@ -327,6 +355,19 @@ def test_step_01_cold_start_provisions_itself_and_serves_requests(cold_start):
     assert cold_start["reports_dir_exists"] is True
     # Production posture: no interactive docs.
     assert cold_start["docs_disabled"] is True
+
+
+def test_step_01_cold_start_can_seed_an_operator_and_sign_one_in(cold_start):
+    """Intake is authenticated, so an empty store has to be able to produce an
+    operator and accept that operator's credentials before any evidence exists.
+    The examiner on the first case is that operator's display name -- nothing the
+    client chose."""
+    assert cold_start["login_status"] == 200
+    assert cold_start["operator"]["username"] == "cold-start-operator"
+    assert cold_start["operator"]["display_name"] == "Cold Start Examiner"
+    assert cold_start["case_examiner"] == "Cold Start Examiner", cold_start["case_examiner"]
+    # First case on an empty store: the compact sequence starts at 1001.
+    assert cold_start["case_number"] == "PRAMAAN-1001", cold_start["case_number"]
 
 
 # --------------------------------------------------------------------------- #
@@ -491,22 +532,58 @@ def test_step_10_fusion_is_transparent_and_recomputable(workflow):
 
     for verdict in body["items"]:
         assert verdict["verdict"] in {"AUTHENTIC", "MANIPULATED", "INSUFFICIENT_EVIDENCE"}
+        # The authoritative object, and the one the state is read from. The legacy
+        # token above is a projection of it.
+        assessed = verdict["assessment"]
+        assert assessed["state"] in {
+            "INDICATORS_DETECTED",
+            "NO_INDICATORS_DETECTED",
+            "INCONCLUSIVE",
+            "NOT_ASSESSED",
+        }
+        assert assessed["policy_id"] and assessed["policy_version"]
+        assert assessed["scope"]
+
         included = [s for s in verdict["signals"] if s["included"]]
         excluded = [s for s in verdict["signals"] if not s["included"]]
 
         for signal in excluded:
             # Excluded signals are excluded from the arithmetic entirely -- no
             # zero-filling, which would read as "no evidence of manipulation".
-            assert signal["score"] is None
+            #
+            # But excluded covers two different facts, and they are checked
+            # separately: a signal that produced no measurement has a null score,
+            # while a descriptive observation keeps the real number it measured
+            # and simply is not eligible to move the state. Requiring a null score
+            # for both forced an observation to be rendered as a failure.
             assert signal["contribution"] is None
             assert signal["effective_weight"] == 0.0
-            assert signal["status"] in {"UNAVAILABLE", "INCONCLUSIVE", "UNSUPPORTED"}
+            if signal["measured"]:
+                assert signal["status"] == "OK"
+                assert isinstance(signal["score"], float)
+                assert signal["assessment_role"] == "DESCRIPTIVE"
+            else:
+                assert signal["score"] is None
+                assert signal["status"] in {
+                    "UNAVAILABLE",
+                    "INCONCLUSIVE",
+                    "UNSUPPORTED",
+                    "ERROR",
+                }
         assert {s["signal_id"] for s in excluded} == {
             e["signal_id"] for e in verdict["excluded_signals"]
         }
 
+        # Everything that contributed was eligible to. Descriptive observations
+        # cannot appear here however high they scored.
+        for signal in included:
+            assert signal["measured"] is True
+            assert signal["assessment_role"] == "DECISIVE"
+
         if not included:
             assert verdict["manipulation_score"] is None
+            assert assessed["score"] is None
+            assert assessed["state"] in {"NOT_ASSESSED", "INCONCLUSIVE"}
             continue
 
         # Renormalisation over coverage: the weights that were used sum to 1, and
@@ -515,12 +592,16 @@ def test_step_10_fusion_is_transparent_and_recomputable(workflow):
         assert sum(s["contribution"] for s in included) == pytest.approx(
             verdict["manipulation_score"], abs=1e-6
         )
+        # The projected score IS the assessed score -- one number, not two.
+        assert verdict["manipulation_score"] == pytest.approx(
+            assessed["score"], abs=1e-9
+        )
         assert verdict["signals_available"] == len(included)
         assert verdict["signals_total"] == len(verdict["signals"])
         assert verdict["arithmetic"]
         assert verdict["rationale"]
         assert verdict["signal_coverage"] == pytest.approx(
-            verdict["available_weight"] / verdict["declared_weight_total"], abs=1e-6
+            verdict["measured_weight"] / verdict["declared_weight_total"], abs=1e-6
         )
 
 

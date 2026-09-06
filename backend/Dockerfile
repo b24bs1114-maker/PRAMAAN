@@ -21,11 +21,10 @@ ARG PIP_EXTRA_ARGS=""
 # to pull from a mirror or a signed URL instead.
 ARG PRAMAAN_WEIGHTS_RELEASE_REPO=""
 ARG PRAMAAN_WEIGHTS_RELEASE_TAG=""
-# Which checkpoints to provision. "video" is not a valid choice to add: no video
-# checkpoint is published, so it would fetch nothing (see the manifest). Add
-# ",audio" only when the instance has >= 2 GB of RAM -- that model peaks at
-# ~1.67 GB resident, and an image that ships it to a 512 MB instance produces an
-# OOM kill mid-request instead of a forensic result.
+# Which checkpoints to provision. Add ",audio" or ",video" as the instance
+# allows: audio (AASIST) peaks at ~25 MB resident, video (VideoMAE) at ~450 MB
+# (both measured and recorded in model_manifest.json); the image ViT-S peaks
+# around 220 MB. A 512 MB instance should stay with "image" only.
 ARG PRAMAAN_WEIGHTS_MODALITIES="image"
 ARG PRAMAAN_IMAGE_WEIGHTS_URL=""
 ARG PRAMAAN_VIDEO_WEIGHTS_URL=""
@@ -55,7 +54,7 @@ RUN python -m pip install --no-cache-dir ${PIP_EXTRA_ARGS} -e ./pramaan-detector
 #    /app/pramaan-detector/weights/. download_weights.py rejects any file whose
 #    SHA-256 does not match the manifest, so a truncated or wrong-revision
 #    checkpoint fails the build instead of shipping.
-COPY scripts/download_weights.py scripts/verify_model_assets.py scripts/convert_detector_weights.py ./scripts/
+COPY scripts/download_weights.py scripts/verify_model_assets.py ./scripts/
 RUN set -eu; \
     export PRAMAAN_WEIGHTS_RELEASE_REPO="${PRAMAAN_WEIGHTS_RELEASE_REPO}" \
            PRAMAAN_WEIGHTS_RELEASE_TAG="${PRAMAAN_WEIGHTS_RELEASE_TAG}" \
@@ -65,7 +64,6 @@ RUN set -eu; \
            PRAMAAN_AUDIO_WEIGHTS_URL="${PRAMAAN_AUDIO_WEIGHTS_URL}" \
            PRAMAAN_FAIL_ON_MISSING_WEIGHTS="${PRAMAAN_FAIL_ON_MISSING_WEIGHTS}"; \
     python scripts/download_weights.py; \
-    if [ "${PRAMAAN_CONVERT_SAFETENSORS}" = "1" ]; then python scripts/convert_detector_weights.py; fi; \
     if [ "${PRAMAAN_FAIL_ON_MISSING_WEIGHTS}" = "1" ]; then \
         python scripts/verify_model_assets.py --no-load; \
     else \
@@ -84,21 +82,10 @@ RUN set -eu; \
 ENV TORCH_HOME=/app/.torch \
     HF_HOME=/app/.hf
 
-# 3c. When the audio checkpoint was provisioned, cache its *architecture config*
-#     (config.json only -- never weights; the tensors come from the verified
-#     checkpoint on disk). The runtime sets PRAMAAN_DETECTOR_OFFLINE=true, so
-#     transformers may not reach the hub: without this cached config the audio
-#     model cannot be constructed at all, and audio would report
-#     INSUFFICIENT_EVIDENCE on every request in an image that shipped a 1.26 GB
-#     checkpoint. Skipped when audio was not provisioned, so no build needs egress
-#     it does not use.
-RUN set -eu; \
-    case ",${PRAMAAN_WEIGHTS_MODALITIES}," in \
-      *,audio,*) python -c "from transformers import AutoConfig; \
-c=AutoConfig.from_pretrained('garystafford/wav2vec2-deepfake-voice-detector'); \
-print('cached audio architecture config:', c.architectures, c.id2label)" ;; \
-      *) echo '[NOTE] audio not provisioned; architecture config not cached' ;; \
-    esac
+# (The current detectors need no hub-fetched architecture configs: the image
+# ViT is constructed via timm by name, and the audio AASIST and video VideoMAE
+# models ship their configs in pramaan-detector/weights/. PRAMAAN_DETECTOR_OFFLINE
+# is true at runtime, and nothing in the image needs egress to the hub.)
 
 # 4. Copy production backend application code (no test files or frontend)
 COPY backend/app ./backend/app
@@ -119,27 +106,20 @@ ENV PRAMAAN_DATA_DIR=/data \
     PRAMAAN_DEBUG=false \
     PRAMAAN_LOG_LEVEL=INFO \
     PRAMAAN_WEIGHTS_DIR=/app/pramaan-detector/weights \
-    PRAMAAN_IMAGE_MODEL_PATH=/app/pramaan-detector/weights/image_detector.pt \
-    PRAMAAN_AUDIO_MODEL_PATH=/app/pramaan-detector/weights/audio_detector.pt \
-    PRAMAAN_IMAGE_MODEL_HF_DIR=/app/pramaan-detector/weights/image_detector_hf \
+    PRAMAAN_IMAGE_MODEL_PATH=/app/pramaan-detector/weights/image_detector.safetensors \
+    PRAMAAN_AUDIO_MODEL_PATH=/app/pramaan-detector/weights/audio_detector.pth \
+    PRAMAAN_VIDEO_MODEL_PATH=/app/pramaan-detector/weights/video_detector.safetensors \
     PRAMAAN_DETECTOR_OFFLINE=true \
     PRAMAAN_IMAGE_DETECTOR_ENTRYPOINT=pramaan.detectors.image_detector:detect_image \
     PRAMAAN_VIDEO_DETECTOR_ENTRYPOINT=pramaan.detectors.video_detector:detect_video \
     PRAMAAN_AUDIO_DETECTOR_ENTRYPOINT=pramaan.detectors.audio_detector:detect_audio \
     PYTHONPATH=/app/backend
 
-# PRAMAAN_VIDEO_MODEL_PATH is deliberately NOT set. No video checkpoint is
-# published, and pointing this at image_detector.pt (as this file used to) loads
-# nothing -- Swin-B parameters do not fit the EfficientNet-B0 frame model -- while
-# making /api/detector/status advertise a video deepfake detector that abstains on
-# every request. Left unset, video reports INSUFFICIENT_EVIDENCE and names no
-# model. The video *entrypoint* above stays set because that module is installed
-# and states its own unavailability.
-#
-# PRAMAAN_AUDIO_MODEL_PATH above is only satisfied when the build provisioned the
-# audio checkpoint (PRAMAAN_WEIGHTS_MODALITIES includes "audio"). Otherwise the
-# file is absent and audio reports INSUFFICIENT_EVIDENCE, which is the correct
-# state for an instance that cannot hold a 1.67 GB model.
+# Each PRAMAAN_*_MODEL_PATH above is only satisfied when the build provisioned
+# that modality (PRAMAAN_WEIGHTS_MODALITIES includes it). Otherwise the file is
+# absent and that modality reports INSUFFICIENT_EVIDENCE with no model named --
+# the honest state. Sizes are recorded in model_manifest.json: image ViT-S 87 MB,
+# audio AASIST ~1.3 MB, video VideoMAE ~345 MB.
 
 VOLUME ["/data", "/reports"]
 

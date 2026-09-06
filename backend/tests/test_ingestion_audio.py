@@ -138,7 +138,7 @@ def test_disallowed_audio_extension_is_refused(client: TestClient, settings) -> 
 # What the pipeline can and cannot say about audio
 # --------------------------------------------------------------------------- #
 def test_audio_analysis_abstains_rather_than_scoring(client: TestClient) -> None:
-    """No audio model and no audio metadata reader in this build, and it says so."""
+    """No audio model in this build, and it says so over the applicable set."""
     case_id = _upload(client, wav_bytes(seed=10), "verdict.wav").json()["case"][
         "case_id"
     ]
@@ -151,10 +151,14 @@ def test_audio_analysis_abstains_rather_than_scoring(client: TestClient) -> None
     assert verdict["verdict"] == "INSUFFICIENT_EVIDENCE"
     assert verdict["manipulation_score"] is None
     statuses = {s["signal_id"]: s["status"] for s in verdict["signals"]}
-    # The detector interface covers audio, so the reason is "not installed"...
-    assert statuses["ai_detection"] == "UNAVAILABLE"
-    # ...while compression forensics genuinely does not apply to a sound file.
-    assert statuses["compression_forensics"] == "UNSUPPORTED_MEDIA"
+    # Media-aware applicability: for audio only the AI detector applies. The
+    # detector interface covers audio, so the reason is "not installed"...
+    assert statuses == {"ai_detection": "UNAVAILABLE"}
+    # ...while perceptual matching, compression forensics and metadata are
+    # image/container techniques that are NOT APPLICABLE to a sound file: they
+    # are absent from the signal list entirely (hidden, not failed) and absent
+    # from the coverage denominator.
+    assert verdict["signals_total"] == 1
     for signal in verdict["signals"]:
         assert signal["score"] is None
         assert signal["contribution"] is None

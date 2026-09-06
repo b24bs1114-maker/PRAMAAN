@@ -8,13 +8,57 @@ examples, and they must stay additive.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApiModel(BaseModel):
     model_config = ConfigDict(extra="allow")
+
+
+# --------------------------------------------------------------------------- #
+# Authentication
+# --------------------------------------------------------------------------- #
+class LoginRequest(BaseModel):
+    """Credentials posted to ``POST /api/auth/login``.
+
+    ``extra="forbid"`` (the BaseModel default here is strict) keeps the login
+    surface exactly two fields, so a typo'd field name fails loudly instead of
+    being silently ignored.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=512)
+
+
+class UserOut(ApiModel):
+    """Public projection of an operator. Never carries the password hash."""
+
+    user_id: str
+    username: str
+    display_name: str
+    role: str
+    last_login_at: str | None = None
+    #: True only when this identity came from the local development auth bypass
+    #: rather than from a real login. The UI shows it so nobody mistakes a bypass
+    #: session for an authenticated examiner; it is False for every real operator.
+    dev_bypass: bool = False
+
+
+class LoginResponse(ApiModel):
+    """Result of a successful login: the bearer token and who it belongs to.
+
+    ``token`` is shown exactly once, here -- the server stores only its hash. The
+    client sends it back as ``Authorization: Bearer <token>``.
+    """
+
+    token: str
+    token_type: str = "bearer"
+    expires_at: str
+    user: UserOut
 
 
 # --------------------------------------------------------------------------- #
@@ -33,6 +77,14 @@ class CaseOut(ApiModel):
     created_at: str | None = None
     updated_at: str | None = None
     evidence_count: int | None = None
+    report_count: int | None = Field(
+        default=None,
+        description=(
+            "Forensic reports on record for this case. None means this endpoint "
+            "did not count them -- not that there are none. Zero means counted "
+            "and none exist."
+        ),
+    )
 
 
 class EvidenceOut(ApiModel):
@@ -59,6 +111,7 @@ class EvidenceOut(ApiModel):
     transformation: str | None = None
     is_synthetic: bool = False
     indexed: bool = False
+    acquisition_context: str | None = None
 
 
 class UploadResponse(ApiModel):
@@ -300,6 +353,15 @@ class PropagationResponse(ApiModel):
     truncated: bool = False
     notes: list[str] = []
     caveats: list[str] = []
+    # COMPUTED | STORED | NOT_RUN -- whether the near-duplicate retrieval this
+    # reconstruction rests on ran now, ran earlier, or has never run. An empty
+    # graph looks the same in all three cases and means something different in
+    # each, so the distinction is carried explicitly rather than inferred from
+    # `matched_candidate_count == 0`.
+    trace_status: str = "STORED"
+    trace_status_meaning: str = ""
+    # Whether this call appended to the audit chain. False for a plain read.
+    recorded: bool = True
 
 
 # --------------------------------------------------------------------------- #
@@ -352,8 +414,22 @@ class DetectorStatusResponse(ApiModel):
 
 
 class DetectorResultResponse(ApiModel):
+    """One detector's model result. Concept A -- not an assessment.
+
+    ``label`` names the QUANTITY the detector measured
+    (``ai_manipulation_likelihood``), not a finding about the media. It used to
+    default to ``"INSUFFICIENT_EVIDENCE"``, which put a verdict token in a field
+    that never carries verdicts and invited a client to read a raw model output
+    as a conclusion. A detector reports a number and whether it abstained; only
+    ``AssessmentOut`` is entitled to a state.
+
+    ``abstained=True`` with a null ``manipulation_score`` is the honest
+    unavailable/declined result. It is not a score of zero and not a finding of
+    authenticity.
+    """
+
     media_type: str = "image"
-    label: str = "INSUFFICIENT_EVIDENCE"
+    label: str = "ai_manipulation_likelihood"
     manipulation_score: float | None = None
     confidence: float | None = None
     abstained: bool = True
@@ -376,6 +452,15 @@ class DetectionResponse(ApiModel):
 
 
 class SignalOut(ApiModel):
+    """One signal's measurement and its role in the assessment.
+
+    ``measured`` and ``included`` are independent and both matter: a descriptive
+    forensic observation is ``measured=True, included=False`` and keeps its real
+    score while contributing nothing to the finding. A check that could not run
+    is ``measured=False`` with a null score. Rendering the two the same way is
+    what made an observation look like a failure and a failure look like a zero.
+    """
+
     signal_id: str
     name: str
     score: float | None
@@ -385,15 +470,170 @@ class SignalOut(ApiModel):
     status: str
     explanation: str
     included: bool = False
+    measured: bool = False
+    assessment_role: str = "DESCRIPTIVE"
+    assessment_role_note: str = ""
     evidence_basis: dict[str, Any] | None = None
 
 
+class ApplicableSignalOut(ApiModel):
+    """One signal that applies to a media type, as fusion defines applicability."""
+
+    signal_id: str
+    name: str
+
+
+class SignalApplicabilityResponse(ApiModel):
+    """The applicable forensic signal set per media type, from fusion truth.
+
+    The single source the UI renders its signal matrix from: a signal absent
+    from a media type's list is NOT APPLICABLE and must be hidden, not rendered
+    as a failed or zero row, and must not enter any coverage denominator.
+    """
+
+    signal_names: dict[str, str] = {}
+    applicability: dict[str, list[ApplicableSignalOut]] = {}
+    note: str
+    declared_weights: dict[str, float] = {}
+
+
+class ContributingCheckOut(ApiModel):
+    """One eligible check that contributed to the assessment state."""
+
+    check_id: str
+    name: str
+    score: float
+    declared_weight: float
+    effective_weight: float | None = None
+    contribution: float | None = None
+    execution_status: str
+    check_state: str
+    reason_code: str
+    basis: dict[str, Any] = {}
+
+
+class UnavailableCheckOut(ApiModel):
+    """One eligible check that did NOT contribute, and why.
+
+    ``execution_status`` keeps the kinds of absence apart -- ``ABSTAINED`` is a
+    check that ran and declined, ``UNAVAILABLE`` one that could not run,
+    ``FAILED`` one that broke, ``NOT_APPLICABLE`` one that never applied. None of
+    them is a measurement and none is a vote in either direction.
+    """
+
+    check_id: str
+    name: str
+    declared_weight: float
+    execution_status: str
+    reason_code: str | None = None
+    detail: str = ""
+
+
+class DescriptiveObservationOut(ApiModel):
+    """A forensic observation reported for examiner review.
+
+    Real and often important -- a generative software tag, a near-duplicate
+    match, a quantisation anomaly, a broken C2PA signature. It did not move the
+    assessment state and must not be rendered as though it had.
+    """
+
+    observation_id: str
+    name: str
+    score: float | None = None
+    role: str = "DESCRIPTIVE"
+    execution_status: str = "COMPLETED"
+    detail: str = ""
+
+
+class AssessmentOut(ApiModel):
+    """The authoritative evidence assessment. The only entitled finding.
+
+    This is the single source of truth for what PRAMAAN claims about one item.
+    The frontend and the PDF render this object; neither may re-derive a state
+    from scores and thresholds of its own.
+
+    Read ``state`` (not ``verdict``) to branch, and ``reason_codes`` (not
+    ``rationale``) to explain. The four states are task-qualified:
+    ``INDICATORS_DETECTED``, ``NO_INDICATORS_DETECTED``, ``INCONCLUSIVE``,
+    ``NOT_ASSESSED`` -- deliberately not AUTHENTIC/FAKE, which no check in this
+    system is entitled to assert.
+
+    Three distinctions the response keeps and consumers must preserve:
+
+    - ``state`` vs ``execution_status``: an examination can complete cleanly and
+      still be ``NOT_ASSESSED``. ``conclusive`` says whether a finding was
+      reached; ``execution_status`` says whether processing finished.
+    - ``NOT_ASSESSED`` vs ``INCONCLUSIVE``: nothing eligible ran, versus
+      something ran and could not decide.
+    - ``contributing_checks`` vs ``descriptive_observations``: what decided the
+      state, versus what is reported alongside it.
+
+    ``scope`` names the task the state applies to, per modality. ``policy_id``
+    and ``policy_version`` identify the rules that produced it, so a stored
+    assessment is not re-read under rules that did not decide it.
+    """
+
+    policy_id: str
+    policy_version: str
+    policy_note: str = ""
+    scope: str
+    scope_note: str = ""
+    media_type: str = "image"
+    state: str
+    state_note: str = ""
+    conclusive: bool = False
+    execution_status: str
+    execution_note: str = ""
+    reason_codes: list[str] = []
+    reason_notes: dict[str, str] = {}
+    score: float | None = None
+    score_semantics: str = ""
+    arithmetic: str | None = None
+    thresholds: dict[str, float] = {}
+    eligible_checks: list[str] = []
+    eligible_declared_weight: float = 0.0
+    contributed_weight: float = 0.0
+    coverage: float = 0.0
+    coverage_basis: str = ""
+    contributing_checks: list[ContributingCheckOut] = []
+    unavailable_checks: list[UnavailableCheckOut] = []
+    descriptive_observations: list[DescriptiveObservationOut] = []
+    # Concept D: a human judgement. No workflow in this build records one, so it
+    # is null and never filled in from the automated assessment.
+    examiner_conclusion: dict[str, Any] | None = None
+    examiner_conclusion_note: str = ""
+    limitations: list[str] = []
+
+
 class VerdictOut(ApiModel):
-    """One fused verdict for one evidence item, with the full signal breakdown."""
+    """One assessed evidence item, with the full signal breakdown.
+
+    ``assessment`` is the authoritative object -- read it. The top-level
+    ``verdict`` / ``manipulation_score`` / ``confidence`` / ``rationale`` fields
+    are a backward-compatible PROJECTION of it, retained for existing clients,
+    stored rows, dashboard counters and alert rules. They are lossy: both
+    ``NOT_ASSESSED`` and ``INCONCLUSIVE`` project onto ``INSUFFICIENT_EVIDENCE``,
+    so anything that must tell those apart reads ``assessment.state``.
+
+    Two coverage numbers, with different meanings:
+
+    - ``signal_coverage`` -- share of applicable declared weight that produced
+      any measurement. Observational completeness of the examination.
+    - ``assessment.coverage`` -- share of the ELIGIBLE checks' declared weight
+      that contributed to the finding. This is what gates the assessment.
+
+    Media-aware counts: ``signals_total`` is the number of signals APPLICABLE to
+    this item's media type; ``signals_measured`` those that produced a number;
+    ``signals_available`` those eligible ones behind the assessment score;
+    ``signals_evaluated`` those that ran (whether or not they could decide).
+    Inapplicable signals appear in none of them -- not applicable is not failed
+    and not zero.
+    """
 
     evidence_id: str
     filename: str | None = None
     sha256: str | None = None
+    assessment: AssessmentOut | None = None
     verdict: str
     manipulation_score: float | None
     confidence: str
@@ -401,9 +641,13 @@ class VerdictOut(ApiModel):
     fusion_version: str
     signals: list[SignalOut] = []
     signals_available: int
+    signals_measured: int = 0
     signals_total: int
+    signals_evaluated: int = 0
+    applicable_signals: list[ApplicableSignalOut] = []
     declared_weights: dict[str, float] = {}
     signal_coverage: float
+    measured_weight: float = 0.0
     primary_signal_available: bool = False
     thresholds: dict[str, float] = {}
     excluded_signals: list[dict[str, Any]] = []
@@ -722,6 +966,12 @@ class SystemStatusResponse(ApiModel):
     counts: dict[str, int] = {}
     capabilities: dict[str, Any] = {}
     detector_contract: dict[str, Any] = {}
+    #: The decision policy: which checks are entitled to determine a state, what
+    #: the states and reason codes mean, and the policy's identity and version.
+    #: Published so a client can render backend truth without hardcoding a copy
+    #: of the vocabulary, and so an examiner can see the rules that decided a
+    #: finding rather than inferring them from the finding.
+    assessment: dict[str, Any] = {}
     fusion: dict[str, Any] = {}
     ingestion: dict[str, Any] = {}
     audit: dict[str, Any] = {}
@@ -730,11 +980,75 @@ class SystemStatusResponse(ApiModel):
     notes: list[str] = []
 
 
+# --------------------------------------------------------------------------- #
+# Public Web Discovery (Google Cloud Vision API Web Detection)
+# --------------------------------------------------------------------------- #
+class WebOccurrenceOut(ApiModel):
+    occurrence_id: str
+    url: str
+    domain: str
+    page_title: str | None = None
+    match_type: Literal["EXACT_MATCH", "NEAR_DUPLICATE", "VISUALLY_SIMILAR", "PAGE_ONLY"]
+    raw_google_category: str
+    similarity: float | None = None
+    perceptual_distance: int | None = None
+    dinov2_similarity: float | None = None
+    match_basis: str
+    published_at: str | None = None
+    discovered_at: str
+    verified: bool = False
+    verification_error: str | None = None
+
+
+class WebEntityOut(ApiModel):
+    entity_id: str | None = None
+    description: str
+    score: float | None = None
+
+
+class WebTimelineNodeOut(ApiModel):
+    node_id: str
+    url: str
+    domain: str
+    label: str
+    timestamp: str
+    timestamp_type: Literal["published", "discovered"]
+    match_type: str
+    similarity: float | None = None
+    is_earliest: bool = False
+
+
+class WebDiscoverySummaryOut(ApiModel):
+    total_occurrences: int = 0
+    pages_count: int = 0
+    full_matches_count: int = 0
+    partial_matches_count: int = 0
+    visually_similar_count: int = 0
+    verified_matches_count: int = 0
+
+
+class WebDiscoveryResponse(ApiModel):
+    case_id: str
+    evidence_id: str | None = None
+    available: bool
+    status: Literal["SUCCESS", "PUBLIC_WEB_DISCOVERY_UNAVAILABLE", "NO_RESULTS", "ERROR"]
+    earliest_discovered_occurrence: WebOccurrenceOut | None = None
+    occurrences: list[WebOccurrenceOut] = []
+    web_entities: list[WebEntityOut] = []
+    best_guess_labels: list[str] = []
+    timeline: list[WebTimelineNodeOut] = []
+    summary: WebDiscoverySummaryOut
+    source_image_url: str | None = None
+    caveats: list[str] = []
+    unavailable_reason: str | None = None
+
+
 __all__ = [
     "AlertOut",
     "AlertsResponse",
     "AnalysisResponse",
     "ApiModel",
+    "ApplicableSignalOut",
     "AuditTrailGlobalResponse",
     "AuditTrailResponse",
     "AuditVerifyResponse",
@@ -763,11 +1077,19 @@ __all__ = [
     "ReportLibraryResponse",
     "ReportListResponse",
     "ReportResponse",
+    "SignalApplicabilityResponse",
     "SignalOut",
     "StoredMatchesResponse",
     "StoredVerdictResponse",
     "SystemStatusResponse",
     "UploadResponse",
+    "UserOut",
     "VerdictOut",
     "VerdictResponse",
+    "WebDiscoveryResponse",
+    "WebDiscoverySummaryOut",
+    "WebEntityOut",
+    "WebOccurrenceOut",
+    "WebTimelineNodeOut",
 ]
+

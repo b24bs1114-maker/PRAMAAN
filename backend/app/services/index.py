@@ -82,6 +82,9 @@ class PerceptualIndex:
         self._version = 0
         self._last_updated: str | None = None
         self._loaded = False
+        #: Identity of the files this in-memory copy was read from, so a change
+        #: made by another process can be noticed. See ``refresh_if_stale``.
+        self._stamp: tuple[int, int, int, int] | None = None
 
     # ---------------------------------------------------------------- state --
     @property
@@ -126,43 +129,79 @@ class PerceptualIndex:
         if not self._loaded:
             self.load()
 
+    def _disk_stamp(self) -> tuple[int, int, int, int] | None:
+        """Identity of the two persisted files: ``(mtime_ns, size)`` of each.
+
+        ``None`` means at least one file is absent -- a state in its own right
+        ("nothing persisted yet") that compares unequal to any present one.
+        """
+        try:
+            vectors = self.vectors_path.stat()
+            sidecar = self.sidecar_path.stat()
+        except OSError:
+            return None
+        return (
+            vectors.st_mtime_ns,
+            vectors.st_size,
+            sidecar.st_mtime_ns,
+            sidecar.st_size,
+        )
+
+    def _read_persisted(self) -> tuple[list[str], np.ndarray, int, str | None] | None:
+        """Parse the persisted index, or ``None`` if absent/unreadable/invalid.
+
+        Nothing here mutates the live index, so the caller decides whether a
+        failure should empty it (first load) or leave the working in-memory copy
+        standing (reload).
+        """
+        if not (self.vectors_path.is_file() and self.sidecar_path.is_file()):
+            return None
+        try:
+            vectors = np.load(self.vectors_path)
+            meta = json.loads(self.sidecar_path.read_text(encoding="utf-8"))
+            ids = list(meta.get("ids", []))
+            if vectors.ndim != 2 or vectors.shape[1] != VECTOR_BYTES:
+                raise ValueError(f"unexpected vector shape {vectors.shape}")
+            if len(ids) != vectors.shape[0]:
+                raise ValueError(
+                    f"sidecar has {len(ids)} ids for {vectors.shape[0]} vectors"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Could not read perceptual index (%s: %s). "
+                "Rebuild with POST /api/index/rebuild.",
+                exc.__class__.__name__,
+                exc,
+            )
+            return None
+        return (
+            ids,
+            np.ascontiguousarray(vectors, dtype=np.uint8),
+            int(meta.get("index_version", 0)),
+            meta.get("last_updated"),
+        )
+
     def load(self) -> None:
         """Read the persisted index from disk, tolerating a missing/bad file."""
         with self._lock:
             self._loaded = True
-            if not (self.vectors_path.is_file() and self.sidecar_path.is_file()):
-                self._ids = []
-                self._vectors = np.zeros((0, VECTOR_BYTES), dtype=np.uint8)
-                self._faiss_index = None
-                return
-            try:
-                vectors = np.load(self.vectors_path)
-                meta = json.loads(self.sidecar_path.read_text(encoding="utf-8"))
-                ids = list(meta.get("ids", []))
-                if vectors.ndim != 2 or vectors.shape[1] != VECTOR_BYTES:
-                    raise ValueError(f"unexpected vector shape {vectors.shape}")
-                if len(ids) != vectors.shape[0]:
-                    raise ValueError(
-                        f"sidecar has {len(ids)} ids for {vectors.shape[0]} vectors"
-                    )
-            except Exception as exc:  # noqa: BLE001
-                # A corrupt index must not take the service down: start empty and
-                # say so. POST /api/index/rebuild restores it from the database.
-                logger.error(
-                    "Could not load perceptual index (%s: %s); starting empty. "
-                    "Rebuild with POST /api/index/rebuild.",
-                    exc.__class__.__name__,
-                    exc,
-                )
+            # Stamp before reading: if the files change mid-read the stamp kept
+            # is the older one, so the next staleness check reloads rather than
+            # trusting a torn read.
+            stamp = self._disk_stamp()
+            parsed = self._read_persisted()
+            self._stamp = stamp
+            if parsed is None:
+                # A corrupt or absent index must not take the service down: start
+                # empty and say so. POST /api/index/rebuild restores it from the
+                # database, and retrieval reports an empty index rather than
+                # inventing candidates.
                 self._ids = []
                 self._vectors = np.zeros((0, VECTOR_BYTES), dtype=np.uint8)
                 self._faiss_index = None
                 return
 
-            self._ids = ids
-            self._vectors = np.ascontiguousarray(vectors, dtype=np.uint8)
-            self._version = int(meta.get("index_version", 0))
-            self._last_updated = meta.get("last_updated")
+            self._ids, self._vectors, self._version, self._last_updated = parsed
             self._rebuild_faiss()
             logger.info(
                 "Loaded perceptual index: %d vectors, version %d, backend %s",
@@ -170,6 +209,55 @@ class PerceptualIndex:
                 self._version,
                 self.backend,
             )
+
+    def refresh_if_stale(self) -> bool:
+        """Reload if the files on disk changed since they were last read.
+
+        The index is a file-backed artefact that another process legitimately
+        rewrites -- ``scripts/build_index.py`` does, and so would a second worker
+        serving the same data directory -- while this process holds it in memory.
+        Without this check a long-lived server keeps answering from whatever was
+        on disk when it first touched the index, so a corpus indexed after
+        start-up reads back as empty and near-duplicate retrieval reports "no
+        candidates" for evidence it can in fact match. That is a silently wrong
+        forensic result, which is worse than a slow one.
+
+        Costs two ``stat`` calls when nothing changed. Returns True if the
+        in-memory index was replaced.
+        """
+        with self._lock:
+            if not self._loaded:
+                self.load()
+                return True
+            stamp = self._disk_stamp()
+            if stamp == self._stamp:
+                return False
+
+            parsed = self._read_persisted()
+            # Record the stamp either way, so an unreadable index is retried when
+            # its bytes change again rather than on every subsequent query.
+            self._stamp = stamp
+            if parsed is None:
+                # Unlike a first load, a failed *reload* keeps what is already in
+                # memory: discarding a working index because the file it came
+                # from was removed or half-written would turn a recoverable
+                # condition into an empty-index forensic answer.
+                logger.warning(
+                    "Perceptual index at %s changed but could not be read; "
+                    "keeping the %d vector(s) already in memory.",
+                    self.dir,
+                    self.count,
+                )
+                return False
+
+            self._ids, self._vectors, self._version, self._last_updated = parsed
+            self._rebuild_faiss()
+            logger.info(
+                "Reloaded perceptual index from disk: %d vectors, version %d",
+                self.count,
+                self._version,
+            )
+            return True
 
     def save(self) -> None:
         with self._lock:
@@ -200,6 +288,10 @@ class PerceptualIndex:
             )
             tmp_vectors.replace(self.vectors_path)
             tmp_sidecar.replace(self.sidecar_path)
+            # This process is now the last writer, so adopt the stamp of what it
+            # just wrote: otherwise the next staleness check would re-read files
+            # whose contents are already in memory.
+            self._stamp = self._disk_stamp()
 
     def _rebuild_faiss(self) -> None:
         if not FAISS_AVAILABLE:
@@ -373,13 +465,21 @@ _instance_lock = threading.Lock()
 
 
 def get_index(settings: Settings) -> PerceptualIndex:
-    """Return the shared index, rebuilt if the configured directory changed."""
+    """Return the shared index, reloading it if the files on disk have changed.
+
+    Freshness has to be re-checked on every hand-out, not once at construction:
+    the instance is process-wide and long-lived, while the files behind it are
+    rewritten by ``scripts/build_index.py``, by ``POST /api/index/rebuild`` in
+    another worker, and by any second process sharing the data directory.
+    """
     global _instance, _instance_dir
     with _instance_lock:
         if _instance is None or _instance_dir != settings.index_dir:
             _instance = PerceptualIndex(settings)
             _instance_dir = settings.index_dir
             _instance.load()
+        else:
+            _instance.refresh_if_stale()
         return _instance
 
 

@@ -34,7 +34,7 @@ from app.services.hashing import (
     similarity_from_distance,
 )
 from app.services.index import get_index
-from app.services.storage import StorageError, absolute_path
+from app.services.storage import absolute_path
 from app.utils.timeutil import iso
 
 logger = logging.getLogger("pramaan.matching")

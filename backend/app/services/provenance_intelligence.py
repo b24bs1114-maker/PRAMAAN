@@ -22,41 +22,21 @@ FORENSIC INTEGRITY GUARANTEES:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
-from app.config import Settings
 from app.models import Evidence
-from app.services.hashing import (
-    PERCEPTUAL_ALGORITHM,
-    hamming_distance,
-    similarity_from_distance,
-)
-from app.utils.timeutil import iso
+from app.services.hashing import similarity_from_distance
 
 logger = logging.getLogger("pramaan.provenance_intelligence")
 
-METHOD = "SImProv-multi-hash-retrieval + transformation-aware-ranking + graph-reconstruction"
-
-ORIGIN_LABEL = "earliest known instance in the indexed evidence corpus"
-
-INTERPRETATION = (
-    "This analysis reconstructs the provenance and propagation of content within "
-    "the LOCAL INDEXED EVIDENCE CORPUS using SImProv-inspired multi-signal retrieval "
-    "and transformation awareness. The root reported is the EARLIEST KNOWN INSTANCE "
-    "IN THE INDEXED EVIDENCE CORPUS -- not an absolute real-world origin, first "
-    "publisher or creator. An earlier copy may exist outside the indexed corpus."
-)
-
+# Relationship tokens emitted by detect_transformation. The canonical copies of
+# the origin wording and the ranking/persistence pipeline live in propagation.py
+# and matching.py respectively; this module's dead duplicates of those were
+# removed after the audit found no caller for them.
 RELATION_EXACT = "exact_match"
 RELATION_NEAR_DUPLICATE = "near_duplicate"
 RELATION_TRANSFORMED = "transformed_variant"
 RELATION_RELATED = "related_candidate"
-RELATION_PARENT = "recorded_parent"
-
-BAND_EXACT = "exact_match"
-BAND_STRONG = "strong_candidate"
-BAND_POSSIBLE = "possible_candidate"
 
 
 def detect_transformation(
@@ -84,7 +64,7 @@ def detect_transformation(
             "confidence": 1.0,
             "details": "Bit-identical SHA-256 digest match.",
             "transformations_detected": [],
-            "dinov2_similarity": dinov2_similarity if dinov2_similarity is not None else 1.0,
+            "dinov2_similarity": dinov2_similarity,
         }
 
     transforms = []
@@ -164,142 +144,3 @@ def detect_transformation(
         "dinov2_similarity": dinov2_similarity,
         "transformations_detected": transforms,
     }
-
-
-def rank_provenance_candidates(
-    query_evidence: Evidence,
-    candidates: list[Evidence],
-    settings: Settings,
-    dinov2_similarities: dict[str, float] | None = None,
-) -> list[dict[str, Any]]:
-    """Rank retrieved candidates using multi-signal DINOv2 + multi-hash matching & transformation scoring."""
-    ranked = []
-
-    q_phash = query_evidence.phash
-    q_dhash = getattr(query_evidence, "dhash", None)
-    q_ahash = getattr(query_evidence, "ahash", None)
-
-    for rank, cand in enumerate(candidates, start=1):
-        p_dist = hamming_distance(q_phash, cand.phash) if q_phash and cand.phash else None
-        d_dist = hamming_distance(q_dhash, cand.dhash) if q_dhash and cand.dhash else None
-        a_dist = hamming_distance(q_ahash, cand.ahash) if q_ahash and cand.ahash else None
-
-        d_sim = dinov2_similarities.get(cand.id) if dinov2_similarities else None
-
-        primary_dist = p_dist if p_dist is not None else 64
-        sim = similarity_from_distance(primary_dist)
-        if d_sim is not None:
-            sim = max(sim, d_sim)
-
-        trans_info = detect_transformation(
-            query_evidence,
-            cand,
-            p_dist,
-            d_dist,
-            ahash_dist=a_dist,
-            dinov2_similarity=d_sim,
-        )
-
-        band = (
-            BAND_EXACT
-            if trans_info["relationship"] == RELATION_EXACT
-            else (
-                BAND_STRONG
-                if (primary_dist <= settings.strong_duplicate_max_distance or (d_sim is not None and d_sim >= 0.85))
-                else BAND_POSSIBLE
-            )
-        )
-
-        ranked.append({
-            "evidence_id": cand.id,
-            "rank": rank,
-            "distance": primary_dist,
-            "similarity": sim,
-            "phash_distance": p_dist,
-            "dhash_distance": d_dist,
-            "ahash_distance": a_dist,
-            "dinov2_similarity": d_sim,
-            "confidence_band": band,
-            "relationship": trans_info["relationship"],
-            "transformation": trans_info["type"],
-            "transformations_detected": trans_info["transformations_detected"],
-            "filename": cand.filename,
-            "sha256": cand.sha256,
-            "platform": cand.platform,
-            "observed_at": iso(cand.observed_at),
-            "ingested_at": iso(cand.ingested_at),
-            "timestamp": iso(cand.observed_at) or iso(cand.ingested_at),
-            "source_id": cand.source_id,
-            "parent_id": cand.parent_id,
-            "generation": cand.generation,
-            "role": cand.role,
-            "is_synthetic": cand.is_synthetic,
-        })
-
-    # Sort: Exact matches first, then lowest distance, then highest similarity, then earliest timestamp
-    def sort_key(item: dict[str, Any]) -> tuple[int, int, float, str]:
-        exact_rank = 0 if item["relationship"] == RELATION_EXACT else 1
-        sim_val = -(item.get("similarity") or 0.0)
-        return (exact_rank, item["distance"], sim_val, item["timestamp"] or "9999")
-
-    ranked.sort(key=sort_key)
-    for i, item in enumerate(ranked, start=1):
-        item["rank"] = i
-
-    return ranked
-
-
-def find_earliest_known_instance(
-    evidence_list: list[Evidence | dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Find the earliest known instance strictly WITHIN THE INDEXED EVIDENCE CORPUS."""
-    if not evidence_list:
-        return None
-
-    best_item = None
-    best_dt: datetime | None = None
-
-    for item in evidence_list:
-        if isinstance(item, dict):
-            obs_raw = item.get("observed_at") or item.get("timestamp")
-            ing_raw = item.get("ingested_at")
-            evidence_id = item.get("evidence_id") or item.get("id")
-            filename = item.get("filename")
-            sha256 = item.get("sha256")
-            platform = item.get("platform")
-        else:
-            obs_raw = iso(item.observed_at)
-            ing_raw = iso(item.ingested_at)
-            evidence_id = item.id
-            filename = item.filename
-            sha256 = item.sha256
-            platform = item.platform
-
-        ts_str = obs_raw or ing_raw
-        if not ts_str:
-            continue
-
-        try:
-            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-        except Exception:
-            dt = datetime.max
-
-        if best_dt is None or dt < best_dt:
-            best_dt = dt
-            best_item = {
-                "evidence_id": evidence_id,
-                "filename": filename,
-                "sha256": sha256,
-                "platform": platform,
-                "observed_at": obs_raw,
-                "ingested_at": ing_raw,
-                "timestamp": ts_str,
-                "provenance_claim": "EARLIEST KNOWN INSTANCE IN THE INDEXED EVIDENCE CORPUS",
-                "caveat": (
-                    "Identified as the earliest recorded occurrence within the local "
-                    "indexed evidence corpus. This is NOT a claim of absolute first upload, "
-                    "original creator, or global origin."
-                ),
-            }
-
-    return best_item

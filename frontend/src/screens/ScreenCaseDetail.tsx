@@ -21,15 +21,21 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import type { AuditEvent, CaseRecord, Evidence } from '../api/types'
+import type { AuditEvent, CaseRecord, Evidence, StoredReport } from '../api/types'
 import { ErrorBanner } from '../components/Banner'
 import { CaseDeleteDialog, DeleteCaseButton } from '../components/CaseDelete'
-import { Empty, Spinner } from '../components/Feedback'
+import { CaseEditDialog } from '../components/CaseEdit'
+import { caseWorkflowDone } from '../components/CaseWorkflowStepper'
+import { CopyButton } from '../components/CopyButton'
+import { NoCaseSelected, Spinner } from '../components/Feedback'
+import { EvidenceThumbnail } from '../components/EvidenceMedia'
 import { Icon } from '../components/Icon'
 import { Pill, type PillTone } from '../components/Pill'
-import { NOT_MEASURED, formatTimestampShort, orPlaceholder, shortHash } from '../lib/format'
+import { ReportFileActions } from '../components/ReportActions'
+import { NOT_MEASURED, formatBytes, formatTimestampShort, orPlaceholder, shortHash } from '../lib/format'
+import { isImageMedia } from '../lib/media'
 import type { RoutePath } from '../lib/router'
-import { verdictBandLabel } from '../lib/signals'
+import { verdictBandLabel, verdictPillTone } from '../lib/signals'
 import { useCaseDeletion } from '../state/useCaseDeletion'
 import { isReady, type Investigation } from '../state/useInvestigation'
 
@@ -56,11 +62,15 @@ export function ScreenCaseDetail({
   investigation: Investigation
   onNavigate: (path: RoutePath, params?: { caseId?: string; filter?: string }) => void
 }) {
-  const { caseRecord, evidence, runAnalysis, analysis, propagation, auditVerification } = investigation
+  const { caseRecord, evidence, runAnalysis, analysis, propagation, report, reset: resetInvestigation } = investigation
   const [activeCase, setActiveCase] = useState<CaseRecord | null>(caseRecord)
   const [caseEvidence, setCaseEvidence] = useState<Evidence[]>(evidence)
   const [loading, setLoading] = useState(!caseRecord && Boolean(caseId))
   const [error, setError] = useState<unknown>(null)
+
+  // Reports state. The download/open actions and their busy state belong to
+  // components/ReportActions, which is shared with the Reports screen.
+  const [reports, setReports] = useState<StoredReport[]>([])
   /**
    * Recorded custody events for the third column.
    *
@@ -71,6 +81,14 @@ export function ScreenCaseDetail({
   const [auditEvents, setAuditEvents] = useState<AuditEvent[] | null>(null)
   const [auditError, setAuditError] = useState<unknown>(null)
 
+  // The edit dialog. Opening it edits case fields in place via PATCH; it does
+  // not navigate away, so the dossier stays put and re-renders the saved record.
+  const [editing, setEditing] = useState(false)
+  // Bumped after a successful edit so the audit panel re-reads the chain -- a
+  // save appends a CASE_UPDATED entry, and the recorded-events count should show
+  // it without a full navigation away and back.
+  const [auditReloadKey, setAuditReloadKey] = useState(0)
+
   const currentCaseId = caseId || caseRecord?.case_id || null
 
   /*
@@ -80,7 +98,13 @@ export function ScreenCaseDetail({
    * the case's absence there is the confirmation -- not a message this screen
    * wrote on its way out.
    */
-  const deletion = useCaseDeletion(() => onNavigate('cases'))
+  const deletion = useCaseDeletion(() => {
+    // The dossier's case is gone from the backend. If it was also the case
+    // loaded in the shared store, clear the store so no screen can render its
+    // analysis or offer its reports from here on.
+    if (!caseId || caseRecord?.case_id === caseId) resetInvestigation()
+    onNavigate('cases')
+  })
 
   useEffect(() => {
     if (!currentCaseId) return
@@ -121,7 +145,21 @@ export function ScreenCaseDetail({
     return () => {
       active = false
     }
-  }, [currentCaseId])
+  }, [currentCaseId, auditReloadKey])
+
+  useEffect(() => {
+    if (!currentCaseId) return
+    let active = true
+    api
+      .listReports(currentCaseId)
+      .then((res) => {
+        if (active) setReports(res.reports)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [currentCaseId, report?.data])
 
   const c = activeCase
   /**
@@ -136,15 +174,6 @@ export function ScreenCaseDetail({
 
   const analysisData =
     isReady(analysis) && analysis.data.case.case_id === currentCaseId ? analysis.data : null
-  const isPropTraced = isReady(propagation) && (propagation.data.instance_count > 0 || propagation.data.matched_candidate_count > 0)
-  const isAuditVerified = isReady(auditVerification) && auditVerification.data.valid
-
-  // Media breakdown. Counts are counts -- a case with no video has no video, and
-  // the old `|| 1` reported one anyway on every single case.
-  const videoCount = caseEvidence.filter((e) => e.media_type.toLowerCase().includes('video')).length
-  const imageCount = caseEvidence.filter((e) => e.media_type.toLowerCase().includes('image')).length
-  const audioCount = caseEvidence.filter((e) => e.media_type.toLowerCase().includes('audio')).length
-  const otherCount = caseEvidence.length - videoCount - imageCount - audioCount
 
   /** Platforms actually recorded against this case's evidence rows. */
   const platforms = useMemo(
@@ -159,13 +188,23 @@ export function ScreenCaseDetail({
     [caseEvidence],
   )
 
-  // 6-step workflow states
-  const isCaseDone = true
-  const isEvidenceDone = caseEvidence.length > 0
-  const isAnalysisDone = Boolean(analysisData || c?.latest_verdict)
-  const isProvenanceDone = isPropTraced
-  const isAuditDone = isAuditVerified
-  const isReportDone = Boolean(c?.status?.includes('report'))
+  /*
+   * Workflow completion, as this screen needs it.
+   *
+   * Only the three states the dossier itself reads: they pick the NEXT STEP
+   * card's wording and the per-stage panels below. They come from
+   * `caseWorkflowDone` -- the same function the workflow row above this screen
+   * is drawn from -- because this screen used to keep its own copy of the rules,
+   * and the copy had already drifted. It ticked provenance from
+   * `instance_count > 0`, which counts the instances in the reconstructed
+   * timeline and therefore counts the case's own exhibits: a case with three
+   * exhibits and no trace ever run was told its next step was the audit, and the
+   * dossier and the stepper could disagree about the same case at the same time.
+   */
+  const workflowDone = caseWorkflowDone(investigation, currentCaseId)
+  const isAnalysisDone = workflowDone.analysis
+  const isProvenanceDone = workflowDone.provenance
+  const isAuditDone = workflowDone.audit
 
   const nextAction = useMemo(() => {
     if (caseEvidence.length === 0) {
@@ -195,27 +234,26 @@ export function ScreenCaseDetail({
     if (!isAuditDone) {
       return {
         text: 'Verify the custody hash chain before generating the formal report.',
-        btn: 'Verify Audit →',
+        // Named exactly as the control it sends the operator to, like the
+        // provenance step above it. "Verify Audit" matched no button on the
+        // audit screen, so the instruction and the destination disagreed.
+        btn: 'Verify Audit Chain →',
         action: () => onNavigate('audit', { caseId: currentCaseId! }),
       }
     }
     return {
       text: 'Generate the backend-rendered forensic examination report for this case.',
-      btn: 'Generate Report →',
+      btn: 'Generate Forensic Report →',
       action: () => onNavigate('reports', { caseId: currentCaseId! }),
     }
   }, [caseEvidence.length, isAnalysisDone, isProvenanceDone, isAuditDone, currentCaseId, onNavigate, runAnalysis])
 
   if (!currentCaseId) {
     return (
-      <div className="screen stack" style={{ gap: 'var(--space-4)' }}>
-        <Empty>No case selected. Open a case from the investigation list.</Empty>
-        <div className="btn-row">
-          <button type="button" className="btn btn--primary" onClick={() => onNavigate('cases')}>
-            View Cases
-          </button>
-        </div>
-      </div>
+      <NoCaseSelected
+        purpose="review its case file"
+        onViewCases={() => onNavigate('cases')}
+      />
     )
   }
 
@@ -250,10 +288,16 @@ export function ScreenCaseDetail({
         </button>
 
         <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+          {/* Opens the edit dialog in place. This used to route to Evidence
+              Intake, where the title and description are read-only -- so the
+              control named "Edit Case" could not edit the case, and it led to
+              the same screen the "+ Ingest Exhibit" button already covers. */}
           <button
             type="button"
             className="btn btn--ghost btn--sm"
-            onClick={() => onNavigate('intake')}
+            onClick={() => setEditing(true)}
+            disabled={!c}
+            title={c ? 'Edit this case’s details' : 'Case record still loading'}
           >
             <Icon name="settings" size={14} />
             Edit Case
@@ -335,285 +379,436 @@ export function ScreenCaseDetail({
 
           <div className="stack" style={{ gap: 2 }}>
             <span style={{ fontSize: '10px', textTransform: 'uppercase', color: 'var(--text-faint)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
-              EXAMINER
+              ANALYST
             </span>
             <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-strong)', fontWeight: 600 }}>
               {c?.examiner?.trim() ? c.examiner : 'Not specified'}
             </span>
           </div>
+
+          <div className="stack" style={{ gap: 2 }}>
+            <span style={{ fontSize: '10px', textTransform: 'uppercase', color: 'var(--text-faint)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+              LAST UPDATED
+            </span>
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
+              {formatTimestampShort(c?.updated_at ?? c?.created_at ?? null)}
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* 3. 6-PHASE STEPPER */}
-      <div
-        className="card row"
-        style={{
-          padding: '12px 18px',
-          justifyContent: 'space-around',
-          alignItems: 'center',
-          background: 'var(--surface)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius)',
-          flexWrap: 'wrap',
-          gap: 8,
-        }}
-      >
-        {[
-          { label: 'Case', num: 1, done: isCaseDone, active: true, path: 'case-detail' as RoutePath },
-          { label: 'Evidence', num: 2, done: isEvidenceDone, active: false, path: 'evidence' as RoutePath },
-          { label: 'Analysis', num: 3, done: isAnalysisDone, active: false, path: 'analysis' as RoutePath },
-          { label: 'Provenance', num: 4, done: isProvenanceDone, active: false, path: 'provenance' as RoutePath },
-          { label: 'Audit', num: 5, done: isAuditDone, active: false, path: 'audit' as RoutePath },
-          { label: 'Report', num: 6, done: isReportDone, active: false, path: 'reports' as RoutePath },
-        ].map((step, idx, arr) => (
-          <div key={step.label} className="row" style={{ alignItems: 'center', gap: 8 }}>
-            <button
-              type="button"
-              onClick={() => onNavigate(step.path, { caseId: currentCaseId })}
-              style={{
-                background: 'none',
-                border: 'none',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                cursor: 'pointer',
-                padding: '4px 8px',
-                borderRadius: 'var(--radius-sm)',
-              }}
-            >
-              <span
-                style={{
-                  width: 24,
-                  height: 24,
-                  borderRadius: '50%',
-                  background: step.done ? 'var(--ok-bright)' : 'var(--surface-3)',
-                  color: step.done ? '#ffffff' : 'var(--text-faint)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  fontFamily: 'var(--mono)',
-                }}
-              >
-                {step.done ? '✓' : step.num}
-              </span>
-              <div className="stack" style={{ gap: 0, textAlign: 'left' }}>
-                <span style={{ fontSize: 'var(--text-xs)', fontWeight: 700, color: 'var(--text-strong)' }}>
-                  {step.label}
-                </span>
-                <span style={{ fontSize: '10px', color: step.done ? 'var(--ok-bright)' : 'var(--text-faint)' }}>
-                  {step.done ? 'Completed' : 'Pending'}
-                </span>
-              </div>
-            </button>
-            {idx < arr.length - 1 ? (
-              <span style={{ color: 'var(--text-faint)', fontSize: '12px' }}>→</span>
-            ) : null}
+      {/* The workflow stepper (Case → Evidence → Analysis → Provenance →
+          Audit → Report) is owned by the app shell and rendered once, above
+          this screen. A second copy here is the duplication this structure
+          exists to prevent -- the dossier's own contribution to the workflow
+          is the NEXT STEP card below, which says what to do rather than
+          repeating where the case is. */}
+
+      {/* SECTION 1: CASE SUMMARY */}
+      <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)' }}>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <span className="label" style={{ color: 'var(--text-strong)', letterSpacing: '0.06em' }}>
+            CASE SUMMARY &amp; EXAMINATION CONTEXT
+          </span>
+          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+            Case ID: <code className="mono">{currentCaseId}</code>
+          </span>
+        </div>
+
+        <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', lineHeight: 'var(--leading-normal)', margin: 0 }}>
+          {c?.description?.trim() ? (
+            c.description
+          ) : (
+            <span style={{ color: 'var(--text-faint)' }}>
+              No description was recorded when this investigation was opened.
+            </span>
+          )}
+        </p>
+
+        <div className="grid-3col" style={{ gap: 12, borderTop: '1px solid var(--border)', paddingTop: 10, fontSize: 'var(--text-xs)' }}>
+          <div className="stack" style={{ gap: 2 }}>
+            <span style={{ color: 'var(--text-faint)', fontSize: '10px', textTransform: 'uppercase', fontFamily: 'var(--mono)', fontWeight: 700 }}>Complaint Reference</span>
+            <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>
+              {orPlaceholder(c?.complaint_reference)}
+            </span>
           </div>
-        ))}
+
+          <div className="stack" style={{ gap: 2 }}>
+            <span style={{ color: 'var(--text-faint)', fontSize: '10px', textTransform: 'uppercase', fontFamily: 'var(--mono)', fontWeight: 700 }}>Platforms Observed</span>
+            <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>
+              {platforms.length > 0 ? platforms.join(', ') : 'None recorded'}
+            </span>
+          </div>
+
+          <div className="stack" style={{ gap: 2, minWidth: 0 }}>
+            <span style={{ color: 'var(--text-faint)', fontSize: '10px', textTransform: 'uppercase', fontFamily: 'var(--mono)', fontWeight: 700 }}>Internal Storage Record</span>
+            <div className="row row--wrap" style={{ gap: 4, alignItems: 'center', minWidth: 0 }}>
+              <code className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)', wordBreak: 'break-all' }}>{shortHash(currentCaseId, 18)}</code>
+              <CopyButton value={currentCaseId} title="Copy Internal Case ID" />
+            </div>
+          </div>
+        </div>
       </div>
 
-      {/* 4. 3-COLUMN GRID: CASE SUMMARY | EVIDENCE SUMMARY | CASE NOTES */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-          gap: 'var(--space-4)',
-        }}
-      >
-        {/* Column 1: CASE SUMMARY */}
-        <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)', justifyContent: 'space-between' }}>
-          <div className="stack" style={{ gap: 'var(--space-3)' }}>
+      {/* SECTION 2: EVIDENCE EXHIBITS */}
+      <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)' }}>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
             <span className="label" style={{ color: 'var(--text-strong)', letterSpacing: '0.06em' }}>
-              CASE SUMMARY
+              EVIDENCE EXHIBITS ({caseEvidence.length})
             </span>
-            <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', lineHeight: 'var(--leading-normal)', margin: 0 }}>
-              {c?.description?.trim() ? (
-                c.description
-              ) : (
-                <span style={{ color: 'var(--text-faint)' }}>
-                  No description was recorded when this case was opened.
-                </span>
-              )}
+            <Pill variant="neutral">{caseEvidence.length} {caseEvidence.length === 1 ? 'item' : 'items'}</Pill>
+          </div>
+          <button
+            type="button"
+            className="btn btn--primary btn--sm"
+            onClick={() => onNavigate('intake')}
+            style={{ fontWeight: 700 }}
+          >
+            + Ingest Exhibit
+          </button>
+        </div>
+
+        {caseEvidence.length === 0 ? (
+          <div style={{ padding: 'var(--space-4)', background: 'var(--surface-2)', borderRadius: 'var(--radius)', textAlign: 'center' }}>
+            <p style={{ margin: '0 0 var(--space-2)', fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              No digital evidence exhibits have been ingested into this case yet.
             </p>
-
-            {/*
-              Only fields the case row or the evidence rows actually carry.
-              `Language` and `Region` are gone entirely -- the backend has no such
-              columns, so the previous "Hindi" and "India" were not defaults, they
-              were assertions about a case nobody had entered. `Platform` is a
-              per-evidence field and is reported as observed, never inferred.
-            */}
-            <div className="stack" style={{ gap: 6, fontSize: 'var(--text-xs)', borderTop: '1px solid var(--border)', paddingTop: 10 }}>
-              <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
-                <span style={{ color: 'var(--text-faint)' }}>Complaint ref:</span>
-                <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>
-                  {orPlaceholder(c?.complaint_reference)}
-                </span>
-              </div>
-              <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
-                <span style={{ color: 'var(--text-faint)' }}>Platforms observed:</span>
-                <span style={{ color: 'var(--text-strong)', fontWeight: 600, textAlign: 'right' }}>
-                  {platforms.length > 0 ? platforms.join(', ') : 'None recorded'}
-                </span>
-              </div>
-              <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
-                <span style={{ color: 'var(--text-faint)' }}>Latest verdict:</span>
-                <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>
-                  {c?.latest_verdict ? verdictBandLabel(c.latest_verdict) : 'Not analysed'}
-                </span>
-              </div>
-              <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
-                <span style={{ color: 'var(--text-faint)' }}>Last updated:</span>
-                <span style={{ color: 'var(--text-strong)', fontWeight: 600, fontFamily: 'var(--mono)' }}>
-                  {formatTimestampShort(c?.updated_at ?? null)}
-                </span>
-              </div>
-            </div>
+            <button type="button" className="btn btn--primary btn--sm" onClick={() => onNavigate('intake')}>
+              Ingest Initial Evidence
+            </button>
           </div>
+        ) : (
+          <div className="table-wrapper" style={{ overflowX: 'auto' }}>
+            <table className="table" style={{ width: '100%', fontSize: 'var(--text-xs)' }}>
+              <thead>
+                <tr>
+                  <th style={{ width: 48 }}>PREVIEW</th>
+                  <th>FILENAME / EVIDENCE ID</th>
+                  <th>CRYPTOGRAPHIC SHA-256</th>
+                  <th>TYPE / SPECS</th>
+                  <th>ACQUISITION CONTEXT</th>
+                  <th>INGESTED / ANALYST</th>
+                  <th style={{ textAlign: 'right' }}>ACTION</th>
+                </tr>
+              </thead>
+              <tbody>
+                {caseEvidence.map((ev) => {
+                  const isImg = isImageMedia(ev.media_type)
+                  const specs: string[] = [formatBytes(ev.size_bytes)]
+                  if (ev.width && ev.height) specs.push(`${ev.width}×${ev.height}px`)
+                  if (ev.format) specs.push(ev.format.toUpperCase())
 
-          <button
-            type="button"
-            className="btn btn--ghost btn--sm"
-            style={{ color: 'var(--accent-bright)', paddingLeft: 0, justifyContent: 'flex-start' }}
-            onClick={() => onNavigate('evidence', { caseId: currentCaseId })}
-          >
-            View full details →
-          </button>
-        </div>
-
-        {/* Column 2: EVIDENCE SUMMARY */}
-        <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)', justifyContent: 'space-between' }}>
-          <div className="stack" style={{ gap: 'var(--space-3)' }}>
-            <span className="label" style={{ color: 'var(--text-strong)', letterSpacing: '0.06em' }}>
-              EVIDENCE SUMMARY
-            </span>
-
-            <div style={{ textAlign: 'center', padding: '14px 0' }}>
-              <div
-                style={{
-                  width: 52,
-                  height: 52,
-                  borderRadius: 'var(--radius)',
-                  background: 'var(--accent-wash)',
-                  border: '1px solid var(--accent-line)',
-                  color: 'var(--accent-bright)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  margin: '0 auto 8px',
-                }}
-              >
-                <Icon name="document" size={26} />
-              </div>
-              <div style={{ fontSize: 'var(--text-xl)', fontWeight: 800, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
-                {caseEvidence.length}
-              </div>
-              <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Total Evidence
-              </span>
-            </div>
-
-            <div className="row" style={{ justifyContent: 'space-around', borderTop: '1px solid var(--border)', paddingTop: 10 }}>
-              <div className="stack" style={{ alignItems: 'center', gap: 2 }}>
-                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
-                  {videoCount}
-                </span>
-                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>Video</span>
-              </div>
-              <div className="stack" style={{ alignItems: 'center', gap: 2 }}>
-                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
-                  {imageCount}
-                </span>
-                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>Image</span>
-              </div>
-              <div className="stack" style={{ alignItems: 'center', gap: 2 }}>
-                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
-                  {audioCount}
-                </span>
-                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>Audio</span>
-              </div>
-              <div className="stack" style={{ alignItems: 'center', gap: 2 }}>
-                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: 'var(--text-strong)', fontFamily: 'var(--mono)' }}>
-                  {otherCount}
-                </span>
-                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>Other</span>
-              </div>
-            </div>
+                  return (
+                    <tr key={ev.evidence_id}>
+                      <td>
+                        <div style={{ width: 44, height: 44, borderRadius: 'var(--radius-sm)', overflow: 'hidden', background: 'var(--surface-3)', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid var(--border)' }}>
+                          {isImg ? (
+                            <EvidenceThumbnail evidenceId={ev.evidence_id} iconSize={18} />
+                          ) : (
+                            <Icon name="document" size={18} style={{ color: 'var(--accent-bright)' }} />
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="stack" style={{ gap: 2 }}>
+                          <span style={{ fontWeight: 700, color: 'var(--text-strong)', wordBreak: 'break-all' }}>{ev.filename}</span>
+                          <div className="row" style={{ gap: 4, alignItems: 'center' }}>
+                            <code style={{ fontSize: '10px', color: 'var(--text-faint)' }}>{ev.evidence_id}</code>
+                            <CopyButton value={ev.evidence_id} title="Copy Evidence ID" />
+                          </div>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="row" style={{ gap: 4, alignItems: 'center' }}>
+                          <code className="mono" style={{ fontSize: '11px', color: 'var(--accent-bright)' }}>
+                            {shortHash(ev.sha256, 18)}
+                          </code>
+                          <CopyButton value={ev.sha256} title="Copy SHA-256 Digest" />
+                        </div>
+                      </td>
+                      <td>
+                        <div className="stack" style={{ gap: 2 }}>
+                          <Pill variant="neutral">{ev.media_type.toUpperCase()}</Pill>
+                          <span style={{ fontSize: '10.5px', fontFamily: 'var(--mono)', color: 'var(--text-muted)' }}>
+                            {specs.join(' · ')}
+                          </span>
+                        </div>
+                      </td>
+                      <td>
+                        <span style={{ color: ev.acquisition_context ? 'var(--text-strong)' : 'var(--text-faint)', fontSize: '11px' }}>
+                          {orPlaceholder(ev.acquisition_context)}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="stack" style={{ gap: 2 }}>
+                          <span style={{ fontSize: '10.5px', fontFamily: 'var(--mono)', color: 'var(--text-muted)' }}>
+                            {formatTimestampShort(ev.ingested_at)}
+                          </span>
+                          <span style={{ fontSize: '11px', color: 'var(--text-strong)' }}>
+                            {c?.examiner || 'From session'}
+                          </span>
+                        </div>
+                      </td>
+                      <td style={{ textAlign: 'right' }}>
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          style={{ fontSize: '11px', padding: '3px 8px', color: 'var(--accent-bright)', fontWeight: 700 }}
+                          onClick={() => {
+                            if (!isAnalysisDone) runAnalysis()
+                            onNavigate('analysis', { caseId: currentCaseId })
+                          }}
+                        >
+                          {isAnalysisDone ? 'VIEW ANALYSIS →' : 'ANALYSE →'}
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
+        )}
+      </div>
 
-          <button
-            type="button"
-            className="btn btn--ghost btn--sm"
-            style={{ color: 'var(--accent-bright)', paddingLeft: 0, justifyContent: 'flex-start' }}
-            onClick={() => onNavigate('evidence', { caseId: currentCaseId })}
-          >
-            View evidence →
-          </button>
-        </div>
-
-        {/*
-          Column 3: RECORDED CUSTODY EVENTS.
-
-          This replaces a "CASE NOTES" column that listed four fixed bullets on
-          every case ("Video received from Cyber Cell", "Multiple reuploads
-          identified", "Provenance analysis pending"). The backend stores no
-          free-text case notes, so there was nothing behind them. What it does
-          store is the append-only audit trail, which is the case's actual
-          chronological record -- so that is what is shown.
-        */}
-        <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)', justifyContent: 'space-between' }}>
-          <div className="stack" style={{ gap: 'var(--space-3)' }}>
+      {/* SECTIONS 3 & 4: CURRENT FINDING & PROVENANCE */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 'var(--space-4)' }}>
+        {/* SECTION 3: CURRENT FINDING & FORENSIC SIGNALS */}
+        <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)' }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
             <span className="label" style={{ color: 'var(--text-strong)', letterSpacing: '0.06em' }}>
-              RECORDED CUSTODY EVENTS
+              CURRENT FINDING &amp; FORENSIC SIGNALS
             </span>
-
-            {auditError ? (
-              <ErrorBanner context="Audit trail" error={auditError} />
-            ) : auditEvents === null ? (
-              <Spinner label="Reading custody chain…" />
-            ) : auditEvents.length === 0 ? (
-              <Empty>No custody events are recorded against this case yet.</Empty>
+            {c?.latest_verdict ? (
+              <Pill variant={verdictPillTone(c.latest_verdict)}>{verdictBandLabel(c.latest_verdict)}</Pill>
             ) : (
-              <div className="stack" style={{ gap: 8, fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-                {auditEvents
-                  .slice(-5)
-                  .reverse()
-                  .map((ev) => (
-                    <div key={ev.audit_id} className="row" style={{ gap: 6, alignItems: 'flex-start' }}>
-                      <span style={{ color: 'var(--accent-bright)' }}>•</span>
-                      <div className="stack" style={{ gap: 1 }}>
-                        <span style={{ color: 'var(--text-strong)', fontWeight: 600 }}>
-                          {ev.event}
-                        </span>
-                        <span style={{ fontFamily: 'var(--mono)', fontSize: '10px', color: 'var(--text-faint)' }}>
-                          #{ev.seq} · {formatTimestampShort(ev.timestamp)} · {ev.actor} ·{' '}
-                          {shortHash(ev.row_hash, 8)}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>
-                  Showing the {Math.min(5, auditEvents.length)} most recent of {auditEvents.length}{' '}
-                  recorded event(s).
-                </span>
-              </div>
+              <Pill variant="neutral">NOT YET ANALYSED</Pill>
             )}
           </div>
 
-          <button
-            type="button"
-            className="btn btn--ghost btn--sm"
-            style={{ color: 'var(--accent-bright)', paddingLeft: 0, justifyContent: 'flex-start' }}
-            onClick={() => onNavigate('audit', { caseId: currentCaseId })}
-          >
-            View full custody chain →
-          </button>
+          {c?.latest_verdict || analysisData ? (
+            <div className="stack" style={{ gap: 10 }}>
+              {(() => {
+                const activeVerdict = c?.latest_verdict ?? analysisData?.verdict?.verdict
+                const activeTone = verdictPillTone(activeVerdict)
+                return (
+                  <div
+                    style={{
+                      padding: '12px 16px',
+                      background: 'var(--surface-2)',
+                      borderRadius: 'var(--radius)',
+                      borderLeft: activeTone === 'error'
+                        ? '4px solid var(--danger-bright)'
+                        : activeTone === 'ok'
+                        ? '4px solid var(--ok-bright)'
+                        : '4px solid var(--warn-bright)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 'var(--text-lg)',
+                        fontWeight: 800,
+                        color: activeTone === 'error'
+                          ? 'var(--danger-bright)'
+                          : activeTone === 'ok'
+                          ? 'var(--ok-bright)'
+                          : 'var(--warn-bright)',
+                      }}
+                    >
+                      {verdictBandLabel(activeVerdict)}
+                    </div>
+                    <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', lineHeight: 1.4, display: 'block', marginTop: 4 }}>
+                      {activeVerdict?.includes('MANIPULATED')
+                        ? 'Assessed signals support manipulation. Decision aid only, not a judicial conclusion.'
+                        : activeVerdict?.includes('AUTHENTIC')
+                        ? 'Assessed signals did not support manipulation. This is not a verification of authenticity.'
+                        : 'Insufficient signal coverage to reach a definitive finding.'}
+                    </span>
+                  </div>
+                )
+              })()}
+
+              {analysisData?.verdict ? (
+                <div className="row" style={{ justifyContent: 'space-between', fontSize: 'var(--text-xs)', borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Confidence Band:</span>
+                  <span style={{ fontWeight: 700, fontFamily: 'var(--mono)', color: 'var(--text-strong)' }}>
+                    {analysisData.verdict.confidence.toUpperCase()}
+                  </span>
+                </div>
+              ) : null}
+
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                style={{ color: 'var(--accent-bright)', paddingLeft: 0, justifyContent: 'flex-start', fontWeight: 700 }}
+                onClick={() => onNavigate('analysis', { caseId: currentCaseId })}
+              >
+                Open Forensic Analysis Console →
+              </button>
+            </div>
+          ) : (
+            <div className="stack" style={{ gap: 8 }}>
+              <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                Evidence custody is established. Multi-signal forensic analysis has not been executed yet.
+              </p>
+              <button
+                type="button"
+                className="btn btn--primary btn--sm"
+                style={{ width: 'fit-content', fontWeight: 700 }}
+                onClick={() => {
+                  runAnalysis()
+                  onNavigate('analysis', { caseId: currentCaseId })
+                }}
+              >
+                Run Forensic Analysis →
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* SECTION 4: PROVENANCE & SOURCE TRACE */}
+        <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)' }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="label" style={{ color: 'var(--text-strong)', letterSpacing: '0.06em' }}>
+              PROVENANCE &amp; SOURCE TRACE
+            </span>
+            {isProvenanceDone ? (
+              <Pill variant="ok">TRACED</Pill>
+            ) : (
+              <Pill variant="neutral">NOT TRACED</Pill>
+            )}
+          </div>
+
+          <div className="stack" style={{ gap: 10 }}>
+            <div style={{ padding: '12px 16px', background: 'var(--surface-2)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+              <span style={{ fontSize: '10px', textTransform: 'uppercase', color: 'var(--text-faint)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+                EARLIEST KNOWN INSTANCE
+              </span>
+              <div style={{ fontSize: 'var(--text-xs)', fontWeight: 700, color: 'var(--text-strong)', marginTop: 4 }}>
+                {/*
+                  Three states, not two. This printed "No earlier instance
+                  confirmed in indexed corpus" whenever no origin was on record,
+                  including for cases where no trace had ever been run -- which
+                  reports the absence of a search as the result of one.
+                */}
+                {isProvenanceDone && isReady(propagation) && propagation.data.origin
+                  ? propagation.data.origin.filename || 'Indexed Corpus Candidate'
+                  : isProvenanceDone
+                    ? 'No earlier instance found in the indexed corpus'
+                    : 'NOT MEASURED — no provenance trace has been run'}
+              </div>
+              <span style={{ fontSize: '10px', color: 'var(--text-muted)', display: 'block', marginTop: 2 }}>
+                earliest known instance in the indexed evidence corpus
+              </span>
+            </div>
+
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              style={{ color: 'var(--accent-bright)', paddingLeft: 0, justifyContent: 'flex-start', fontWeight: 700 }}
+              onClick={() => onNavigate('provenance', { caseId: currentCaseId })}
+            >
+              Trace Provenance &amp; Lineage →
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* 5. BOTTOM BANNER: NEXT ACTION */}
+      {/* SECTIONS 5 & 6: AUDIT & REPORT SUMMARY */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 'var(--space-4)' }}>
+        {/* SECTION 5: AUDIT & EVIDENCE INTEGRITY */}
+        <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)' }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="label" style={{ color: 'var(--text-strong)', letterSpacing: '0.06em' }}>
+              AUDIT &amp; EVIDENCE INTEGRITY
+            </span>
+            {isAuditDone ? (
+              <Pill variant="ok">CHAIN INTACT</Pill>
+            ) : (
+              <Pill variant="neutral">NOT VERIFIED</Pill>
+            )}
+          </div>
+
+          <div className="stack" style={{ gap: 10 }}>
+            {auditError ? <ErrorBanner context="Audit trail" error={auditError} /> : null}
+            <div style={{ padding: '12px 16px', background: 'var(--surface-2)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+              <div className="row" style={{ justifyContent: 'space-between', fontSize: 'var(--text-xs)' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Recorded Events:</span>
+                <span style={{ fontWeight: 700, fontFamily: 'var(--mono)', color: 'var(--text-strong)' }}>
+                  {auditEvents ? auditEvents.length : NOT_MEASURED}
+                </span>
+              </div>
+              <div className="row" style={{ justifyContent: 'space-between', fontSize: 'var(--text-xs)', marginTop: 4 }}>
+                <span style={{ color: 'var(--text-muted)' }}>Chain Construction:</span>
+                <span style={{ fontFamily: 'var(--mono)', fontSize: '11px', color: 'var(--text-strong)' }}>
+                  SHA-256 linear hash chain
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              style={{ color: 'var(--accent-bright)', paddingLeft: 0, justifyContent: 'flex-start', fontWeight: 700 }}
+              onClick={() => onNavigate('audit', { caseId: currentCaseId })}
+            >
+              Inspect Immutable Audit Ledger →
+            </button>
+          </div>
+        </div>
+
+        {/* SECTION 6: FORENSIC EXAMINATION REPORT */}
+        <div className="card stack" style={{ padding: 'var(--space-4)', gap: 'var(--space-3)' }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="label" style={{ color: 'var(--text-strong)', letterSpacing: '0.06em' }}>
+              FORENSIC EXAMINATION REPORT
+            </span>
+            <Pill variant={reports.length > 0 ? 'ok' : 'neutral'}>
+              {reports.length} {reports.length === 1 ? 'REPORT' : 'REPORTS'}
+            </Pill>
+          </div>
+
+          <div className="stack" style={{ gap: 10 }}>
+            {reports.length > 0 ? (
+              <div style={{ padding: '12px 16px', background: 'var(--surface-2)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+                <span style={{ fontSize: '10px', textTransform: 'uppercase', color: 'var(--text-faint)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+                  LATEST CANONICAL PDF
+                </span>
+                <div style={{ fontSize: 'var(--text-xs)', fontWeight: 700, color: 'var(--text-strong)', marginTop: 4 }}>
+                  {reports[0].filename}
+                </div>
+                <div className="row" style={{ gap: 6, alignItems: 'center', marginTop: 4 }}>
+                  <code className="mono" style={{ fontSize: '10.5px', color: 'var(--accent-bright)' }}>
+                    {shortHash(reports[0].sha256, 18)}
+                  </code>
+                  <CopyButton value={reports[0].sha256} title="Copy PDF SHA-256" />
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <ReportFileActions report={reports[0]} />
+                </div>
+              </div>
+            ) : (
+              <div style={{ padding: '12px 16px', background: 'var(--surface-2)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+                <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+                  No formal report generated yet for this case.
+                </span>
+              </div>
+            )}
+
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              style={{ color: 'var(--accent-bright)', paddingLeft: 0, justifyContent: 'flex-start', fontWeight: 700 }}
+              onClick={() => onNavigate('reports', { caseId: currentCaseId })}
+            >
+              Open Reports Console →
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* SECTION 7: NEXT ACTION BANNER */}
       <div
         className="card row"
         style={{
@@ -644,6 +839,21 @@ export function ScreenCaseDetail({
           {nextAction.btn}
         </button>
       </div>
+
+      <CaseEditDialog
+        open={editing}
+        target={c}
+        onClose={() => setEditing(false)}
+        onSaved={(updated) => {
+          // Render the record the backend returned. The store may also hold this
+          // case; if it does, it is refreshed by its own load on next navigation,
+          // so the dossier does not reach into the shared slice from here.
+          setActiveCase(updated)
+          // The save appended a CASE_UPDATED entry; re-read the chain so the
+          // audit panel's recorded-events count reflects it.
+          setAuditReloadKey((k) => k + 1)
+        }}
+      />
 
       <CaseDeleteDialog
         state={deletion.state}

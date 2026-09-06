@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -54,6 +55,9 @@ os.environ["PRAMAAN_LOG_ACCESS"] = "false"
 os.environ["PRAMAAN_DATA_DIR"] = str(_ROOT / "data")
 os.environ["PRAMAAN_REPORTS_DIR"] = str(_ROOT / "reports")
 os.environ["PRAMAAN_CORPUS_DIR"] = str(_ROOT / "corpus")
+# Off regardless of the developer's .env: this script asserts the contract the
+# frontend is held to, and that contract includes authentication being required.
+os.environ["PRAMAAN_DEV_AUTH_BYPASS"] = "false"
 
 BACKEND = Path(__file__).resolve().parent.parent / "backend"
 sys.path.insert(0, str(BACKEND))
@@ -63,7 +67,13 @@ from PIL import Image  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
 from app.main import create_app  # noqa: E402
-from tests.helpers import encode, jpeg_with_exif_bytes, make_image  # noqa: E402
+from tests.helpers import (  # noqa: E402
+    encode,
+    jpeg_with_exif_bytes,
+    make_image,
+    mp4_bytes,
+    wav_bytes,
+)
 
 ALLOWED_ORIGIN = "http://localhost:5173"
 FOREIGN_ORIGIN = "http://evil.example.com"
@@ -132,6 +142,113 @@ GEN_BYTES = [
 ]
 
 
+# --- Identity ----------------------------------------------------------------
+# Intake is attributed: POST /api/cases/upload records the authenticated account
+# as the examiner, so it refuses an anonymous request. Everything below therefore
+# signs in first, exactly as the console does -- a bearer token in the
+# Authorization header, never a cookie, because the API runs with
+# allow_credentials=False.
+
+
+def verify_anonymous_intake_refused(client: TestClient) -> None:
+    """Before any token exists: intake must not accept an unattributed upload."""
+    response = client.post(
+        "/api/cases/upload",
+        files={"file": ("complaint-photo.jpg", CASE_BYTES, "image/jpeg")},
+        data={"title": "Anonymous attempt", "description": "No operator signed in"},
+    )
+    body = record("POST", "/api/cases/upload#unauthenticated", response)
+    check(
+        response.status_code == 401,
+        "upload without a session -> 401",
+        f"HTTP {response.status_code}",
+    )
+    check(
+        "www-authenticate" in {k.lower() for k in response.headers},
+        "401 carries WWW-Authenticate",
+        str(response.headers.get("www-authenticate")),
+    )
+    expect_keys(body, {"error", "request_id"}, "error envelope (401)")
+
+    response = client.get("/api/auth/me")
+    check(
+        response.status_code == 401,
+        "GET /api/auth/me without a token -> 401",
+        f"HTTP {response.status_code}",
+    )
+
+    # Reading the case queue and destroying a case are both behind the same gate.
+    # The delete is the one that matters: it removes the case row, its evidence,
+    # its analyses, its reports, the stored files and the index vectors, and it was
+    # reachable with no credentials at all. The id is invented, so a handler that
+    # ran would answer 404 -- insisting on 401 is insisting the gate closes first.
+    response = client.get("/api/cases")
+    record("GET", "/api/cases#unauthenticated", response)
+    check(
+        response.status_code == 401,
+        "GET /api/cases without a session -> 401",
+        f"HTTP {response.status_code}",
+    )
+
+    response = client.delete("/api/cases/case-does-not-exist")
+    record("DELETE", "/api/cases/{case_id}#unauthenticated", response)
+    check(
+        response.status_code == 401,
+        "DELETE /api/cases/{case_id} without a session -> 401",
+        f"HTTP {response.status_code}",
+    )
+
+    response = client.post(
+        "/api/auth/login",
+        json={"username": get_settings().seed_operator_username, "password": "not-the-password"},
+    )
+    body = record("POST", "/api/auth/login#badpassword", response)
+    check(
+        response.status_code == 401,
+        "wrong password -> 401",
+        f"HTTP {response.status_code}",
+    )
+
+
+def sign_in(client: TestClient) -> dict[str, Any]:
+    """Sign in as the seeded operator and attach the token to every later call."""
+    settings = get_settings()
+    response = client.post(
+        "/api/auth/login",
+        json={
+            "username": settings.seed_operator_username,
+            "password": settings.seed_operator_password.get_secret_value(),
+        },
+    )
+    body = record("POST", "/api/auth/login", response)
+    check(response.status_code == 200, "POST /api/auth/login -> 200", f"HTTP {response.status_code}")
+    expect_keys(body, {"token", "token_type", "expires_at", "user"}, "AuthSession")
+    if not isinstance(body, dict) or "token" not in body:
+        return {}
+
+    expect_keys(
+        body["user"],
+        {"user_id", "username", "display_name", "role", "last_login_at"},
+        "AuthUser",
+    )
+    # The console holds only the token and re-fetches the user; the token itself
+    # is never stored server-side in the clear, so it can only be read here.
+    client.headers["Authorization"] = f"Bearer {body['token']}"
+
+    me = record("GET", "/api/auth/me", client.get("/api/auth/me"))
+    check(
+        isinstance(me, dict) and me.get("username") == body["user"]["username"],
+        "GET /api/auth/me returns the account that just signed in",
+        f"{me.get('username') if isinstance(me, dict) else me}",
+    )
+    check(
+        isinstance(me, dict) and bool(me.get("display_name")),
+        "the signed-in account has a display name to stamp on evidence",
+        str(me.get("display_name") if isinstance(me, dict) else me),
+    )
+    return {"token": body["token"], "user": me if isinstance(me, dict) else body["user"]}
+
+
 def seed_corpus(client: TestClient) -> list[str]:
     """Ingest a lineage straight into the searchable corpus."""
     ids: list[str] = []
@@ -172,10 +289,28 @@ def run_workflow(client: TestClient) -> dict[str, Any]:
     """Walk the workflow in the order the UI performs it."""
     context: dict[str, Any] = {}
 
-    # 0. System probes -- the UI calls these before anything else.
+    # 0. Liveness. The only probe the console makes before anyone signs in: it is
+    #    what the login screen uses to tell "wrong password" apart from "backend
+    #    unreachable", which is why it is deliberately left open.
     body = record("GET", "/health", client.get("/health"))
     check(isinstance(body, dict) and "status" in body, "GET /health", str(body))
 
+    # 0b. IDENTITY. Intake is attributed to an account, so the anonymous refusal is
+    #     checked before a token exists, then the operator signs in and the token
+    #     stays attached for the rest of the run.
+    #
+    #     This happens before the capability probes below because those are
+    #     authenticated as well -- everything that touches case material *or*
+    #     describes this deployment is behind the bearer gate -- and because it is
+    #     the order the console works in: nothing but the health check is fetched
+    #     until there is a session.
+    verify_anonymous_intake_refused(client)
+    session = sign_in(client)
+    operator = session.get("user") or {}
+    context["operator"] = operator
+
+    # 0c. Capability probes. What this deployment can actually do; the Analysis and
+    #     Settings screens render from these rather than from anything hardcoded.
     body = record("GET", "/api/index/status", client.get("/api/index/status"))
     expect_keys(
         body,
@@ -215,17 +350,59 @@ def run_workflow(client: TestClient) -> dict[str, Any]:
     )
     context["detector_available"] = bool(body.get("available")) if body else None
 
+    # 0d. Signal applicability -- the map the Analysis UI renders from.
+    body = record(
+        "GET", "/api/system/signals", client.get("/api/system/signals")
+    )
+    expect_keys(body, {"signal_names", "applicability", "note", "declared_weights"},
+                "SignalApplicability")
+    if isinstance(body, dict):
+        applicability = body.get("applicability") or {}
+        check(
+            set(applicability) == {"image", "video", "audio"},
+            "signal applicability is published for every media type",
+            f"media types={sorted(applicability)}",
+        )
+        image_ids = {s["signal_id"] for s in applicability.get("image", [])}
+        video_ids = {s["signal_id"] for s in applicability.get("video", [])}
+        audio_ids = {s["signal_id"] for s in applicability.get("audio", [])}
+        check(
+            image_ids
+            == {
+                "ai_detection",
+                "perceptual_duplication",
+                "metadata_integrity",
+                "provenance_c2pa",
+                "compression_forensics",
+            },
+            "image carries all five forensic signals",
+            sorted(image_ids),
+        )
+        check(
+            video_ids == {"ai_detection", "metadata_integrity", "provenance_c2pa"},
+            "video carries no image-only perceptual or compression signals",
+            sorted(video_ids),
+        )
+        check(
+            audio_ids == {"ai_detection"},
+            "audio carries no image perceptual matching or compression forensics",
+            sorted(audio_ids),
+        )
+        context["applicability"] = applicability
+
     seed_corpus(client)
     client.post("/api/index/rebuild")
 
-    # 1. UPLOAD -- creates the case, since no case_id is supplied.
+    # 1. UPLOAD -- creates the case, since no case_id is supplied. No examiner is
+    #    sent: the backend resolves it from the bearer token, and a value posted
+    #    from a client would be a claim about identity rather than a fact.
     response = client.post(
         "/api/cases/upload",
         files={"file": ("complaint-photo.jpg", CASE_BYTES, "image/jpeg")},
         data={
             "title": "Verification case",
             "description": "Contract verification run",
-            "examiner": "automated",
+            "acquisition_context": "Captured by the integration verifier",
         },
     )
     body = record("POST", "/api/cases/upload", response)
@@ -237,6 +414,24 @@ def run_workflow(client: TestClient) -> dict[str, Any]:
     context["case_id"] = case_id
     context["evidence_id"] = body["evidence"]["evidence_id"]
     context["sha256"] = body["evidence"]["sha256"]
+    context["case_number"] = body["case"]["case_number"]
+
+    # The three intake facts the console displays but never supplies.
+    check(
+        bool(re.fullmatch(r"PRAMAAN-\d{4,}", str(body["case"]["case_number"]))),
+        "case number is the compact sequential form the UI shows",
+        str(body["case"]["case_number"]),
+    )
+    check(
+        body["case"]["examiner"] == operator.get("display_name"),
+        "examiner on the case is the signed-in operator's display name",
+        f"{body['case']['examiner']!r} vs {operator.get('display_name')!r}",
+    )
+    check(
+        body["evidence"].get("acquisition_context") == "Captured by the integration verifier",
+        "acquisition context is stored on the evidence record, not dropped",
+        str(body["evidence"].get("acquisition_context")),
+    )
     expect_keys(
         body["case"],
         {
@@ -264,6 +459,7 @@ def run_workflow(client: TestClient) -> dict[str, Any]:
             "size_bytes",
             "sha256",
             "ingested_at",
+            "acquisition_context",
             "width",
             "height",
             "format",
@@ -318,6 +514,20 @@ def run_workflow(client: TestClient) -> dict[str, Any]:
         f"keys={keys_of(body)}",
     )
 
+    # The stored bytes of one exhibit. The console fetches these through the
+    # authenticated transport and wraps them in an object URL rather than putting
+    # the path in an <img src>, because the route requires the bearer token and a
+    # browser-issued image request cannot carry one.
+    evidence_id = context["evidence_id"]
+    evidence_bytes = client.get(f"/api/evidence/{evidence_id}/file")
+    record("GET", f"/api/evidence/{evidence_id}/file", evidence_bytes)
+    check(
+        evidence_bytes.status_code == 200 and len(evidence_bytes.content) > 0,
+        "GET /api/evidence/{id}/file streams the stored bytes",
+        f"HTTP {evidence_bytes.status_code} {len(evidence_bytes.content)} bytes"
+        f" type={evidence_bytes.headers.get('content-type')}",
+    )
+
     # 3. ANALYSE -- the authoritative call the whole UI hangs off.
     response = client.post(f"/api/cases/{case_id}/analyse")
     analysis = record("POST", f"/api/cases/{case_id}/analyse", response)
@@ -357,12 +567,16 @@ def run_workflow(client: TestClient) -> dict[str, Any]:
         verify_propagation_nesting(analysis)
 
     # 4. Per-panel refresh endpoints.
-    body = record("POST", f"/api/cases/{case_id}/verdict", client.post(f"/api/cases/{case_id}/verdict"))
-    check(
-        isinstance(body, dict) and "items" in body,
-        "POST /verdict carries 'items'",
-        f"keys={keys_of(body)}",
+    fused = record(
+        "POST", f"/api/cases/{case_id}/verdict", client.post(f"/api/cases/{case_id}/verdict")
     )
+    check(
+        isinstance(fused, dict) and "items" in fused,
+        "POST /verdict carries 'items'",
+        f"keys={keys_of(fused)}",
+    )
+
+    verify_stored_verdict(client, case_id, fused)
 
     body = record("POST", f"/api/cases/{case_id}/matches", client.post(f"/api/cases/{case_id}/matches"))
     expect_keys(
@@ -450,6 +664,9 @@ def run_workflow(client: TestClient) -> dict[str, Any]:
     if isinstance(body, dict) and body.get("origin"):
         verify_origin_wording(body["origin"])
 
+    verify_propagation_read_is_read_only(client, case_id)
+    verify_stored_matches_read(client, case_id)
+
     body = record(
         "GET", f"/api/cases/{case_id}/metadata", client.get(f"/api/cases/{case_id}/metadata")
     )
@@ -459,6 +676,69 @@ def run_workflow(client: TestClient) -> dict[str, Any]:
         f"keys={keys_of(body)}",
     )
     context["metadata_keys"] = keys_of(body)
+
+    # 4b. MEDIA-AWARE SIGNALS -- video and audio cases, each analysed with only
+    #     its applicable signal set. The recordings from these cases let the
+    #     frontend contract test assert the same truth per modality.
+    for name, payload, mime, media, expected_ids in (
+        (
+            "video",
+            mp4_bytes(),
+            "video/mp4",
+            "video",
+            {"ai_detection", "metadata_integrity", "provenance_c2pa"},
+        ),
+        (
+            "audio",
+            wav_bytes(seed=31),
+            "audio/wav",
+            "audio",
+            {"ai_detection"},
+        ),
+    ):
+        created = client.post(
+            "/api/cases/upload",
+            files={"file": (f"applicability-{media}.{name}", payload, mime)},
+            data={"title": f"Applicability {media}", "description": "verification"},
+        )
+        if not check(
+            created.status_code == 201,
+            f"{media}: upload -> 201",
+            f"HTTP {created.status_code}",
+        ):
+            continue
+        media_case_id = created.json()["case"]["case_id"]
+        analysed_media = client.post(f"/api/cases/{media_case_id}/analyse")
+        body = record(
+            "POST", f"/api/cases/{media_case_id}/analyse", analysed_media
+        )
+        check(
+            analysed_media.status_code == 200,
+            f"{media}: analyse -> 200",
+            f"HTTP {analysed_media.status_code}",
+        )
+        verdicts_media = (body or {}).get("verdicts") or []
+        if verdicts_media:
+            verify_verdict({"verdict": verdicts_media[0]})
+            vm = verdicts_media[0]
+            listed = {s["signal_id"] for s in vm["signals"]}
+            check(
+                listed == expected_ids,
+                f"{media}: only the applicable signal set is fused",
+                f"{sorted(listed)}",
+            )
+            check(
+                "perceptual_duplication" not in listed
+                and "compression_forensics" not in listed,
+                f"{media}: no image-only perceptual or compression rows",
+                "absent",
+            )
+            check(
+                vm["signals_total"] == len(expected_ids),
+                f"{media}: signals_total is the applicable count",
+                f"total={vm['signals_total']}",
+            )
+            context[f"{media}_verdict"] = vm
 
     # 5. AUDIT.
     body = record("GET", f"/api/cases/{case_id}/audit", client.get(f"/api/cases/{case_id}/audit"))
@@ -581,6 +861,145 @@ def run_workflow(client: TestClient) -> dict[str, Any]:
     return context
 
 
+def verify_stored_verdict(
+    client: TestClient, case_id: str, fused: Any
+) -> None:
+    """`GET /verdict` -- the read-only twin the frontend opens a case with.
+
+    The Analysis screen calls this on mount. `POST /analyse` is not usable there:
+    it re-runs near-duplicate retrieval and appends MATCH_SEARCHED and
+    ANALYSIS_COMPLETED to the audit chain even when `refresh` is false, so a page
+    load would write forensic history. This route must therefore compute nothing
+    and, more importantly, must never disagree with the verdict of record.
+
+    Three things are asserted, in order of how badly a regression would mislead an
+    examiner:
+
+      1. The bands match what fusion just wrote, per evidence id. A read-only view
+         that recomputed -- or read the wrong analysis kind -- could show a band the
+         case file does not contain.
+      2. The accounting closes: analysed + pending == the evidence in the case.
+         Every item is in exactly one of the two lists, so the screen cannot quietly
+         drop an exhibit or count one twice.
+      3. Nothing in `pending_evidence` carries a verdict field. Unanalysed evidence
+         has no verdict; a placeholder here would become an on-screen finding.
+
+    The chain head is compared across the call as well. That the read is
+    side-effect-free is not a nicety here -- it is the reason the screen is allowed
+    to call it on mount at all, so it is pinned rather than assumed.
+    """
+
+    def chain_state() -> tuple[Any, Any]:
+        trail = client.get(f"/api/cases/{case_id}/audit").json()
+        return trail.get("total_rows"), trail.get("head_hash")
+
+    before = chain_state()
+    body = record("GET", f"/api/cases/{case_id}/verdict", client.get(f"/api/cases/{case_id}/verdict"))
+    after = chain_state()
+    check(
+        before == after,
+        "GET /verdict appends nothing to the audit chain (safe to call on page load)",
+        f"before rows={before[0]} head={str(before[1])[:12]} "
+        f"after rows={after[0]} head={str(after[1])[:12]}",
+    )
+
+    expect_keys(
+        body,
+        {
+            "case_id",
+            "count",
+            "items",
+            "method",
+            "interpretation",
+            "caveat",
+            "source",
+            "evidence_count",
+            "analysed_count",
+            "pending_evidence",
+            "run_verdict_url",
+            "notes",
+        },
+        "StoredVerdictResponse",
+    )
+    if not isinstance(body, dict):
+        return
+
+    check(
+        body.get("source") == "stored",
+        "GET /verdict declares itself as stored, not computed",
+        f"source={body.get('source')!r}",
+    )
+
+    items = body.get("items") or []
+    pending = body.get("pending_evidence") or []
+    check(
+        body.get("analysed_count") == len(items) == body.get("count"),
+        "GET /verdict: analysed_count, count and len(items) agree",
+        f"analysed_count={body.get('analysed_count')} count={body.get('count')} "
+        f"items={len(items)}",
+    )
+    check(
+        body.get("evidence_count") == len(items) + len(pending),
+        "GET /verdict: every evidence item is either fused or pending, never both",
+        f"evidence_count={body.get('evidence_count')} fused={len(items)} "
+        f"pending={len(pending)}",
+    )
+
+    # The read-only view must report the same band as the fusion that produced it.
+    fused_bands = {
+        item.get("evidence_id"): item.get("verdict")
+        for item in ((fused or {}).get("items") or [])
+        if isinstance(item, dict)
+    }
+    stored_bands = {
+        item.get("evidence_id"): item.get("verdict")
+        for item in items
+        if isinstance(item, dict)
+    }
+    check(
+        bool(stored_bands) and stored_bands == fused_bands,
+        "GET /verdict reports the same band per item as the fusion of record",
+        f"stored={stored_bands} fused={fused_bands}",
+    )
+    check(
+        all(isinstance(item, dict) and item.get("cached") is True for item in items),
+        "GET /verdict marks every item cached, so the UI cannot present it as fresh",
+        f"{len(items)} item(s)",
+    )
+    check(
+        all(isinstance(item, dict) and item.get("fused_at") for item in items),
+        "GET /verdict carries fused_at, so the screen can date the assessment",
+        f"{len(items)} item(s)",
+    )
+
+    # An unanalysed exhibit has no verdict. Not a null band, not a placeholder --
+    # no verdict field at all, so nothing downstream can render one.
+    leaked = [
+        row.get("filename")
+        for row in pending
+        if isinstance(row, dict) and ("verdict" in row or "score" in row)
+    ]
+    check(
+        not leaked,
+        "GET /verdict: pending evidence carries no verdict or score",
+        f"leaked={leaked}" if leaked else f"{len(pending)} pending item(s)",
+    )
+    for row in pending:
+        if isinstance(row, dict):
+            expect_keys(
+                row,
+                {"evidence_id", "filename", "media_type", "sha256", "reason"},
+                "StoredVerdictResponse.pending_evidence[]",
+            )
+            break
+
+    check(
+        body.get("run_verdict_url") == f"/api/cases/{case_id}/verdict",
+        "GET /verdict names the route that would actually run fusion",
+        str(body.get("run_verdict_url")),
+    )
+
+
 def verify_verdict(analysis: dict[str, Any]) -> None:
     """The forensic guarantees the UI is required to preserve."""
     verdict = analysis.get("verdict")
@@ -607,6 +1026,8 @@ def verify_verdict(analysis: dict[str, Any]) -> None:
             "signals",
             "signals_available",
             "signals_total",
+            "signals_evaluated",
+            "applicable_signals",
             "declared_weights",
             "signal_coverage",
             "primary_signal_available",
@@ -626,7 +1047,38 @@ def verify_verdict(analysis: dict[str, Any]) -> None:
         "Verdict",
     )
 
+    # Media-aware counts: the applicable set is the denominator. The verdict's
+    # own applicable_signals list must be exactly the signals it carries, and
+    # an inapplicable signal is never materialised at all.
     signals = verdict.get("signals") or []
+    applicable = verdict.get("applicable_signals") or []
+    listed_ids = {s.get("signal_id") for s in signals}
+    applicable_ids = {a.get("signal_id") for a in applicable}
+    check(
+        applicable_ids == listed_ids,
+        "the signal list is exactly the applicable set for this media type",
+        f"listed={sorted(listed_ids)} applicable={sorted(applicable_ids)}",
+    )
+    check(
+        verdict.get("signals_total") == len(signals),
+        "signals_total counts the applicable signals only",
+        f"total={verdict.get('signals_total')} listed={len(signals)}",
+    )
+    media_type = str(verdict.get("media_type") or "image")
+    if media_type in ("video", "audio"):
+        image_only = {"perceptual_duplication", "compression_forensics"}
+        check(
+            not (listed_ids & image_only),
+            f"no image-only signals are fused for {media_type}",
+            sorted(listed_ids & image_only) or "none",
+        )
+    evaluated = verdict.get("signals_evaluated")
+    check(
+        isinstance(evaluated, int) and 0 <= evaluated <= len(signals),
+        "signals_evaluated is a count within the applicable set",
+        f"evaluated={evaluated} of {len(signals)}",
+    )
+
     statuses = {s.get("status") for s in signals}
     known = {"OK", "INCONCLUSIVE", "UNAVAILABLE", "ERROR", "UNSUPPORTED_MEDIA"}
     check(
@@ -655,10 +1107,14 @@ def verify_verdict(analysis: dict[str, Any]) -> None:
         f"available={verdict.get('available_weight')} sum_ok={included_weight:.4f} "
         f"sum_excluded={excluded_weight:.4f}",
     )
+    # Arithmetic is published exactly when something contributed: a verdict
+    # with no included signal has no fused arithmetic to publish (and fusion
+    # says so in its rationale instead).
     check(
-        bool(verdict.get("arithmetic")),
-        "backend publishes its fusion arithmetic",
-        str(verdict.get("arithmetic"))[:80],
+        bool(verdict.get("arithmetic"))
+        or verdict.get("signals_available") == 0,
+        "backend publishes its fusion arithmetic (or honestly reports none was computed)",
+        str(verdict.get("arithmetic"))[:80] or "no signal contributed",
     )
     check(
         bool(verdict.get("rationale")),
@@ -692,6 +1148,120 @@ def verify_propagation_nesting(analysis: dict[str, Any]) -> None:
         )
 
 
+def verify_propagation_read_is_read_only(client: TestClient, case_id: str) -> None:
+    """Opening the Provenance screen must not write the case's forensic history.
+
+    The screen calls this route on mount. With the recording default it runs
+    near-duplicate retrieval for any case that has none stored and appends
+    ``MATCH_SEARCHED`` and ``PROPAGATION_RECONSTRUCTED``, so the chain's head
+    hash moved because somebody *looked*. ``record=false`` is the read, and the
+    proof it is one is a before/after pair around the call rather than the
+    response body's own say-so.
+
+    The recording is keyed with the query string, which is what the frontend
+    contract suite replays -- so the client sending the parameter is pinned on
+    both sides of the wire.
+    """
+
+    def chain() -> tuple[int, str]:
+        body = client.get(f"/api/cases/{case_id}/audit").json()
+        return body["total_rows"], body["head_hash"]
+
+    before = chain()
+    body = record(
+        "GET",
+        f"/api/cases/{case_id}/propagation?record=false",
+        client.get(f"/api/cases/{case_id}/propagation", params={"record": "false"}),
+    )
+    after = chain()
+
+    check(
+        after == before,
+        "reading propagation with record=false leaves the audit chain untouched",
+        f"rows {before[0]} -> {after[0]}, head {'unchanged' if before[1] == after[1] else 'MOVED'}",
+    )
+    check(
+        isinstance(body, dict) and body.get("recorded") is False,
+        "the read declares that it wrote nothing",
+        f"recorded={body.get('recorded') if isinstance(body, dict) else None}",
+    )
+    # "Searched and found nothing" and "never searched" produce an identical
+    # empty graph. The frontend cannot tell them apart without this field, and
+    # printing the first over the second reports an absent measurement as a
+    # finding of originality.
+    status = body.get("trace_status") if isinstance(body, dict) else None
+    check(
+        status in {"COMPUTED", "STORED", "NOT_RUN"},
+        "the read says whether the retrieval behind it ever ran",
+        f"trace_status={status}",
+    )
+    check(
+        bool(isinstance(body, dict) and body.get("trace_status_meaning")),
+        "trace_status arrives with wording the UI can show verbatim",
+    )
+
+    # refresh means recompute, and a computation that really happens must be
+    # recorded. Resolving the contradiction either way would hide something.
+    conflict = client.get(
+        f"/api/cases/{case_id}/propagation", params={"refresh": "true", "record": "false"}
+    )
+    check(
+        conflict.status_code == 422,
+        "refresh=true cannot be combined with record=false",
+        f"HTTP {conflict.status_code}",
+    )
+    check(
+        chain() == after,
+        "the rejected combination wrote nothing either",
+    )
+
+
+def verify_stored_matches_read(client: TestClient, case_id: str) -> None:
+    """The candidate list a page load is entitled to: stored, never searched.
+
+    ``POST /matches`` replaces the stored set and appends ``MATCH_SEARCHED``.
+    The Provenance screen used to POST on mount, so arriving at the page wrote
+    an audit row. The ``GET`` is what it calls now, and ``searched`` is the
+    field that makes the distinction visible: an empty candidate list means
+    "nothing similar is indexed" or "nobody has looked", and only the first is
+    a finding.
+    """
+
+    def rows() -> int:
+        return int(client.get(f"/api/cases/{case_id}/audit").json()["total_rows"])
+
+    before = rows()
+    body = record(
+        "GET", f"/api/cases/{case_id}/matches", client.get(f"/api/cases/{case_id}/matches")
+    )
+    check(
+        rows() == before,
+        "reading stored matches appends nothing to the audit chain",
+        f"rows {before} -> {rows()}",
+    )
+    expect_keys(
+        body,
+        {
+            "case_id",
+            "interpretation",
+            "queries",
+            "total_candidates",
+            "thresholds",
+            "source",
+            "searched",
+            "searched_at",
+            "run_matches_url",
+            "notes",
+        },
+        "StoredMatchesResponse",
+    )
+    check(
+        isinstance(body, dict) and body.get("searched") is True,
+        "an already-searched case reports searched=true, from the audit trail",
+        f"searched={body.get('searched') if isinstance(body, dict) else None}",
+    )
+
+
 def verify_origin_wording(origin: dict[str, Any]) -> None:
     """The mandated phrasing, checked rather than assumed."""
     label = str(origin.get("label", ""))
@@ -718,18 +1288,28 @@ def verify_origin_wording(origin: dict[str, Any]) -> None:
 def verify_error_paths(client: TestClient, case_id: str | None) -> None:
     """The statuses the UI branches on, each produced by a real request."""
     envelope_keys = {"error", "request_id"}
+    # Opening a case is refused before the bytes are looked at, so a request that
+    # means to exercise *file* validation has to carry the case metadata a real
+    # intake submission carries. Without it every check below would come back as
+    # "a new case requires a title" and prove nothing about the file.
+    opens_case = {"title": "Error path probe", "description": "Exercising file validation"}
 
     # 400 -- unsupported type (magic bytes decide, not the filename).
     response = client.post(
         "/api/cases/upload",
         files={"file": ("notes.txt", b"this is not an image at all", "image/jpeg")},
+        data=opens_case,
     )
     body = record("POST", "/api/cases/upload#badtype", response)
     check(response.status_code == 400, "unsupported file -> 400", f"HTTP {response.status_code}")
     expect_keys(body, envelope_keys, "error envelope (400)")
 
     # 400 -- empty file.
-    response = client.post("/api/cases/upload", files={"file": ("empty.jpg", b"", "image/jpeg")})
+    response = client.post(
+        "/api/cases/upload",
+        files={"file": ("empty.jpg", b"", "image/jpeg")},
+        data=opens_case,
+    )
     check(response.status_code == 400, "empty file -> 400", f"HTTP {response.status_code}")
 
     # 404 -- unknown case.
@@ -758,6 +1338,69 @@ def verify_error_paths(client: TestClient, case_id: str | None) -> None:
             str(body.get("error", {}).get("details"))[:80],
         )
 
+    # 422 -- opening a case without the two facts the case record needs. These are
+    # the backend half of intake's required fields: the console blocks the button,
+    # and this is what happens to anything that gets past it. The message names
+    # the missing field rather than saying "unprocessable entity", because the UI
+    # renders it verbatim.
+    response = client.post(
+        "/api/cases/upload",
+        files={"file": ("complaint-photo.jpg", CASE_BYTES, "image/jpeg")},
+        data={"description": "Description without a title"},
+    )
+    body = record("POST", "/api/cases/upload#notitle", response)
+    check(
+        response.status_code == 422,
+        "new case without a title -> 422",
+        f"HTTP {response.status_code}",
+    )
+    message = str(body.get("error", {}).get("message", "")) if isinstance(body, dict) else ""
+    check("title" in message.lower(), "the refusal names the missing title", message[:100])
+
+    response = client.post(
+        "/api/cases/upload",
+        files={"file": ("complaint-photo.jpg", CASE_BYTES, "image/jpeg")},
+        data={"title": "Title without a description"},
+    )
+    body = record("POST", "/api/cases/upload#nodescription", response)
+    check(
+        response.status_code == 422,
+        "new case without a description -> 422",
+        f"HTTP {response.status_code}",
+    )
+    message = str(body.get("error", {}).get("message", "")) if isinstance(body, dict) else ""
+    check(
+        "description" in message.lower(),
+        "the refusal names the missing description",
+        message[:100],
+    )
+
+    # Blank-but-present is the same refusal: a form that submits "   " has not
+    # supplied a title.
+    response = client.post(
+        "/api/cases/upload",
+        files={"file": ("complaint-photo.jpg", CASE_BYTES, "image/jpeg")},
+        data={"title": "   ", "description": "   "},
+    )
+    check(
+        response.status_code == 422,
+        "whitespace-only title/description -> 422",
+        f"HTTP {response.status_code}",
+    )
+
+    # 404 -- attaching to a case that does not exist must not quietly open a new
+    # one. This is the failure mode behind intake's attach mode.
+    response = client.post(
+        "/api/cases/upload",
+        files={"file": ("complaint-photo.jpg", CASE_BYTES, "image/jpeg")},
+        data={"case_id": "does-not-exist"},
+    )
+    check(
+        response.status_code == 404,
+        "upload into an unknown case -> 404 (no silent new case)",
+        f"HTTP {response.status_code}",
+    )
+
     # 413 -- oversized. The cap is lowered on the cached Settings for one request.
     settings = get_settings()
     original_cap = settings.max_upload_bytes
@@ -766,6 +1409,7 @@ def verify_error_paths(client: TestClient, case_id: str | None) -> None:
         response = client.post(
             "/api/cases/upload",
             files={"file": ("big.jpg", CASE_BYTES, "image/jpeg")},
+            data=opens_case,
         )
         body = record("POST", "/api/cases/upload#oversize", response)
         check(
@@ -879,7 +1523,6 @@ def verify_case_deletion(client: TestClient, surviving_case_id: str | None) -> d
         data={
             "title": "Deletion verification case",
             "description": "Created solely to be deleted by the verifier",
-            "examiner": "automated",
         },
     )
     if not check(
@@ -959,7 +1602,14 @@ def verify_case_deletion(client: TestClient, surviving_case_id: str | None) -> d
     )
     report_pdf: Path | None = None
     if reported.status_code in (200, 201):
-        report_pdf = settings.reports_dir / reported.json()["filename"]
+        # Use the path the backend reports it wrote, not one rebuilt from the
+        # response `filename`. `filename` is the friendly, deliberately
+        # non-unique download name ("PRAMAAN-<case>-Forensic-Report.pdf"); the
+        # bytes on disk live under a unique `stored_name`, and `path` is the
+        # backend's own record of where. Rebuilding from `filename` looked for a
+        # file that never existed, so this check failed and its post-delete twin
+        # (that the PDF is unlinked) passed only because the path was always absent.
+        report_pdf = Path(reported.json()["path"])
         check(
             report_pdf.is_file(),
             "deletion: the report PDF is on disk before the delete",
@@ -1215,16 +1865,33 @@ CLIENT_ROUTES: list[tuple[str, str]] = [
     ("GET", "/health"),
     ("GET", "/api/index/status"),
     ("GET", "/api/detector/status"),
+    ("GET", "/api/detector/manifest"),
+    ("GET", "/api/system/status"),
+    ("GET", "/api/system/signals"),
+    ("GET", "/api/dashboard/summary"),
+    ("POST", "/api/detect"),
+    ("POST", "/api/auth/login"),
+    ("GET", "/api/auth/me"),
+    ("POST", "/api/auth/logout"),
     ("POST", "/api/cases/upload"),
     ("GET", "/api/cases"),
+    ("GET", "/api/cases/library/all"),
     ("GET", "/api/cases/{case_id}"),
     ("DELETE", "/api/cases/{case_id}"),
     ("GET", "/api/cases/{case_id}/evidence"),
+    ("GET", "/api/evidence/{evidence_id}/file"),
     ("POST", "/api/cases/{case_id}/analyse"),
     ("POST", "/api/cases/{case_id}/verdict"),
+    ("GET", "/api/cases/{case_id}/verdict"),
     ("POST", "/api/cases/{case_id}/matches"),
+    # The read twin. Present because the Provenance screen calls it on mount:
+    # it used to POST here as it opened, appending MATCH_SEARCHED to the case's
+    # chain because somebody navigated.
+    ("GET", "/api/cases/{case_id}/matches"),
     ("GET", "/api/cases/{case_id}/propagation"),
     ("GET", "/api/cases/{case_id}/metadata"),
+    ("GET", "/api/cases/{case_id}/web-discovery"),
+    ("POST", "/api/cases/{case_id}/web-discovery"),
     ("GET", "/api/cases/{case_id}/audit"),
     ("POST", "/api/cases/{case_id}/audit/verify"),
     ("POST", "/api/cases/{case_id}/report"),
@@ -1249,6 +1916,69 @@ def verify_routes(app: Any) -> None:
     )
 
 
+def verify_case_number_not_reused(client: TestClient, deleted_case_number: str | None) -> None:
+    """A case number retired by a delete must never be issued again.
+
+    The console prints the case number on every screen and on the PDF, so two
+    cases sharing one is not a cosmetic collision -- it makes the identifier
+    useless as a reference. The sequence is therefore derived from the audit
+    trail as well as the live table, and this is the check that proves it: a case
+    is deleted just above, and the next number issued is still higher.
+    """
+    if not deleted_case_number:
+        return
+    response = client.post(
+        "/api/cases/upload",
+        files={"file": ("post-delete-exhibit.jpg", CASE_BYTES, "image/jpeg")},
+        data={
+            "title": "Post-deletion sequence check",
+            "description": "Confirms a deleted case number is not handed out again",
+        },
+    )
+    if not check(
+        response.status_code == 201,
+        "post-deletion upload -> 201",
+        f"HTTP {response.status_code}",
+    ):
+        return
+    issued_number = response.json()["case"]["case_number"]
+    check(
+        issued_number != deleted_case_number,
+        "a deleted case number is not reissued",
+        f"deleted {deleted_case_number}, issued {issued_number}",
+    )
+    listing = client.get("/api/cases").json().get("cases", [])
+    numbers = [c.get("case_number") for c in listing]
+    check(
+        len(numbers) == len(set(numbers)),
+        "every live case number is unique",
+        f"{len(numbers)} cases, {len(set(numbers))} distinct",
+    )
+
+
+def verify_sign_out(client: TestClient) -> None:
+    """Signing out has to actually revoke the token, not just forget it locally."""
+    response = client.post("/api/auth/logout")
+    record("POST", "/api/auth/logout", response)
+    check(response.status_code == 200, "POST /api/auth/logout -> 200", f"HTTP {response.status_code}")
+
+    # Same header, same token, one request later: the session row is gone.
+    response = client.post(
+        "/api/cases/upload",
+        files={"file": ("after-logout.jpg", CASE_BYTES, "image/jpeg")},
+        data={"title": "After logout", "description": "Should never be created"},
+    )
+    check(
+        response.status_code == 401,
+        "the token is dead after logout (upload -> 401)",
+        f"HTTP {response.status_code}",
+    )
+    check(
+        client.get("/api/auth/me").status_code == 401,
+        "GET /api/auth/me after logout -> 401",
+    )
+
+
 # --- Entry point -------------------------------------------------------------
 
 
@@ -1263,6 +1993,9 @@ def main() -> int:
         # Last: it deletes a case of its own, and the checks above must run
         # against a workspace this has not modified.
         context.update(verify_case_deletion(client, context.get("case_id")))
+        verify_case_number_not_reused(client, context.get("deleted_case_number"))
+        # Truly last: this revokes the token every check above depended on.
+        verify_sign_out(client)
 
     # Written where the frontend harness looks for it. /reports is git-ignored,
     # which matters: recordings contain a real (if synthetic) case.

@@ -46,6 +46,9 @@ class DinoV2Index:
         self._version = 0
         self._last_updated: str | None = None
         self._loaded = False
+        #: Identity of the files this in-memory copy was read from, so a change
+        #: made by another process can be noticed. See ``refresh_if_stale``.
+        self._stamp: tuple[int, int, int, int] | None = None
 
     @property
     def count(self) -> int:
@@ -71,44 +74,117 @@ class DinoV2Index:
         if not self._loaded:
             self.load()
 
+    def _disk_stamp(self) -> tuple[int, int, int, int] | None:
+        """Identity of the two persisted files: ``(mtime_ns, size)`` of each.
+
+        ``None`` means at least one file is absent -- a state in its own right
+        that compares unequal to any present one.
+        """
+        try:
+            embeddings = self.embeddings_path.stat()
+            sidecar = self.sidecar_path.stat()
+        except OSError:
+            return None
+        return (
+            embeddings.st_mtime_ns,
+            embeddings.st_size,
+            sidecar.st_mtime_ns,
+            sidecar.st_size,
+        )
+
+    def _read_persisted(self) -> tuple[list[str], np.ndarray, int, str | None] | None:
+        """Parse the persisted index, or ``None`` if absent/unreadable/invalid.
+
+        Nothing here mutates the live index, so the caller decides whether a
+        failure should empty it (first load) or leave the working in-memory copy
+        standing (reload).
+        """
+        if not (self.embeddings_path.is_file() and self.sidecar_path.is_file()):
+            return None
+        try:
+            embeddings = np.load(self.embeddings_path)
+            meta = json.loads(self.sidecar_path.read_text(encoding="utf-8"))
+            ids = list(meta.get("ids", []))
+            if embeddings.ndim != 2 or embeddings.shape[1] != EMBEDDING_DIM:
+                raise ValueError(f"Unexpected embedding shape {embeddings.shape}")
+            if len(ids) != embeddings.shape[0]:
+                raise ValueError(
+                    f"DINOv2 sidecar has {len(ids)} ids for {embeddings.shape[0]} embeddings"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Could not read DINOv2 embedding index (%s: %s).",
+                exc.__class__.__name__,
+                exc,
+            )
+            return None
+        return (
+            ids,
+            np.ascontiguousarray(embeddings, dtype=np.float32),
+            int(meta.get("index_version", 0)),
+            meta.get("last_updated"),
+        )
+
     def load(self) -> None:
         """Read the persisted embedding index from disk, tolerating missing files."""
         with self._lock:
             self._loaded = True
-            if not (self.embeddings_path.is_file() and self.sidecar_path.is_file()):
+            # Stamp before reading: if the files change mid-read the stamp kept is
+            # the older one, so the next staleness check reloads rather than
+            # trusting a torn read.
+            stamp = self._disk_stamp()
+            parsed = self._read_persisted()
+            self._stamp = stamp
+            if parsed is None:
                 self._ids = []
                 self._embeddings = np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
                 return
 
-            try:
-                embeddings = np.load(self.embeddings_path)
-                meta = json.loads(self.sidecar_path.read_text(encoding="utf-8"))
-                ids = list(meta.get("ids", []))
-                if embeddings.ndim != 2 or embeddings.shape[1] != EMBEDDING_DIM:
-                    raise ValueError(f"Unexpected embedding shape {embeddings.shape}")
-                if len(ids) != embeddings.shape[0]:
-                    raise ValueError(
-                        f"DINOv2 sidecar has {len(ids)} ids for {embeddings.shape[0]} embeddings"
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "Could not load DINOv2 embedding index (%s: %s); starting empty.",
-                    exc.__class__.__name__,
-                    exc,
-                )
-                self._ids = []
-                self._embeddings = np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
-                return
-
-            self._ids = ids
-            self._embeddings = np.ascontiguousarray(embeddings, dtype=np.float32)
-            self._version = int(meta.get("index_version", 0))
-            self._last_updated = meta.get("last_updated")
+            self._ids, self._embeddings, self._version, self._last_updated = parsed
             logger.info(
                 "Loaded DINOv2 visual index: %d embeddings, version %d",
                 self.count,
                 self._version,
             )
+
+    def refresh_if_stale(self) -> bool:
+        """Reload if the files on disk changed since they were last read.
+
+        Same reason as the perceptual index: ``scripts/build_index.py`` writes
+        these files from another process, and a server that never re-reads them
+        keeps answering visual-similarity queries from an index built before the
+        corpus was ingested. Returns True if the in-memory index was replaced.
+        """
+        with self._lock:
+            if not self._loaded:
+                self.load()
+                return True
+            stamp = self._disk_stamp()
+            if stamp == self._stamp:
+                return False
+
+            parsed = self._read_persisted()
+            # Record the stamp either way, so an unreadable index is retried when
+            # its bytes change again rather than on every subsequent query.
+            self._stamp = stamp
+            if parsed is None:
+                # A failed *reload* keeps what is already in memory; only a first
+                # load starts empty.
+                logger.warning(
+                    "DINOv2 index at %s changed but could not be read; keeping "
+                    "the %d embedding(s) already in memory.",
+                    self.dir,
+                    self.count,
+                )
+                return False
+
+            self._ids, self._embeddings, self._version, self._last_updated = parsed
+            logger.info(
+                "Reloaded DINOv2 visual index from disk: %d embeddings, version %d",
+                self.count,
+                self._version,
+            )
+            return True
 
     def save(self) -> None:
         with self._lock:
@@ -136,6 +212,9 @@ class DinoV2Index:
             )
             tmp_embeddings.replace(self.embeddings_path)
             tmp_sidecar.replace(self.sidecar_path)
+            # This process is now the last writer, so adopt the stamp of what it
+            # just wrote rather than re-reading it on the next staleness check.
+            self._stamp = self._disk_stamp()
 
     def _touch(self) -> None:
         self._version += 1
@@ -301,13 +380,20 @@ _instance_lock = threading.Lock()
 
 
 def get_dinov2_index(settings: Settings) -> DinoV2Index:
-    """Return the shared DinoV2Index singleton."""
+    """Return the shared index, reloading it if the files on disk have changed.
+
+    Freshness is re-checked on every hand-out because the instance is
+    process-wide and long-lived while the files behind it are rewritten by
+    ``scripts/build_index.py`` and by rebuilds in other workers.
+    """
     global _instance, _instance_dir
     with _instance_lock:
         if _instance is None or _instance_dir != settings.index_dir:
             _instance = DinoV2Index(settings)
             _instance_dir = settings.index_dir
             _instance.load()
+        else:
+            _instance.refresh_if_stale()
         return _instance
 
 

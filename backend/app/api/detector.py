@@ -27,6 +27,7 @@ from app.models import Evidence
 from app.schemas.api import DetectorResultResponse, DetectorStatusResponse
 from app.services import audit
 from app.services import detector as detector_service
+from app.services import pipeline
 from app.services.storage import absolute_path
 
 logger = logging.getLogger("pramaan.api.detector")
@@ -49,6 +50,15 @@ _READ_CHUNK = 1024 * 1024
 def detector_status(settings: SettingsDep) -> DetectorStatusResponse:
     """Report the active detector adapters, models, versions and availability."""
     return DetectorStatusResponse(**detector_service.status(settings))
+
+
+@router.get(
+    "/api/detector/manifest",
+    summary="Published model manifest and forensic detector specifications",
+)
+def detector_manifest() -> dict[str, Any]:
+    """Report the published model manifest with exact architectures, weights hashes, and limitations."""
+    return detector_service.get_manifest()
 
 
 def _safe_suffix(filename: str | None) -> str:
@@ -145,6 +155,13 @@ async def detect_media(
                     "missing from this host, so it cannot be analysed."
                 ),
             )
+        # Ad-hoc or not, this is the neural stage reading a booked-in exhibit, so
+        # it verifies the digest first for the same reason the pipeline does. The
+        # `is_file` guard above already separated "absent" from "altered", which
+        # is why this call can only raise on a genuine mismatch.
+        path = pipeline.verified_path(
+            db, evidence=evidence, settings=settings, actor="api"
+        )
         result = detector.analyse(path, media_type=media_type or evidence.media_type)
 
         # An ad-hoc examination of registered evidence belongs in the chain of

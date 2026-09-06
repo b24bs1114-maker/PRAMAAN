@@ -167,11 +167,6 @@ def extract_embedding(
                 pass
 
 
-def clear_embedding_cache() -> None:
-    """Clear the in-memory embedding cache."""
-    _embedding_cache.clear()
-
-
 def status(model_name: str = "facebook/dinov2-small", device_pref: str = "auto") -> dict[str, Any]:
     """Report DINOv2 service status."""
     model, _, device = get_dinov2_components(model_name=model_name, device_pref=device_pref)

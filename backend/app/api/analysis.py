@@ -9,11 +9,15 @@ client's point of view: results are computed if absent, cached in
 from __future__ import annotations
 
 import logging
+import threading
+import time
+from collections import OrderedDict
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select
 
 from app.api.deps import CaseDep, DbDep, SettingsDep
+from app.config import get_settings
 from app.models import KIND_FUSION, AnalysisResult, AuditLog
 from app.schemas.api import (
     AnalysisResponse,
@@ -27,6 +31,7 @@ from app.schemas.api import (
     StoredMatchesResponse,
     StoredVerdictResponse,
     VerdictResponse,
+    WebDiscoveryResponse,
 )
 from app.services import (
     analysis_store,
@@ -38,7 +43,9 @@ from app.services import (
     pipeline,
     propagation,
     provenance as provenance_service,
+    storage,
 )
+from app.services.web_provenance import WebProvenanceService
 from app.utils.timeutil import iso
 
 logger = logging.getLogger("pramaan.api.analysis")
@@ -287,15 +294,41 @@ def get_case_propagation(
     refresh: bool = Query(
         False, description="Re-run near-duplicate matching before reconstructing."
     ),
+    record: bool = Query(
+        True,
+        description=(
+            "Append MATCH_SEARCHED / PROPAGATION_RECONSTRUCTED to the audit "
+            "chain. Pass false for a page load, which must not write."
+        ),
+    ),
 ) -> PropagationResponse:
     """Timeline and graph of copies visible in the local indexed corpus.
 
     ``origin`` is the **earliest known instance in the indexed evidence corpus**.
     It is explicitly not an absolute real-world origin: the corpus is a partial
     view, and recorded timestamps can be wrong or altered.
+
+    ``record=false`` is the read: it reconstructs from retrieval already on
+    record, runs nothing, and writes nothing. It exists because merely opening
+    the Provenance screen used to append two rows to this case's chain and move
+    its head hash. ``trace_status`` then reports whether there was anything on
+    record to reconstruct from, so an empty graph is never mistaken for a search
+    that found nothing.
+
+    The default stays ``true`` so that an explicit trace -- the operator asking
+    for one -- remains an auditable act.
     """
+    if refresh and not record:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "refresh=true re-runs near-duplicate retrieval, which is an act "
+                "on the evidence and must be recorded; it cannot be combined "
+                "with record=false."
+            ),
+        )
     result = propagation.reconstruct_case(
-        db, case=case, settings=settings, actor="api", refresh=refresh
+        db, case=case, settings=settings, actor="api", refresh=refresh, record=record
     )
     return PropagationResponse(**result)
 
@@ -358,16 +391,29 @@ def generate_case_verdict(
         False, description="Re-run every signal stage instead of reusing stored results."
     ),
 ) -> VerdictResponse:
-    """Run every signal stage and fuse the results into a verdict per item.
+    """Run every signal stage and assess the results, one assessment per item.
 
     Each signal reports its own score, declared weight, normalised weight,
-    contribution, status and explanation, so the fused score can be recomputed by
+    contribution, status and explanation, so the arithmetic can be recomputed by
     hand. Signals that could not produce a measurement are excluded and the
     remaining weights renormalised -- a missing signal is never scored as zero.
 
-    Verdicts are ``AUTHENTIC``, ``MANIPULATED`` or ``INSUFFICIENT_EVIDENCE``. The
-    weights and thresholds are configurable prototype defaults and have not been
-    validated against a forensic reference dataset.
+    Read ``assessment`` on each item. It is the authoritative finding and it is
+    task-qualified per modality: ``INDICATORS_DETECTED``,
+    ``NO_INDICATORS_DETECTED``, ``INCONCLUSIVE`` or ``NOT_ASSESSED``, with
+    structured ``reason_codes``, the ``policy_version`` that decided it, and the
+    coverage it was reached from. Only checks eligible for the assessed task can
+    move the state; everything else the system measures is reported as a
+    descriptive observation and cannot manufacture a finding.
+
+    The top-level ``verdict`` / ``manipulation_score`` / ``confidence`` fields
+    remain for existing clients but are a projection of ``assessment``, and a
+    lossy one: both ``NOT_ASSESSED`` and ``INCONCLUSIVE`` become
+    ``INSUFFICIENT_EVIDENCE``. Anything that must tell "not assessed" from
+    "assessed and undecidable" reads ``assessment.state``.
+
+    The weights and thresholds are configurable prototype defaults and have not
+    been validated against a forensic reference dataset.
     """
     items = [
         pipeline.run_fusion(
@@ -576,3 +622,153 @@ def verify_case_audit(
         )
 
     return AuditVerifyResponse(**result)
+
+
+# --- Web discovery cache -------------------------------------------------------
+#
+# Bounded, TTL'd, success-only. The three properties the old bare dict lacked:
+#
+#   * bounded: at most ``web_discovery_cache_max_entries`` keys, oldest-entry
+#     evicted first, so a demo cannot grow the process without limit.
+#   * TTL: an entry older than ``web_discovery_cache_ttl_seconds`` is treated
+#     as absent, so a result does not masquerade as permanent truth.
+#   * success-only: ERROR and UNAVAILABLE results are never cached. The Vision
+#     API is allowed to be down once without its failure becoming the answer
+#     every later request replays; a repeated bad image_url cannot poison the
+#     cache either, because its ERROR is stored nowhere.
+
+_web_discovery_cache: "OrderedDict[str, tuple[WebDiscoveryResponse, float]]" = OrderedDict()
+_web_discovery_cache_lock = threading.Lock()
+
+#: Statuses that represent a completed, reportable discovery run. Everything
+#: else -- ERROR, PUBLIC_WEB_DISCOVERY_UNAVAILABLE -- is a condition of the
+#: deployment or of the upstream call, not a finding about the evidence.
+_CACHEABLE_WEB_STATUSES = frozenset({"SUCCESS", "NO_RESULTS"})
+
+
+def _web_cache_get(key: str, now: float) -> WebDiscoveryResponse | None:
+    with _web_discovery_cache_lock:
+        entry = _web_discovery_cache.get(key)
+        if entry is None:
+            return None
+        res, stored_at = entry
+        ttl = get_settings().web_discovery_cache_ttl_seconds
+        if ttl > 0 and (now - stored_at) > ttl:
+            del _web_discovery_cache[key]
+            return None
+        _web_discovery_cache.move_to_end(key)
+        return res
+
+
+def _web_cache_put(key: str, res: WebDiscoveryResponse, now: float) -> None:
+    settings = get_settings()
+    if res.status not in _CACHEABLE_WEB_STATUSES:
+        return
+    max_entries = settings.web_discovery_cache_max_entries
+    with _web_discovery_cache_lock:
+        if max_entries <= 0:
+            return
+        _web_discovery_cache[key] = (res, now)
+        _web_discovery_cache.move_to_end(key)
+        while len(_web_discovery_cache) > max_entries:
+            _web_discovery_cache.popitem(last=False)
+
+
+def clear_web_discovery_cache() -> None:
+    """Empty the web discovery cache (tests, and after a settings change)."""
+    with _web_discovery_cache_lock:
+        _web_discovery_cache.clear()
+
+
+@router.post(
+    "/{case_id}/web-discovery",
+    response_model=WebDiscoveryResponse,
+    summary="Run Google Cloud Vision public web discovery on case evidence",
+)
+def run_case_web_discovery(
+    case: CaseDep,
+    db: DbDep,
+    settings: SettingsDep,
+    evidence_id: str | None = Query(None, description="Specific evidence ID to inspect."),
+    image_url: str | None = Query(None, description="Optional public image URL to inspect directly."),
+    refresh: bool = Query(False, description="Re-run web discovery instead of returning cached result."),
+) -> WebDiscoveryResponse:
+    """Discover and verify public web occurrences using Google Cloud Vision Web Detection.
+
+    If credentials or configuration are absent, gracefully returns
+    `PUBLIC_WEB_DISCOVERY_UNAVAILABLE` without impacting internal provenance.
+    """
+    cache_key = f"{case.id}:{evidence_id or 'default'}:{image_url or 'default'}"
+    if not refresh:
+        cached = _web_cache_get(cache_key, time.time())
+        if cached is not None:
+            return cached
+
+    service = WebProvenanceService(settings)
+
+    # Resolve evidence
+    target_evidence = None
+    evidences = list(analysis_store.case_evidence(db, case.id))
+    if evidence_id:
+        target_evidence = next((e for e in evidences if e.id == evidence_id), None)
+    else:
+        target_evidence = next((e for e in evidences if e.media_type == "image"), None)
+        if not target_evidence and evidences:
+            target_evidence = evidences[0]
+
+    abs_path = None
+    if target_evidence:
+        abs_path = storage.absolute_path(target_evidence.stored_path, settings)
+
+    res = service.run_discovery(
+        case_id=case.id,
+        evidence_id=target_evidence.id if target_evidence else None,
+        image_path=abs_path,
+        image_url=image_url,
+    )
+
+    _web_cache_put(cache_key, res, time.time())
+
+    # Record in audit trail
+    if res.available and res.status in ("SUCCESS", "NO_RESULTS"):
+        audit.record(
+            db,
+            event=audit.EVENT_PUBLIC_WEB_DISCOVERY,
+            case_id=case.id,
+            actor="api",
+            details={
+                "status": res.status,
+                "evidence_id": target_evidence.id if target_evidence else None,
+                "occurrences_count": len(res.occurrences),
+                "verified_matches_count": res.summary.verified_matches_count,
+            },
+        )
+
+    return res
+
+
+@router.get(
+    "/{case_id}/web-discovery",
+    response_model=WebDiscoveryResponse,
+    summary="Get public web discovery occurrences for a case",
+)
+def get_case_web_discovery(
+    case: CaseDep,
+    db: DbDep,
+    settings: SettingsDep,
+    evidence_id: str | None = Query(None, description="Specific evidence ID to inspect."),
+) -> WebDiscoveryResponse:
+    """Read the latest public web discovery occurrences for a case."""
+    cache_key = f"{case.id}:{evidence_id or 'default'}:default"
+    cached = _web_cache_get(cache_key, time.time())
+    if cached is not None:
+        return cached
+
+    return run_case_web_discovery(
+        case=case,
+        db=db,
+        settings=settings,
+        evidence_id=evidence_id,
+        refresh=False,
+    )
+

@@ -19,16 +19,19 @@ from app.models.entities import (
     ROLE_CORPUS,
     AnalysisResult,
     AuditLog,
+    AuthSession,
     Case,
     Evidence,
     Match,
     Report,
     TimelineEvent,
+    User,
 )
 
 __all__ = [
     "AnalysisResult",
     "AuditLog",
+    "AuthSession",
     "Base",
     "Case",
     "Evidence",
@@ -43,6 +46,7 @@ __all__ = [
     "ROLE_CORPUS",
     "Report",
     "TimelineEvent",
+    "User",
     "get_engine",
     "get_session_factory",
     "init_db",

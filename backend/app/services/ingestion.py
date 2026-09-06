@@ -14,11 +14,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, BinaryIO
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import ROLE_CASE_EVIDENCE, ROLE_CORPUS, AuditLog, Case, Evidence
+from app.models import ROLE_CASE_EVIDENCE, ROLE_CORPUS, AuditLog, Case, Evidence, Report
 from app.services import audit
 from app.services.hashing import (
     PERCEPTUAL_ALGORITHM,
@@ -33,7 +33,7 @@ from app.services.storage import (
     commit_upload,
     stage_upload,
 )
-from app.utils.timeutil import iso, utcnow
+from app.utils.timeutil import iso
 
 logger = logging.getLogger("pramaan.ingest")
 
@@ -47,18 +47,28 @@ class IngestResult:
 
 
 CASE_NUMBER_PREFIX = "PRAMAAN"
-_CASE_NUMBER_SUFFIX = re.compile(rf"^{CASE_NUMBER_PREFIX}-\d{{8}}-(\d+)$")
+#: Compact, sequential human-facing numbers: PRAMAAN-1001, PRAMAAN-1002, ...
+#: Deliberately a single numeric run with no date segment, so the visible case
+#: number stays short and memorable. Older dated numbers of the form
+#: ``PRAMAAN-YYYYMMDD-NNNN`` carry a second dash and never match this pattern, so
+#: they are left untouched and simply ignored by the sequence scan below.
+_CASE_NUMBER_RE = re.compile(rf"^{CASE_NUMBER_PREFIX}-(\d+)$")
+#: First number ever issued is CASE_NUMBER_START + 1 (PRAMAAN-1001). Starting the
+#: visible sequence at 1001 keeps early numbers uniform in width.
+CASE_NUMBER_START = 1000
 
 
-def _highest_issued_sequence(session: Session, prefix: str) -> int:
-    """Highest sequence ever issued under ``prefix`` -- including deleted cases.
+def _highest_issued_sequence(session: Session) -> int:
+    """Highest compact sequence ever issued -- including deleted cases.
 
     Live rows alone are not enough. A case can be deleted, but its audit rows
     cannot be, and every ``CASE_CREATED`` event carries the number that was
-    handed out. Reading both means a number is never issued twice on the same
-    day, so the retained trail cannot end up describing two different cases under
-    one human-facing case number.
+    handed out. Reading both means a number is never re-issued after a deletion
+    or a restart, so the retained trail cannot end up describing two different
+    cases under one human-facing case number. The floor at ``CASE_NUMBER_START``
+    makes the first issued number ``PRAMAAN-1001`` on a fresh database.
     """
+    prefix = f"{CASE_NUMBER_PREFIX}-"
     issued: list[str | None] = list(
         session.execute(
             select(Case.case_number).where(Case.case_number.like(f"{prefix}%"))
@@ -73,26 +83,25 @@ def _highest_issued_sequence(session: Session, prefix: str) -> int:
             )
         ).scalars()
     )
-    highest = 0
+    highest = CASE_NUMBER_START
     for number in issued:
-        match = _CASE_NUMBER_SUFFIX.match(number or "")
+        match = _CASE_NUMBER_RE.match(number or "")
         if match:
             highest = max(highest, int(match.group(1)))
     return highest
 
 
 def generate_case_number(session: Session) -> str:
-    """Human-facing case number: PRAMAAN-YYYYMMDD-NNNN (daily sequence).
+    """Human-facing case number: compact and sequential (PRAMAAN-1001, ...).
 
-    The sequence is one past the highest ever *issued* today, not the number of
-    cases that currently exist. Counting live rows would re-issue a number the
-    moment a case was deleted: the next insert would collide with a surviving
-    case and be rejected by the unique constraint, and any number that did get
-    through would appear against two different cases in the audit trail.
+    The sequence is one past the highest ever *issued*, not the number of cases
+    that currently exist. Counting live rows would re-issue a number the moment a
+    case was deleted: the next insert would collide with a surviving case and be
+    rejected by the unique constraint, and any number that did get through would
+    appear against two different cases in the audit trail. Reading the audit
+    chain as well as live rows also survives a full restart with no live cases.
     """
-    today = utcnow().strftime("%Y%m%d")
-    prefix = f"{CASE_NUMBER_PREFIX}-{today}-"
-    return f"{prefix}{_highest_issued_sequence(session, prefix) + 1:04d}"
+    return f"{CASE_NUMBER_PREFIX}-{_highest_issued_sequence(session) + 1}"
 
 
 def create_case(
@@ -148,12 +157,89 @@ def find_duplicate(
     return session.execute(stmt).scalars().first()
 
 
-def case_to_dict(case: Case, evidence_count: int | None = None) -> dict[str, Any]:
+def report_count(session: Session, case_id: str) -> int:
+    """Forensic reports on record for a case.
+
+    Reported alongside the case so a client can distinguish "a report has been
+    generated for this case" from "no report yet" without fetching the report
+    list for every row -- the case workflow indicator needs exactly that, and
+    needs it to survive a page reload.
+
+    The case's ``status`` column cannot answer it: nothing in this service ever
+    writes a report state into that column, so a client reading it would show
+    every case as unreported no matter how many reports exist.
+    """
+    return int(
+        session.execute(
+            select(func.count()).select_from(Report).where(Report.case_id == case_id)
+        ).scalar_one()
+    )
+
+
+def latest_fused_verdict_subquery() -> Any:
+    """A correlated subquery for a case's newest *fused* verdict.
+
+    Only fusion rows carry a verdict. ``metadata``, ``detector``, ``provenance``,
+    ``forensics`` and ``propagation`` rows all store ``verdict = NULL``, because a
+    single signal is not a verdict -- the verdict is what fusion produces after
+    weighing them. So "the case's newest analysis row" is the wrong query: the
+    pipeline writes propagation *after* fusion, so the newest row for an analysed
+    case is normally a propagation row, and reading its NULL verdict reports a
+    fully analysed case as never analysed.
+
+    Correlates against ``Case.id``, so it can be used both to filter a case list
+    and to sort one. Kept here, next to :func:`latest_fused_verdict`, so the
+    filter and the value it filters on cannot drift apart -- which is exactly how
+    they drifted before: four copies of this query in two modules, one of them
+    with the ``kind`` predicate and three without.
+    """
+    from app.models import KIND_FUSION, AnalysisResult
+
+    return (
+        select(AnalysisResult.verdict)
+        .where(AnalysisResult.case_id == Case.id, AnalysisResult.kind == KIND_FUSION)
+        .order_by(AnalysisResult.created_at.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
+def latest_fused_verdict(session: Session, case_id: str) -> str | None:
+    """The case's newest fused verdict, or ``None`` when it has no fusion on record.
+
+    ``None`` means "not analysed yet" and is rendered as such. It is never
+    softened into a verdict token, and a non-fusion row's NULL verdict never
+    reaches a caller as if the case had never been examined -- see
+    :func:`latest_fused_verdict_subquery` for why that distinction is not
+    academic.
+    """
+    from app.models import KIND_FUSION, AnalysisResult
+
+    return session.execute(
+        select(AnalysisResult.verdict)
+        .where(
+            AnalysisResult.case_id == case_id,
+            AnalysisResult.kind == KIND_FUSION,
+        )
+        .order_by(AnalysisResult.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def case_to_dict(
+    case: Case,
+    evidence_count: int | None = None,
+    report_count: int | None = None,
+) -> dict[str, Any]:
     """Serialise a case row for API responses.
 
     ``priority`` falls back to the model's default rather than to ``None``: an
     unset priority means "not triaged yet", which is what ``medium`` denotes
     here. Nothing else is defaulted.
+
+    ``evidence_count`` and ``report_count`` stay ``None`` unless the caller
+    counted them. A caller without a session cannot honestly report zero, and
+    the UI reads zero as "none on record" -- so the absent case is left absent.
     """
     return {
         "case_id": case.id,
@@ -167,6 +253,7 @@ def case_to_dict(case: Case, evidence_count: int | None = None) -> dict[str, Any
         "created_at": iso(case.created_at),
         "updated_at": iso(case.updated_at),
         "evidence_count": evidence_count,
+        "report_count": report_count,
     }
 
 
@@ -202,6 +289,7 @@ def ingest_stream(
     provenance: dict[str, Any] | None = None,
     is_synthetic: bool = False,
     evidence_id: str | None = None,
+    acquisition_context: str | None = None,
 ) -> IngestResult:
     """Validate, store, hash, fingerprint, persist and audit one upload.
 
@@ -282,6 +370,7 @@ def ingest_stream(
         observed_at=observed_at if isinstance(observed_at, datetime) else None,
         transformation=prov.get("transformation"),
         is_synthetic=is_synthetic,
+        acquisition_context=(acquisition_context or None),
         indexed=False,
     )
     session.add(evidence)
@@ -300,6 +389,7 @@ def ingest_stream(
             "media_type": evidence.media_type,
             "size_bytes": evidence.size_bytes,
             "role": role,
+            "acquisition_context": evidence.acquisition_context,
         },
     )
     audit.record(
@@ -377,6 +467,7 @@ def evidence_to_dict(evidence: Evidence) -> dict[str, Any]:
         "observed_at": iso(evidence.observed_at),
         "transformation": evidence.transformation,
         "is_synthetic": evidence.is_synthetic,
+        "acquisition_context": evidence.acquisition_context,
         "indexed": evidence.indexed,
     }
 
@@ -393,4 +484,5 @@ __all__ = [
     "generate_case_number",
     "get_case",
     "ingest_stream",
+    "report_count",
 ]

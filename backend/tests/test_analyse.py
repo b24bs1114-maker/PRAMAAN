@@ -172,7 +172,7 @@ def test_timeline_is_ordered_and_refers_to_real_evidence(client, analysed):
         assert event["timestamp_source"]
         assert event["discovered_by"] in {
             "case_evidence", "near_duplicate_candidate", "recorded_parent",
-            "recorded_source_group",
+            "recorded_source_group", "perceptual_match",
         }
 
 

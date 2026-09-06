@@ -82,11 +82,19 @@ export class ApiError extends Error {
       case 'not_found':
         return this.message || 'That case or evidence item does not exist on the backend.'
       case 'validation':
-        return this.details?.length
-          ? `Request rejected: ${this.details
-              .map((d) => `${d.location.slice(-1).join('') || 'field'} - ${d.message}`)
-              .join('; ')}`
-          : 'The backend rejected the request as invalid.'
+        // Two different 422s arrive here. FastAPI's own request validation sends a
+        // generic message plus per-field `details`, which is what to render. An
+        // endpoint that raises 422 itself -- intake refusing to open a case without
+        // a title and an incident description -- sends a specific sentence and no
+        // details, and that sentence is the whole point: it names which field is
+        // missing. Preferring it over the generic fallback is the difference
+        // between telling the operator what to fix and telling them nothing.
+        if (this.details?.length) {
+          return `Request rejected: ${this.details
+            .map((d) => `${d.location.slice(-1).join('') || 'field'} - ${d.message}`)
+            .join('; ')}`
+        }
+        return this.message || 'The backend rejected the request as invalid.'
       case 'server':
         return `${
           this.message || 'The backend encountered an internal error.'

@@ -95,14 +95,10 @@ STATUS_OK = "OK"
 STATUS_UNAVAILABLE = "UNAVAILABLE"
 STATUS_ERROR = "ERROR"
 STATUS_UNSUPPORTED = "UNSUPPORTED_MEDIA"
-
-LABEL_AUTHENTIC = "AUTHENTIC"
-LABEL_MANIPULATED = "MANIPULATED"
-LABEL_INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
-# Those three are verdict tokens for consumers that render a *fused* verdict.
-# Nothing in this module assigns them: turning a score into AUTHENTIC or
-# MANIPULATED is fusion's decision, and duplicating the thresholds here would let
-# the detector disagree with the case verdict.
+# Verdict tokens (AUTHENTIC / MANIPULATED / INSUFFICIENT_EVIDENCE) belong to
+# fusion, which owns the thresholds that turn a score into a verdict. Nothing in
+# this module assigns them: duplicating the thresholds here would let the
+# detector disagree with the case verdict.
 
 SCORE_SEMANTICS = (
     "0.0 = no indication of AI generation or manipulation; 1.0 = strong "
@@ -262,11 +258,6 @@ def register_inference(
     )
 
 
-def unregister_inference(modality: str) -> None:
-    with _registry_lock:
-        _registry.pop((modality or "").lower().strip(), None)
-
-
 def clear_inference_registry() -> None:
     with _registry_lock:
         _registry.clear()
@@ -408,7 +399,7 @@ def call_inference(
 
 @dataclass
 class DetectorResult:
-    """Standardized multi-modal detector result contract for Rahul's AI Engine."""
+    """Standardized multi-modal detector result contract for the AI engine."""
 
     media_type: str = "image"
     label: str = "ai_manipulation_likelihood"
@@ -1253,9 +1244,9 @@ class ImageDetector(DetectorAdapter):
     """Composite adapter for image AI-manipulation detectors.
 
     Three sockets, tried in order of specificity: an inference callable installed
-    by Rahul (registry or entrypoint), a local ONNX model, a local TorchScript
-    model. Whichever is usable is selected; when none is, this adapter abstains
-    and reports every reason so an operator can see all three.
+    by the detector plugin (registry or entrypoint), a local ONNX model, a local
+    TorchScript model. Whichever is usable is selected; when none is, this
+    adapter abstains and reports every reason so an operator can see all three.
     """
 
     id = "image_classifier"
@@ -1740,6 +1731,23 @@ def status(settings: Settings) -> dict[str, Any]:
     return result
 
 
+def get_manifest() -> dict[str, Any]:
+    """Return the published model manifest declaring architectures, checkpoints, hashes and limitations."""
+    candidates = [
+        Path(__file__).resolve().parents[3] / "pramaan-detector" / "weights" / "model_manifest.json",
+        Path(__file__).resolve().parents[2] / "pramaan-detector" / "weights" / "model_manifest.json",
+        Path("pramaan-detector/weights/model_manifest.json").resolve(),
+    ]
+    for p in candidates:
+        if p.is_file():
+            try:
+                with p.open("r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as exc:
+                logger.warning("Could not read model manifest at %s: %s", p, exc)
+    return {"manifest_version": "unknown", "models": {}}
+
+
 __all__ = [
     "AUDIO_EXTENSIONS",
     "AudioDetector",
@@ -1747,12 +1755,10 @@ __all__ = [
     "DISABLED_REASON",
     "DetectorAdapter",
     "DetectorResult",
+    "get_manifest",
     "IMAGE_EXTENSIONS",
     "INTERFACE_VERSION",
     "ImageDetector",
-    "LABEL_AUTHENTIC",
-    "LABEL_INSUFFICIENT_EVIDENCE",
-    "LABEL_MANIPULATED",
     "MODALITIES",
     "MultiModalDetectorService",
     "NullDetector",
@@ -1781,6 +1787,5 @@ __all__ = [
     "reset_detector_singleton",
     "set_detector",
     "status",
-    "unregister_inference",
     "weights_digest",
 ]

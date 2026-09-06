@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -34,6 +35,7 @@ from app.services import (
     detector as detector_service,
     forensics as forensics_service,
     fusion as fusion_service,
+    hashing,
     indexing,
     ingestion,
     matching,
@@ -72,6 +74,119 @@ VERDICT_SELECTION = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# Pre-analysis integrity verification
+# --------------------------------------------------------------------------- #
+# Every stage below reads bytes off disk. SHA-256 is taken once, at intake, and
+# from then on the digest is the only thing tying a result back to the exhibit
+# that was booked in -- so the digest has to be checked against the bytes each
+# time they are read, not assumed to still describe them. Nothing here guards
+# against a determined attacker who can rewrite the database as well as the
+# file; it catches the realistic case, which is a file replaced, re-encoded,
+# resized or restored out from under the record between intake and analysis.
+#
+# These constants are what ``GET /api/system/status`` reports. They are declared
+# here, next to the code that enforces them, so the settings page describes the
+# behaviour the pipeline actually has rather than restating a claim of its own.
+INTEGRITY_ALGORITHM = "SHA-256"
+INTEGRITY_ON_MISMATCH = "REFUSE"
+INTEGRITY_DETAIL = (
+    "Before any analysis stage reads an evidence file, its bytes are re-hashed "
+    "and compared against the SHA-256 recorded at intake. A mismatch refuses "
+    "the stage and is written to the audit chain, because a score or a verdict "
+    "computed over bytes that changed after intake would not describe the "
+    "exhibit it names. A stage that reuses a stored result reads no file and so "
+    "re-hashes nothing; use verify=true on the evidence record to re-check an "
+    "exhibit on demand."
+)
+
+
+class EvidenceIntegrityError(RuntimeError):
+    """The stored bytes no longer hash to the digest recorded at intake.
+
+    Raised instead of analysing, because the alternative is worse than having no
+    result: a manipulation score, a verdict and eventually a signed-looking PDF,
+    all describing bytes that are not the ones the chain of custody accounts
+    for. A missing file is deliberately *not* this error -- absent is a
+    different fact from altered, and each stage already reports absence in its
+    own status.
+    """
+
+    def __init__(
+        self, *, evidence_id: str, filename: str, expected: str, recomputed: str
+    ) -> None:
+        self.evidence_id = evidence_id
+        self.filename = filename
+        self.expected = expected
+        self.recomputed = recomputed
+        super().__init__(
+            f"Evidence {evidence_id} ({filename}) was not analysed: the stored "
+            "file no longer hashes to the SHA-256 recorded when it was "
+            "ingested. The bytes on disk have changed since intake. Treat this "
+            "item as compromised until the change is explained; re-ingest it "
+            "only as new evidence, never in place."
+        )
+
+
+def verified_path(
+    session: Session,
+    *,
+    evidence: Evidence,
+    settings: Settings,
+    actor: str = "system",
+) -> Path:
+    """Resolve an evidence file and prove it is still the bytes that were booked in.
+
+    Returns the path when the recomputed digest matches the recorded one, and
+    when the file is not on disk at all (absence is the stage's own finding to
+    report, not an integrity failure). Raises ``EvidenceIntegrityError``
+    otherwise, after committing the mismatch to the audit chain.
+
+    The commit is deliberate. ``get_db`` rolls the request session back on any
+    exception, so recording the finding and then raising would erase the record
+    of the most serious thing this deployment can discover about its own
+    storage. Committing first keeps the audit entry and still refuses the
+    analysis.
+    """
+    path = storage.absolute_path(evidence.stored_path, settings)
+    if not path.is_file():
+        return path
+
+    recomputed = hashing.sha256_file(path)
+    if recomputed == evidence.sha256:
+        return path
+
+    logger.error(
+        "Evidence %s failed pre-analysis integrity verification (recorded=%s "
+        "recomputed=%s)",
+        evidence.id,
+        evidence.sha256,
+        recomputed,
+    )
+    audit.record(
+        session,
+        event=audit.EVENT_HASH_CALCULATED,
+        case_id=evidence.case_id,
+        actor=actor,
+        details={
+            "evidence_id": evidence.id,
+            "purpose": "pre-analysis integrity verification",
+            "algorithm": INTEGRITY_ALGORITHM,
+            "recorded_sha256": evidence.sha256,
+            "recomputed_sha256": recomputed,
+            "matches": False,
+            "outcome": "ANALYSIS_REFUSED",
+        },
+    )
+    session.commit()
+    raise EvidenceIntegrityError(
+        evidence_id=evidence.id,
+        filename=evidence.filename,
+        expected=evidence.sha256,
+        recomputed=recomputed,
+    )
+
+
 def run_metadata(
     session: Session,
     *,
@@ -91,7 +206,7 @@ def run_metadata(
             payload["extracted_at"] = analysis_store.result_to_dict(cached)["created_at"]
             return payload
 
-    path = storage.absolute_path(evidence.stored_path, settings)
+    path = verified_path(session, evidence=evidence, settings=settings, actor=actor)
     payload = metadata_service.extract_metadata(path, evidence.media_type)
     payload["cached"] = False
     status = str(payload.get("status", "OK"))
@@ -149,7 +264,7 @@ def run_detector(
             return payload
 
     adapter = detector_service.get_detector(settings)
-    path = storage.absolute_path(evidence.stored_path, settings)
+    path = verified_path(session, evidence=evidence, settings=settings, actor=actor)
     result = adapter.analyse(path, media_type=evidence.media_type)
     payload = result.to_dict()
     # The socket that actually handled the file, not the dispatcher that routed
@@ -227,7 +342,7 @@ def run_provenance(
         if cached is not None:
             return cached
 
-    path = storage.absolute_path(evidence.stored_path, settings)
+    path = verified_path(session, evidence=evidence, settings=settings, actor=actor)
     payload = provenance_service.inspect(path, evidence.media_type)
     payload["cached"] = False
 
@@ -275,7 +390,7 @@ def run_forensics(
         if cached is not None:
             return cached
 
-    path = storage.absolute_path(evidence.stored_path, settings)
+    path = verified_path(session, evidence=evidence, settings=settings, actor=actor)
     payload = forensics_service.analyse(path, evidence.media_type)
     payload["cached"] = False
 
@@ -316,8 +431,13 @@ def run_fusion(
 ) -> dict[str, Any]:
     """Run every signal stage for one evidence item and fuse them into a verdict.
 
-    Stage failures do not propagate: each stage reports its own status and the
-    fusion layer excludes it, renormalising the remaining weights.
+    Only the stages whose signal is *applicable* to the item's media type run:
+    perceptual retrieval and compression forensics are image techniques, and
+    the audio metadata reader does not exist in this build, so for a video or
+    audio item those stages are neither executed nor fused -- they are not
+    applicable, which is not "unavailable" and not a failure. Stage failures do
+    not propagate: each stage reports its own status and the fusion layer
+    excludes it, renormalising the remaining weights.
     """
     if not refresh:
         cached = _cached_payload(
@@ -326,38 +446,56 @@ def run_fusion(
         if cached is not None:
             return cached
 
-    metadata_payload = run_metadata(
-        session, evidence=evidence, settings=settings, actor=actor, refresh=refresh
+    media_type = evidence.media_type
+    applicable = fusion_service.SIGNAL_APPLICABILITY.get(
+        media_type, fusion_service.SIGNAL_APPLICABILITY["image"]
     )
-    detector_payload = run_detector(
-        session, evidence=evidence, settings=settings, actor=actor, refresh=refresh
-    )
-    provenance_payload = run_provenance(
-        session, evidence=evidence, settings=settings, actor=actor, refresh=refresh
-    )
-    forensics_payload = run_forensics(
-        session, evidence=evidence, settings=settings, actor=actor, refresh=refresh
-    )
-    match_payload = matching.search_evidence(
-        session, evidence=evidence, settings=settings
-    )
-    # search_evidence is deliberately audit-free (search_case audits at case level),
-    # so the search this stage performs is recorded here.
-    audit.record(
-        session,
-        event=audit.EVENT_MATCH_SEARCHED,
-        case_id=evidence.case_id,
-        actor=actor,
-        details={
-            "evidence_id": evidence.id,
-            "scope": "single_evidence_item_for_fusion",
-            "candidates": len(match_payload.get("candidates", [])),
-            "indexed_count": match_payload.get("indexed_count"),
-            "index_version": match_payload.get("index_version"),
-            "max_distance": match_payload.get("max_distance"),
-            "method": match_payload.get("method"),
-        },
-    )
+
+    # Every applicable stage runs; stages outside the applicability set are
+    # skipped entirely and fusion never builds their signals.
+    metadata_payload: dict[str, Any] | None = None
+    detector_payload: dict[str, Any] | None = None
+    provenance_payload: dict[str, Any] | None = None
+    forensics_payload: dict[str, Any] | None = None
+    match_payload: dict[str, Any] | None = None
+
+    if "metadata_integrity" in applicable:
+        metadata_payload = run_metadata(
+            session, evidence=evidence, settings=settings, actor=actor, refresh=refresh
+        )
+    if "ai_detection" in applicable:
+        detector_payload = run_detector(
+            session, evidence=evidence, settings=settings, actor=actor, refresh=refresh
+        )
+    if "provenance_c2pa" in applicable:
+        provenance_payload = run_provenance(
+            session, evidence=evidence, settings=settings, actor=actor, refresh=refresh
+        )
+    if "compression_forensics" in applicable:
+        forensics_payload = run_forensics(
+            session, evidence=evidence, settings=settings, actor=actor, refresh=refresh
+        )
+    if "perceptual_duplication" in applicable:
+        match_payload = matching.search_evidence(
+            session, evidence=evidence, settings=settings
+        )
+        # search_evidence is deliberately audit-free (search_case audits at case
+        # level), so the search this stage performs is recorded here.
+        audit.record(
+            session,
+            event=audit.EVENT_MATCH_SEARCHED,
+            case_id=evidence.case_id,
+            actor=actor,
+            details={
+                "evidence_id": evidence.id,
+                "scope": "single_evidence_item_for_fusion",
+                "candidates": len(match_payload.get("candidates", [])),
+                "indexed_count": match_payload.get("indexed_count"),
+                "index_version": match_payload.get("index_version"),
+                "max_distance": match_payload.get("max_distance"),
+                "method": match_payload.get("method"),
+            },
+        )
 
     signals = fusion_service.build_signals(
         detector_payload=detector_payload,
@@ -366,12 +504,14 @@ def run_fusion(
         provenance_payload=provenance_payload,
         forensics_payload=forensics_payload,
         sha256=evidence.sha256,
+        media_type=media_type,
     )
-    payload = fusion_service.fuse(signals, settings, media_type=evidence.media_type)
+    payload = fusion_service.fuse(signals, settings, media_type=media_type)
     payload["evidence_id"] = evidence.id
     payload["filename"] = evidence.filename
     payload["sha256"] = evidence.sha256
     payload["cached"] = False
+    assessed = payload.get("assessment") or {}
 
     stored = analysis_store.store_result(
         session,
@@ -382,8 +522,8 @@ def run_fusion(
         status="OK",
         score=payload.get("manipulation_score"),
         verdict=payload.get("verdict"),
-        model=detector_payload.get("model"),
-        model_version=detector_payload.get("model_version"),
+        model=detector_payload.get("model") if detector_payload else None,
+        model_version=detector_payload.get("model_version") if detector_payload else None,
     )
     payload["fused_at"] = analysis_store.result_to_dict(stored)["created_at"]
 
@@ -394,6 +534,45 @@ def run_fusion(
         actor=actor,
         details={
             "evidence_id": evidence.id,
+            "media_type": media_type,
+            "applicable_signals": sorted(applicable),
+            # The assessment as decided, recorded in the hash chain so an
+            # examination stays interpretable under the policy that produced it:
+            # the state, its scope, the reason codes and the policy identity.
+            # ``verdict`` below is the legacy projection of the same state.
+            "assessment": {
+                key: assessed.get(key)
+                for key in (
+                    "policy_id",
+                    "policy_version",
+                    "scope",
+                    "state",
+                    "conclusive",
+                    "execution_status",
+                    "reason_codes",
+                    "score",
+                    "coverage",
+                    "thresholds",
+                    "eligible_checks",
+                )
+            },
+            "assessment_contributing_checks": [
+                {
+                    "check_id": c["check_id"],
+                    "score": c["score"],
+                    "check_state": c["check_state"],
+                    "reason_code": c["reason_code"],
+                }
+                for c in assessed.get("contributing_checks", [])
+            ],
+            "assessment_unavailable_checks": [
+                {
+                    "check_id": c["check_id"],
+                    "execution_status": c["execution_status"],
+                    "reason_code": c["reason_code"],
+                }
+                for c in assessed.get("unavailable_checks", [])
+            ],
             "verdict": payload.get("verdict"),
             "manipulation_score": payload.get("manipulation_score"),
             "confidence": payload.get("confidence"),
@@ -415,7 +594,15 @@ def run_fusion(
                 if s.get("included")
             ],
             "excluded_signals": [
-                {"signal_id": s["signal_id"], "status": s["status"]}
+                {
+                    "signal_id": s["signal_id"],
+                    "status": s["status"],
+                    # Whether it produced a number, kept distinct from whether it
+                    # was eligible to decide: a descriptive observation appears
+                    # here having measured something, and that is not a failure.
+                    "measured": s.get("measured"),
+                    "assessment_role": s.get("assessment_role"),
+                }
                 for s in payload.get("signals", [])
                 if not s.get("included")
             ],
@@ -531,7 +718,14 @@ def analyse_case(
     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 
     result: dict[str, Any] = {
-        "case": ingestion.case_to_dict(case, evidence_count=len(evidence_rows)),
+        # The report count travels with the case block because clients treat the
+        # analysis response's case as the authoritative one and replace what they
+        # hold. Omitting it here would blank a known count on every re-run.
+        "case": ingestion.case_to_dict(
+            case,
+            evidence_count=len(evidence_rows),
+            report_count=ingestion.report_count(session, case.id),
+        ),
         "evidence": [ingestion.evidence_to_dict(e) for e in evidence_rows],
         "verdict": verdict,
         "signals": signals,

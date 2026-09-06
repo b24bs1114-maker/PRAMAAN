@@ -270,3 +270,12 @@ def test_repeated_and_concurrent_inference_handles_memory_safely(client: TestCli
         responses = [f.result() for f in futures]
 
     assert all(r.status_code == 200 for r in responses)
+
+
+def test_detector_manifest_endpoint(client: TestClient) -> None:
+    res = client.get("/api/detector/manifest")
+    assert res.status_code == 200
+    data = res.json()
+    assert "models" in data
+    assert "manifest_version" in data
+

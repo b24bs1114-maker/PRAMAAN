@@ -167,7 +167,10 @@ def test_api_case_analysis_full_pipeline(client):
         up_resp = client.post(
             "/api/cases/upload",
             files={"file": ("image_authentic.jpg", f, "image/jpeg")},
-            data={"title": "Real Model Smoke Test Case"},
+            data={
+                "title": "Real Model Smoke Test Case",
+                "description": "Full pipeline run against the shipped checkpoints.",
+            },
         )
     assert up_resp.status_code in (200, 201)
     case_id = up_resp.json()["case"]["case_id"]

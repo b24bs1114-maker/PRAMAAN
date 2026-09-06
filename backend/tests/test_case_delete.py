@@ -326,14 +326,33 @@ def test_report_pdf_is_removed_from_the_shared_reports_directory(
 
     listed = client.get(f"/api/cases/{case_id}/reports")
     assert listed.status_code == 200
-    stored_names = [row["filename"] for row in listed.json()["reports"]]
-    assert stored_names
-    pdfs = [settings.reports_dir / name for name in stored_names]
+    report_count = listed.json()["count"]
+    assert report_count
+
+    # row["filename"] is the friendly, deliberately non-unique download name
+    # (PRAMAAN-<case-number>-Forensic-Report.pdf); the bytes on disk live under
+    # Report.stored_path, which carries the report id to stay unique. Locate the
+    # files by the stored name -- the database's own record of what is on disk.
+    from sqlalchemy import select
+
+    from app.models import Report, get_session_factory
+
+    session = get_session_factory()()
+    try:
+        stored_paths = list(
+            session.execute(
+                select(Report.stored_path).where(Report.case_id == case_id)
+            ).scalars()
+        )
+    finally:
+        session.close()
+    assert len(stored_paths) == report_count
+    pdfs = [settings.reports_dir / name for name in stored_paths]
     for pdf in pdfs:
         assert pdf.is_file(), f"report PDF was not written: {pdf}"
 
     body = client.delete(f"/api/cases/{case_id}").json()
-    assert body["deleted"]["reports"] == len(stored_names)
+    assert body["deleted"]["reports"] == report_count
     assert body["storage"]["report_files_removed"] == len(pdfs)
     for pdf in pdfs:
         assert not pdf.exists(), f"report PDF survived the delete: {pdf}"

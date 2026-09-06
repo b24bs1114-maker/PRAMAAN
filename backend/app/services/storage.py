@@ -300,21 +300,3 @@ def commit_upload(
 def absolute_path(stored_path: str, settings: Settings) -> Path:
     """Resolve a stored relative path back to an absolute one, safely."""
     return resolve_within(settings.data_dir, stored_path)
-
-
-def store_local_file(
-    source: Path,
-    *,
-    evidence_id: str,
-    settings: Settings,
-    bucket: str = "corpus",
-    bucket_key: str = "default",
-) -> str:
-    """Copy a file that is already on disk (corpus ingestion) into storage."""
-    target_dir = resolve_within(settings.evidence_dir, bucket, bucket_key)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = resolve_within(
-        settings.evidence_dir, bucket, bucket_key, f"{evidence_id}{source.suffix.lower()}"
-    )
-    shutil.copy2(source, target)
-    return str(target.relative_to(settings.data_dir.resolve()))

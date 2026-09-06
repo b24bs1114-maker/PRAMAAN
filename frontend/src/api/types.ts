@@ -12,6 +12,58 @@
  * the core forensic guarantee. Never coalesce a null score to 0.
  */
 
+// --- Authentication ----------------------------------------------------------
+
+/** Credentials posted to `POST /api/auth/login`. The backend forbids extra fields. */
+export interface LoginRequest {
+  username: string
+  password: string
+}
+
+/**
+ * The signed-in operator, as the backend reports them.
+ *
+ * This is the only source of the examiner's name anywhere in the UI. `display_name`
+ * is what the backend stamps on evidence at ingest, so the intake screen shows this
+ * value rather than asking anyone to type one.
+ */
+export interface AuthUser {
+  user_id: string
+  username: string
+  display_name: string
+  role: string
+  /** ISO-8601, or null for an account that has never signed in before now. */
+  last_login_at: string | null
+  /**
+   * True when the backend supplied this identity through its local development
+   * auth bypass instead of a real login. Server-decided: the browser cannot set
+   * it, and it is absent (false) for every authenticated operator. The UI shows it
+   * so a bypass session is never mistaken for an examiner's attested work.
+   */
+  dev_bypass?: boolean
+}
+
+/**
+ * A successful login.
+ *
+ * `token` is shown exactly once, in this response -- the server keeps only its
+ * hash, so a lost token cannot be recovered, only replaced by signing in again.
+ */
+export interface LoginResponse {
+  token: string
+  /** Always `"bearer"`; sent back verbatim as the `Authorization` scheme. */
+  token_type: string
+  /** ISO-8601 expiry of this session. */
+  expires_at: string
+  user: AuthUser
+}
+
+/** Result of `POST /api/auth/logout`. `revoked` is false if the token was already gone. */
+export interface LogoutResponse {
+  status: string
+  revoked: boolean
+}
+
 // --- Signals -----------------------------------------------------------------
 
 /**
@@ -68,8 +120,17 @@ export interface Verdict {
   method: string
   fusion_version: string
   signals: Signal[]
+  /** Contributing signals, from the backend's own `included` set. */
   signals_available: number
+  /** Signals APPLICABLE to this media type that were considered (== signals.length). */
   signals_total: number
+  /**
+   * Applicable signals that actually ran (were attempted), whether or not they
+   * could decide. Inapplicable signals are in none of these counts.
+   */
+  signals_evaluated: number
+  /** The applicable signal set this verdict was fused over, from backend truth. */
+  applicable_signals: Array<{ signal_id: string; name: string }>
   declared_weights: Record<string, number>
   signal_coverage: number
   primary_signal_available: boolean
@@ -88,12 +149,50 @@ export interface Verdict {
   fused_at: string | null
   cached: boolean
   media_type: string
-  /** Always 1.0 -- the declared weights before renormalisation. */
+  /** Declared weights of the APPLICABLE signals before renormalisation. */
   declared_weight_total: number
-  /** Sum of declared weights that actually contributed. */
+  /** Sum of applicable declared weights that actually contributed. */
   available_weight: number
   /** Signals that can establish authenticity on their own; drives gate G-2. */
   primary_signals: string[]
+}
+
+/**
+ * The fused verdicts already in a case file, from `GET /api/cases/{id}/verdict`.
+ *
+ * This is the read-only twin of `POST /analyse`: fusion is not re-run, so opening
+ * a screen with it cannot rewrite the analysis of record or append to the audit
+ * chain. That is the whole reason it exists here -- the Analysis screen has to be
+ * able to show the verdict a case already carries when an examiner arrives by
+ * deep link, without the page load itself becoming a forensic act.
+ *
+ * `items` are the stored fusion payloads verbatim, so each carries its own
+ * signals, arithmetic and thresholds. Evidence that has never been fused is in
+ * `pending_evidence` rather than being given a placeholder verdict: an item with
+ * no verdict has no verdict, which is not the same as an inconclusive one.
+ */
+export interface StoredVerdictResponse {
+  case_id: string
+  count: number
+  items: Verdict[]
+  method: string
+  interpretation: string
+  caveat: string
+  /** Always "stored" -- the backend says so explicitly rather than implying it. */
+  source: string
+  /** Evidence items in the case, fused or not. */
+  evidence_count: number
+  /** How many of them have a stored fused verdict. */
+  analysed_count: number
+  pending_evidence: Array<{
+    evidence_id: string
+    filename: string
+    media_type: string
+    sha256: string
+    reason: string
+  }>
+  run_verdict_url: string | null
+  notes: string[]
 }
 
 // --- Case and evidence -------------------------------------------------------
@@ -111,6 +210,14 @@ export interface CaseRecord {
   priority?: string
   latest_verdict?: string
   complaint_reference?: string
+  /**
+   * Forensic reports on record for this case.
+   *
+   * `null`/absent means the endpoint that produced this record did not count
+   * them -- NOT that there are none. Read a positive number as "a report
+   * exists"; never read the absence of one as "no report".
+   */
+  report_count?: number | null
 }
 
 export interface Evidence {
@@ -135,6 +242,15 @@ export interface Evidence {
   platform: string | null
   observed_at: string | null
   transformation: string | null
+  /**
+   * How the evidence came into the examiner's hands, as typed at intake.
+   *
+   * Optional and free text: a real column on the evidence row, written once at
+   * ingest and carried into the `EVIDENCE_INGESTED` audit entry. `null` means the
+   * operator recorded nothing -- never an empty string, so a report cannot print
+   * a blank custody note as though something had been said.
+   */
+  acquisition_context: string | null
   is_synthetic: boolean
   indexed: boolean
 }
@@ -294,6 +410,28 @@ export interface MatchesResponse {
   }
 }
 
+/**
+ * The candidates a case already carries, as the last search stored them.
+ *
+ * The response of `GET /api/cases/{id}/matches`, which runs no retrieval and
+ * writes nothing -- unlike the `POST` on the same path, which replaces the
+ * stored set and appends `MATCH_SEARCHED` to the case's audit chain.
+ */
+export interface StoredMatchesResponse extends MatchesResponse {
+  source: string
+  /**
+   * Whether near-duplicate retrieval has ever run for this case.
+   *
+   * Taken from the audit trail, not from the candidate count, because an empty
+   * list means two different things: nothing similar is indexed, or nobody has
+   * looked. Only the first is a finding.
+   */
+  searched: boolean
+  searched_at: string | null
+  run_matches_url: string | null
+  notes: string[]
+}
+
 // --- Propagation -------------------------------------------------------------
 
 export interface Origin {
@@ -392,6 +530,18 @@ export interface PropagationResponse {
   notes: string[]
   caveats: string[]
   undated_instances?: unknown[]
+  /**
+   * Whether the near-duplicate retrieval this reconstruction rests on ran during
+   * this request, ran earlier, or has never run.
+   *
+   * All three yield an identical empty graph when nothing matched, and they mean
+   * different things: `NOT_RUN` is an absence of measurement, not a finding that
+   * no other copies exist.
+   */
+  trace_status?: 'COMPUTED' | 'STORED' | 'NOT_RUN'
+  trace_status_meaning?: string
+  /** Whether this call appended to the case's audit chain. False for a read. */
+  recorded?: boolean
 }
 
 // --- Audit -------------------------------------------------------------------
@@ -474,11 +624,29 @@ export interface MetadataResponse {
 
 // --- Report ------------------------------------------------------------------
 
-export interface ReportResponse {
+/**
+ * A report as it comes back from a listing.
+ *
+ * These are the facts recorded about a document that already exists: the
+ * renderer that produced it, the digest of the bytes on disk, the audit head
+ * that was current when it was sealed, and `document_status` -- the standing
+ * printed onto the document itself. Nothing here is recomputed at read time, so
+ * a listing cannot disagree with the document it lists.
+ *
+ * `path` and `renderer_status` are deliberately not part of this shape. The
+ * listing endpoints do not send them, and the reasons are not incidental:
+ * `renderer_status` describes the renderer importable *now*, which is a fact
+ * about the reader's environment rather than about a document written in a
+ * previous one, and it lives on the library envelope instead; `path` is the
+ * file's location on the host, which a client never needs when it has an
+ * authenticated `download_url`. Declaring them here made every listed report
+ * claim two fields the server had never sent -- which is how the prototype
+ * caveat came to render blank for every stored report.
+ */
+export interface StoredReport {
   case_id: string
   report_id: string
   filename: string
-  path: string
   size_bytes: number
   sha256: string
   generated_at: string
@@ -487,10 +655,29 @@ export interface ReportResponse {
   pages: number | null
   audit_head_hash: string
   audit_chain_valid: boolean
+  /**
+   * The caveat printed into the PDF -- prototype output, demonstration
+   * thresholds, requires qualified examiner review. Shown verbatim wherever a
+   * report is presented, because it is the document's own standing.
+   */
   document_status: string
-  renderer_status: Record<string, unknown>
   /** Relative path -- must be prefixed with the API base URL before use. */
   download_url: string
+  /** Present on listings, which join the case; absent from the generate response. */
+  case_number?: string | null
+  case_title?: string | null
+}
+
+/**
+ * The response to generating a report.
+ *
+ * Everything a listing carries, plus the two things only the caller who caused
+ * the write can be told: where the file was written, and which renderer was
+ * available at the moment it was written.
+ */
+export interface ReportResponse extends StoredReport {
+  path: string
+  renderer_status: Record<string, unknown>
 }
 
 // --- Status ------------------------------------------------------------------
@@ -625,3 +812,255 @@ export interface DetectResult {
   timestamps?: Array<Record<string, unknown>>
   status: string
 }
+
+// --- Public Web Discovery (Google Cloud Vision Web Detection) ----------------
+
+/**
+ * `GET /api/system/signals`.
+ *
+ * The applicable forensic signal set per media type, from the fusion engine's
+ * own applicability map. The single source the Analysis UI renders its signal
+ * matrix from: a signal absent from a media type's list is NOT APPLICABLE and
+ * is hidden -- never rendered as a failed or zero row, never counted in any
+ * coverage denominator. The frontend never hardcodes applicability itself.
+ */
+export interface SignalApplicability {
+  signal_names: Record<string, string>
+  applicability: Record<string, Array<{ signal_id: string; name: string }>>
+  note: string
+  declared_weights: Record<string, number>
+}
+
+export type WebOccurrenceType = 'EXACT_MATCH' | 'NEAR_DUPLICATE' | 'VISUALLY_SIMILAR' | 'PAGE_ONLY'
+
+export interface WebOccurrence {
+  occurrence_id: string
+  url: string
+  domain: string
+  page_title: string | null
+  match_type: WebOccurrenceType
+  raw_google_category: string
+  similarity: number | null
+  perceptual_distance: number | null
+  dinov2_similarity?: number | null
+  match_basis: string
+  published_at: string | null
+  discovered_at: string
+  verified: boolean
+  verification_error?: string | null
+}
+
+export interface WebEntity {
+  entity_id: string | null
+  description: string
+  score: number | null
+}
+
+export interface WebTimelineNode {
+  node_id: string
+  url: string
+  domain: string
+  label: string
+  timestamp: string
+  timestamp_type: 'published' | 'discovered'
+  match_type: string
+  similarity: number | null
+  is_earliest: boolean
+}
+
+export interface WebDiscoverySummary {
+  total_occurrences: number
+  pages_count: number
+  full_matches_count: number
+  partial_matches_count: number
+  visually_similar_count: number
+  verified_matches_count: number
+}
+
+export interface WebDiscoveryResponse {
+  case_id: string
+  evidence_id: string | null
+  available: boolean
+  status: 'SUCCESS' | 'PUBLIC_WEB_DISCOVERY_UNAVAILABLE' | 'NO_RESULTS' | 'ERROR'
+  earliest_discovered_occurrence: WebOccurrence | null
+  occurrences: WebOccurrence[]
+  web_entities: WebEntity[]
+  best_guess_labels: string[]
+  timeline: WebTimelineNode[]
+  summary: WebDiscoverySummary
+  source_image_url: string | null
+  caveats: string[]
+  unavailable_reason: string | null
+}
+
+export interface ModelManifestSpec {
+  status: string
+  model_name: string
+  model_version: string
+  source_repo?: string
+  hf_hub_model?: string
+  checkpoint_filename: string
+  release_asset?: string
+  weights_size_bytes?: number
+  weights_sha256?: string
+  parameters?: number
+  license?: string
+  dataset?: string
+  dataset_license?: string
+  architecture?: string
+  input_preprocessing?: Record<string, unknown>
+  label_mapping?: Record<string, string>
+  score_direction?: string
+  validation_status?: string
+  known_limitations?: string
+}
+
+export interface DetectorManifest {
+  manifest_version: string
+  project?: string
+  updated_at?: string
+  models: {
+    image?: ModelManifestSpec
+    video?: ModelManifestSpec
+    audio?: ModelManifestSpec
+    [key: string]: ModelManifestSpec | undefined
+  }
+}
+
+export interface SystemStatusDirectory {
+  path: string
+  exists: boolean
+  writable: boolean
+}
+
+/**
+ * `GET /api/system/status`.
+ *
+ * The shape below is the response the backend actually sends. The previous
+ * declaration was not: it put `detector`, `validator`, `index`, `renderer` and
+ * `last_verification` at the top level, where none of them exist, and omitted
+ * `database` and `capabilities` entirely. Nothing caught it because TypeScript
+ * only checks the annotation against its uses, and `api.systemStatus()` casts
+ * an untyped JSON body -- so `systemStatus.validator.c2pa_installed` typechecked
+ * cleanly and threw at runtime, taking the whole Settings screen into the error
+ * boundary the moment the Integrations tab was opened.
+ *
+ * Every capability block is optional-free but individually nullable-aware: the
+ * backend always sends the keys, and their *contents* say whether the thing
+ * works. `c2pa_library_available: false` with `container_scan_available: true`
+ * is a real and distinct state (a manifest can be found but its signature not
+ * validated) and must not be flattened into "no C2PA".
+ */
+export interface SystemStatus {
+  app: {
+    name: string
+    version: string
+    description: string
+    environment: string
+    debug: boolean
+    docs_enabled: boolean
+    /** True only while no stage can make an outbound call -- follows `capabilities.web_discovery`. */
+    offline: boolean
+    offline_detail: string
+    cors_allow_origins: string[]
+  }
+  storage: {
+    data_dir: SystemStatusDirectory
+    evidence_dir: SystemStatusDirectory
+    index_dir: SystemStatusDirectory
+    reports_dir: SystemStatusDirectory
+    corpus_dir: SystemStatusDirectory
+    temp_dir: SystemStatusDirectory
+  }
+  database: {
+    engine: string
+    path: string
+    exists: boolean
+    /** Null when the file is not on disk -- absent, not zero bytes. */
+    size_bytes: number | null
+    detail: string
+  }
+  counts: {
+    cases: number
+    evidence: number
+    analysis_results: number
+    fused_evidence: number
+    matches: number
+    reports: number
+    audit_entries: number
+  }
+  capabilities: {
+    detector: DetectorStatus & {
+      unavailable_because?: string | null
+    }
+    c2pa_validator: {
+      c2pa_library_available: boolean
+      c2pa_library_version: string | null
+      container_scan_available: boolean
+      signature_validation_available: boolean
+      state: string
+      inspector: string
+      detail: string
+    }
+    perceptual_index: IndexStatus & {
+      hashable_evidence_count: number
+      pending_evidence_count: number
+      covers: string
+    }
+    report_renderer: {
+      renderer: string
+      reportlab_available: boolean
+      reason: string | null
+      writer: string
+      note: string | null
+    }
+    web_discovery: {
+      available: boolean
+      enabled: boolean
+      /** Why it cannot run. Names the environment variable, never its value. */
+      reason: string | null
+      provider: string
+      detail: string
+    }
+    /**
+     * The pipeline's own declaration of a guarantee it enforces in code: every
+     * stage that reads an evidence file re-hashes it first and refuses to run
+     * when the bytes no longer match the digest recorded at intake.
+     *
+     * Read rather than restated. The Settings screen used to print
+     * "Pre-Inference Digest Verification — ACTIVE" as a hardcoded string over a
+     * pipeline that had no such check, which is the worst kind of thing a
+     * forensic console can get wrong: it told an examiner that tampering on
+     * disk between intake and analysis would be caught, and it would not have
+     * been.
+     */
+    integrity_verification: {
+      algorithm: string
+      /** What happens when the digests differ. Currently `REFUSE`. */
+      on_mismatch: string
+      scope: string
+      detail: string
+    }
+    metadata_extractor: {
+      extractor: string
+      interpretation: string
+    }
+  }
+  audit: {
+    total_rows: number
+    head_hash: string | null
+    genesis_hash: string
+    algorithm: string
+    interpretation: string
+    /** Null when the chain has never been verified on this deployment. */
+    last_verified_at: string | null
+    last_verification: Record<string, unknown> | null
+    last_verification_detail: string
+  }
+  generated_at: string | null
+  /** Backend-authored caveats about this deployment. Rendered verbatim. */
+  notes: string[]
+}
+
+
+

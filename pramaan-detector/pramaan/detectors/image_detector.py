@@ -179,7 +179,7 @@ def _load_vit_model(checkpoint: Path) -> tuple[Any, str]:
         pass
 
     try:
-        saved = torch.load(resolved, map_location="cpu", weights_only=False)
+        saved = torch.load(resolved, map_location="cpu", weights_only=True)
         if isinstance(saved, dict):
             sd = saved.get("state_dict", saved)
             sd = {k.replace("vit.", ""): v for k, v in sd.items()}

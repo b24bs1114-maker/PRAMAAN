@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 import shutil
 from collections.abc import Iterable
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import ColumnElement, and_, func, or_, select
 
-from app.api.deps import CaseDep, DbDep, SettingsDep
+from app.api.deps import CaseDep, CurrentUserDep, DbDep, SettingsDep
 from app.config import Settings
 from app.models import (
     AnalysisResult,
@@ -44,11 +45,50 @@ from app.services.storage import (
     absolute_path,
     resolve_within,
 )
-from app.utils.timeutil import iso, utcnow
+from app.utils.timeutil import iso, parse_iso, utcnow
 
 logger = logging.getLogger("pramaan.api.cases")
 
 router = APIRouter(prefix="/api/cases", tags=["cases"])
+
+#: Pagination bounds. A request for a million rows would build a million-row
+#: response in memory; a negative limit is meaningless in SQL but accepted by
+#: SQLite's LIMIT, where it behaves as no limit at all -- so both are rejected
+#: with a 422 rather than clamped, which would silently report a different
+#: page than the one asked for.
+MAX_LIST_LIMIT = 500
+MAX_LIST_OFFSET = 100_000
+
+
+def _validate_pagination(limit: int, offset: int) -> None:
+    if limit < 1 or limit > MAX_LIST_LIMIT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"limit must be between 1 and {MAX_LIST_LIMIT} (got {limit})",
+        )
+    if offset < 0 or offset > MAX_LIST_OFFSET:
+        raise HTTPException(
+            status_code=422,
+            detail=f"offset must be between 0 and {MAX_LIST_OFFSET} (got {offset})",
+        )
+
+
+def _parse_date_filter(value: str | None, field: str) -> datetime | None:
+    """Parse an ISO-8601 date/datetime filter bound to naive UTC.
+
+    A blank value is "no bound". A malformed value is a 422, never a silently
+    dropped filter -- a filter the client believes is active but the server
+    ignored would return the wrong page under a right-looking control.
+    """
+    if value is None or not value.strip():
+        return None
+    parsed = parse_iso(value)
+    if parsed is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field} must be an ISO-8601 date or datetime (got {value!r})",
+        )
+    return parsed
 
 
 @router.post(
@@ -62,10 +102,11 @@ def upload_evidence(
     settings: SettingsDep,
     response: Response,
     file: Annotated[UploadFile, File(description="Image, video or audio file to ingest")],
+    current: CurrentUserDep,
     case_id: Annotated[str | None, Form()] = None,
     title: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
-    examiner: Annotated[str | None, Form()] = None,
+    acquisition_context: Annotated[str | None, Form()] = None,
     priority: Annotated[str | None, Form()] = None,
     complaint_reference: Annotated[str | None, Form()] = None,
     observed_at: Annotated[str | None, Form()] = None,
@@ -83,6 +124,16 @@ def upload_evidence(
     written to disk. Re-submitting identical bytes to the same case returns the
     existing record with ``duplicate: true`` (HTTP 200) rather than storing a
     second copy.
+
+    Identity and required fields are enforced here, server-side and
+    authoritatively -- the frontend's own checks are a convenience, not the gate:
+
+    * The examiner recorded on the case is the *authenticated operator's* display
+      name (``current``), never a client-supplied field. An unauthenticated
+      request is refused by the ``current`` dependency before any file is read.
+    * Opening a **new** case (no ``case_id``) requires a non-empty case title and
+      incident description; a request missing either is a 422 and nothing is
+      stored. Adding evidence to an *existing* case does not re-require them.
     """
     if case_id:
         case = ingestion.get_case(db, case_id)
@@ -92,14 +143,31 @@ def upload_evidence(
                 detail=f"Case {case_id} not found.",
             )
     else:
+        missing = [
+            name
+            for name, value in (("title", title), ("description", description))
+            if not (value and value.strip())
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "A new case requires a non-empty "
+                    + " and ".join(
+                        {"title": "case title", "description": "incident description"}[m]
+                        for m in missing
+                    )
+                    + "."
+                ),
+            )
         case = ingestion.create_case(
             db,
-            title=title,
-            description=description,
-            examiner=examiner,
+            title=title.strip() if title else None,
+            description=description.strip() if description else None,
+            examiner=current.display_name,
             priority=priority or "medium",
             complaint_reference=complaint_reference,
-            actor="api",
+            actor=current.username,
         )
 
     try:
@@ -118,9 +186,10 @@ def upload_evidence(
             settings=settings,
             case=case,
             declared_mime=file.content_type,
-            actor="api",
+            actor=current.username,
             provenance=prov,
             is_synthetic=is_synthetic,
+            acquisition_context=acquisition_context,
         )
     except StorageError as exc:
         # Rejections are audited: an attempt to submit an invalid file is itself
@@ -129,7 +198,7 @@ def upload_evidence(
             db,
             event=audit.EVENT_EVIDENCE_REJECTED,
             case_id=case.id,
-            actor="api",
+            actor=current.username,
             details={"filename": file.filename, "reason": str(exc)},
         )
         db.commit()
@@ -156,7 +225,13 @@ def upload_evidence(
     ).scalar_one()
 
     return UploadResponse(
-        case=CaseOut(**ingestion.case_to_dict(case, evidence_count=evidence_count)),
+        case=CaseOut(
+            **ingestion.case_to_dict(
+                case,
+                evidence_count=evidence_count,
+                report_count=ingestion.report_count(db, case.id),
+            )
+        ),
         evidence=ingestion.evidence_to_dict(result.evidence),  # type: ignore[arg-type]
         duplicate=result.duplicate,
         warnings=result.warnings,
@@ -169,11 +244,16 @@ def list_cases(
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     priority_filter: Annotated[str | None, Query(alias="priority")] = None,
     query: Annotated[str | None, Query(alias="q")] = None,
+    verdict_filter: Annotated[str | None, Query(alias="verdict")] = None,
+    examiner_filter: Annotated[str | None, Query(alias="examiner")] = None,
+    created_after: Annotated[str | None, Query()] = None,
+    created_before: Annotated[str | None, Query()] = None,
     limit: int = 100,
     offset: int = 0,
 ) -> CaseListResponse:
-    from app.models import AnalysisResult, Case
+    from app.models import Case
 
+    _validate_pagination(limit, offset)
     stmt = select(Case)
     if status_filter and status_filter.lower() != "all":
         if status_filter.lower() == "active":
@@ -190,6 +270,32 @@ def list_cases(
             | (Case.description.like(pattern))
             | (Case.examiner.like(pattern))
         )
+    if verdict_filter and verdict_filter.strip().lower() != "all":
+        # The verdict shown in the list is the case's newest *fused* verdict --
+        # the same value surfaced below as `latest_verdict`, from the same shared
+        # subquery, so the filter and the column can no longer disagree.
+        # Filtering in SQL keeps the count and the page honest; the client never
+        # re-derives a verdict from partial data to filter locally.
+        wanted = verdict_filter.strip().upper()
+        latest_verdict_subq = ingestion.latest_fused_verdict_subquery()
+        if wanted in {"PENDING", "NONE", "UNANALYSED", "UNANALYZED"}:
+            # "Not yet analysed" is a real, filterable state -- the case has no
+            # fusion on record, so its newest-verdict subquery is NULL. This is
+            # the same condition the list uses to omit `latest_verdict`, and the
+            # UI renders it as "NOT YET ANALYSED". It cannot be expressed as an
+            # equality against a verdict token, so it gets its own branch.
+            stmt = stmt.where(latest_verdict_subq.is_(None))
+        else:
+            stmt = stmt.where(latest_verdict_subq == wanted)
+
+    if examiner_filter and examiner_filter.strip():
+        stmt = stmt.where(Case.examiner.like(f"%{examiner_filter.strip()}%"))
+    after_dt = _parse_date_filter(created_after, "created_after")
+    if after_dt is not None:
+        stmt = stmt.where(Case.created_at >= after_dt)
+    before_dt = _parse_date_filter(created_before, "created_before")
+    if before_dt is not None:
+        stmt = stmt.where(Case.created_at <= before_dt)
 
     total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
     rows = list(
@@ -202,37 +308,25 @@ def list_cases(
         count = db.execute(
             select(func.count()).select_from(Evidence).where(Evidence.case_id == case.id)
         ).scalar_one()
-        latest_res = db.execute(
-            select(AnalysisResult)
-            .where(AnalysisResult.case_id == case.id)
-            .order_by(AnalysisResult.created_at.desc())
-            .limit(1)
-        ).scalars().first()
 
-        cdict = ingestion.case_to_dict(case, evidence_count=count)
-        if latest_res:
-            cdict["latest_verdict"] = latest_res.verdict
+        cdict = ingestion.case_to_dict(
+            case, evidence_count=count, report_count=ingestion.report_count(db, case.id)
+        )
+        cdict["latest_verdict"] = ingestion.latest_fused_verdict(db, case.id)
         cases.append(CaseOut(**cdict))
     return CaseListResponse(count=total, cases=cases)
 
 
 @router.get("/{case_id}", response_model=CaseOut, summary="Get one case")
 def get_case(case: CaseDep, db: DbDep) -> CaseOut:
-    from app.models import AnalysisResult
-
     count = db.execute(
         select(func.count()).select_from(Evidence).where(Evidence.case_id == case.id)
     ).scalar_one()
-    latest_res = db.execute(
-        select(AnalysisResult)
-        .where(AnalysisResult.case_id == case.id)
-        .order_by(AnalysisResult.created_at.desc())
-        .limit(1)
-    ).scalars().first()
 
-    cdict = ingestion.case_to_dict(case, evidence_count=count)
-    if latest_res:
-        cdict["latest_verdict"] = latest_res.verdict
+    cdict = ingestion.case_to_dict(
+        case, evidence_count=count, report_count=ingestion.report_count(db, case.id)
+    )
+    cdict["latest_verdict"] = ingestion.latest_fused_verdict(db, case.id)
     return CaseOut(**cdict)
 
 
@@ -271,7 +365,17 @@ def update_case(
     count = db.execute(
         select(func.count()).select_from(Evidence).where(Evidence.case_id == case.id)
     ).scalar_one()
-    return CaseOut(**ingestion.case_to_dict(case, evidence_count=count))
+    # Return the same shape GET /{case_id} does. ``latest_verdict`` is not a
+    # column on the case, so ``case_to_dict`` leaves it out; the read paths
+    # attach it explicitly, and a client that trusts this response as the whole
+    # record (the edit dialog does) would otherwise see the verdict blink to
+    # "not yet analysed" after an unrelated edit. An edit never touches the
+    # fused verdict, so this reports the value already on record.
+    cdict = ingestion.case_to_dict(
+        case, evidence_count=count, report_count=ingestion.report_count(db, case.id)
+    )
+    cdict["latest_verdict"] = ingestion.latest_fused_verdict(db, case.id)
+    return CaseOut(**cdict)
 
 
 def _resolve_case_owned_files(
@@ -550,8 +654,18 @@ def delete_case(case: CaseDep, db: DbDep, settings: SettingsDep) -> CaseDeleteRe
         if getattr(settings, "enable_dinov2_retrieval", True):
             try:
                 get_dinov2_index(settings).remove(evidence_ids)
-            except Exception as d_exc:
-                logger.debug("DINOv2 index prune failed: %s", d_exc)
+            except Exception as d_exc:  # noqa: BLE001 - derived index, never load-bearing
+                # A stale DINOv2 vector is retrievable as a match for later
+                # analyses, so the failure must be visible to the caller, not
+                # debug-logged away. Same treatment as the pHash index below.
+                rebuild_required = True
+                warnings.append(
+                    f"Could not prune the DINOv2 index ({d_exc.__class__.__name__}: {d_exc}); "
+                    "run POST /api/index/rebuild to resynchronise it with the database."
+                )
+                logger.warning(
+                    "DINOv2 index prune failed for case %s: %s", case_id, d_exc
+                )
     except Exception as exc:  # noqa: BLE001 - the index is derived, never load-bearing
         rebuild_required = True
         warnings.append(
@@ -617,12 +731,25 @@ def list_global_evidence(
     db: DbDep,
     media_type: Annotated[str | None, Query()] = None,
     query: Annotated[str | None, Query(alias="q")] = None,
+    case_id: Annotated[str | None, Query()] = None,
     limit: int = 100,
     offset: int = 0,
 ) -> EvidenceListGlobalResponse:
+    _validate_pagination(limit, offset)
     stmt = select(Evidence)
     if media_type and media_type.lower() != "all":
         stmt = stmt.where(Evidence.media_type == media_type.lower())
+    # Scope, not search. `q` already matches `case_id` as a substring, but a
+    # substring is not a scope: it also matches a filename that happens to contain
+    # the id, and it cannot be combined with a search term because there is only
+    # one `q`. The Evidence screen needs both at once -- this case's exhibits,
+    # filtered by filename -- so scope gets its own exact-match parameter.
+    #
+    # An unknown case_id yields an empty list rather than a 404. This is a filter
+    # over the library, and "no evidence matches" is the truthful answer to a
+    # filter; whether the case exists is `GET /api/cases/{id}`'s question.
+    if case_id:
+        stmt = stmt.where(Evidence.case_id == case_id)
     if query:
         pattern = f"%{query.strip()}%"
         stmt = stmt.where(

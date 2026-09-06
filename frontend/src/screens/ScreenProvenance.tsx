@@ -29,9 +29,9 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import type { MatchCandidate, MatchesResponse, Origin, PropagationResponse } from '../api/types'
-import { ErrorBanner } from '../components/Banner'
-import { Empty, Spinner } from '../components/Feedback'
+import type { MatchCandidate, MatchesResponse, Origin, PropagationResponse, WebDiscoveryResponse } from '../api/types'
+import { Banner, ErrorBanner } from '../components/Banner'
+import { Empty, NoCaseSelected, Spinner } from '../components/Feedback'
 import { Icon } from '../components/Icon'
 import { Pill } from '../components/Pill'
 import { PropagationGraph } from '../components/PropagationGraph'
@@ -80,39 +80,187 @@ export function ScreenProvenance({
   investigation: Investigation
   onNavigate: (path: RoutePath, params?: { caseId?: string; filter?: string }) => void
 }) {
-  const { caseRecord, evidence, analysis, propagation, loadPropagation } = investigation
+  const { caseRecord, analysis, propagation, loadPropagation, traceProvenance } = investigation
   const currentCaseId = caseId || caseRecord?.case_id || null
 
-  // Auto-trace provenance on mount if idle
+  /*
+   * Whether the in-flight propagation call is the operator's trace or the
+   * screen's own read.
+   *
+   * The slice cannot tell them apart -- both are `phase: 'loading'` -- and the
+   * two take very different amounts of time, so a shared label would either
+   * overstate a read or leave a running corpus search looking like a page that
+   * has simply not finished loading.
+   */
+  const [traceRequested, setTraceRequested] = useState(false)
+
+  /*
+   * Opening this screen reads; it does not trace.
+   *
+   * `loadPropagation` reconstructs from retrieval already on record and writes
+   * nothing. It used to call the recording path, so merely arriving here ran
+   * near-duplicate retrieval against the corpus and appended `MATCH_SEARCHED`
+   * and `PROPAGATION_RECONSTRUCTED` to the case's chain -- the head hash moved
+   * because somebody looked. Running the trace is the operator's act, and it has
+   * its own button.
+   */
   useEffect(() => {
-    if (currentCaseId && propagation.phase === 'idle') {
+    /*
+     * The store's own case id lags the route's.
+     *
+     * `loadPropagation` is bound to `caseRecord.case_id`, which only becomes the
+     * new case once `GET /api/cases/{id}` resolves, while this effect fires the
+     * moment the route changes and the slice is reset to idle. Firing on the
+     * route alone therefore issued the *previous* case's request and stored the
+     * answer under this one: opening PRAMAAN-1003 showed PRAMAAN-1005's trace,
+     * origin filename and NOT-MEASURED state, and vice versa -- one case's
+     * forensic findings presented under another case's number. The generation
+     * guard does not catch it, because the request is issued after the switch,
+     * not before it.
+     *
+     * Waiting for the two to agree is what makes the read be about the case on
+     * screen. The slice stays idle until then, so nothing stale is rendered in
+     * the meantime.
+     */
+    const storeIsOnThisCase = caseRecord?.case_id === currentCaseId
+    if (currentCaseId && storeIsOnThisCase && propagation.phase === 'idle') {
+      // Also clears the trace flag: switching cases returns the slice to idle,
+      // and the previous case's trace must not label the new case's read.
+      setTraceRequested(false)
       loadPropagation()
     }
-  }, [currentCaseId, propagation.phase, loadPropagation])
+  }, [currentCaseId, caseRecord?.case_id, propagation.phase, loadPropagation])
 
   // On-demand candidate search
   const [liveMatches, setLiveMatches] = useState<MatchesResponse | null>(null)
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState<unknown>(null)
+  /*
+   * Whether near-duplicate retrieval has ever run for this case.
+   *
+   * From the backend's audit trail, not inferred from an empty candidate list:
+   * "nothing similar is indexed" and "nobody has looked" produce the same empty
+   * table and only the first is a finding.
+   */
+  const [candidatesSearched, setCandidatesSearched] = useState(false)
 
   // Selected node in the lineage pipeline
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
 
+  // Public web discovery state
+  const [webDiscovery, setWebDiscovery] = useState<WebDiscoveryResponse | null>(null)
+  const [runningWebDiscovery, setRunningWebDiscovery] = useState(false)
+  const [webDiscoveryError, setWebDiscoveryError] = useState<unknown>(null)
+  const [customImageUrl, setCustomImageUrl] = useState('')
+  /*
+   * The availability probe, kept apart from its answer.
+   *
+   * `webDiscovery === null` used to mean three different things at once --
+   * still asking, asked and told no, and the ask itself failed -- and the
+   * summary badge rendered all three as "UNAVAILABLE / OPTIONAL". A stage whose
+   * status could not be read is not a stage that is switched off, and saying so
+   * is the same mistake this file already refuses to make about a corpus search
+   * that nobody has run.
+   */
+  const [probe, setProbe] = useState<'loading' | 'loaded' | 'failed'>('loading')
+
+  // Check public web discovery availability on mount
+  useEffect(() => {
+    let cancelled = false
+    if (!currentCaseId) {
+      setProbe('loading')
+      return
+    }
+    setProbe('loading')
+    api
+      .getWebDiscovery(currentCaseId)
+      .then((res) => {
+        if (cancelled) return
+        setWebDiscovery(res)
+        setProbe('loaded')
+      })
+      .catch(() => {
+        // Not surfaced as a banner: nothing the examiner did has failed, and the
+        // rest of the screen is unaffected. It is recorded so the badge can say
+        // "status unknown" instead of quietly asserting "unavailable".
+        if (!cancelled) setProbe('failed')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [currentCaseId])
+
+  /**
+   * Whether this deployment can actually run the stage.
+   *
+   * `null` while unknown -- which is why it is compared explicitly rather than
+   * used as a boolean: a run button must be disabled when the answer is no, and
+   * left enabled when the answer has not arrived, not disabled by the absence of
+   * an answer.
+   */
+  const webDiscoveryAvailable: boolean | null =
+    probe === 'loaded' && webDiscovery ? webDiscovery.available : null
+  const webDiscoveryBlockedReason =
+    webDiscoveryAvailable === false
+      ? webDiscovery?.unavailable_reason ||
+        'Public web discovery is not configured on this deployment.'
+      : null
+
+  const handleRunWebDiscovery = (overrideUrl?: string) => {
+    if (!currentCaseId) return
+    // Snapshot the case the run belongs to: a slow discovery for Case A must
+    // not write its results into the screen rendered for Case B after a switch.
+    const requestCaseId = currentCaseId
+    setRunningWebDiscovery(true)
+    setWebDiscoveryError(null)
+    const imgUrl = overrideUrl !== undefined ? overrideUrl : customImageUrl.trim()
+    api
+      .runWebDiscovery(requestCaseId, {
+        imageUrl: imgUrl || undefined,
+        refresh: true,
+      })
+      .then((res) => {
+        if (requestCaseId !== (caseId || caseRecord?.case_id || null)) return
+        setWebDiscovery(res)
+      })
+      .catch((err) => {
+        if (requestCaseId !== (caseId || caseRecord?.case_id || null)) return
+        setWebDiscoveryError(err)
+      })
+      .finally(() => {
+        setRunningWebDiscovery(false)
+      })
+  }
+
+
   if (!currentCaseId) {
-    return (
-      <div className="screen stack" style={{ gap: 'var(--space-5)' }}>
-        <Empty>No case is selected. Open a case to trace its provenance.</Empty>
-        <div className="btn-row">
-          <button type="button" className="btn btn--primary" onClick={() => onNavigate('cases')}>
-            View cases
-          </button>
-        </div>
-      </div>
-    )
+    return <NoCaseSelected purpose="trace its provenance" onViewCases={() => onNavigate('cases')} />
   }
 
   const analysisData = isReady(analysis) ? analysis.data : null
   const propData: PropagationResponse | null = isReady(propagation) ? propagation.data : null
+
+  /*
+   * Whether the retrieval this reconstruction rests on has ever actually run.
+   *
+   * `NOT_RUN`, `STORED` and a search that matched nothing all produce the same
+   * empty graph, and they do not mean the same thing: the first is an absence of
+   * measurement, the second a measurement taken earlier, and only the third is a
+   * finding. The screen used to render all of them as "NO MATCH FOUND -- trace
+   * search completed", which reported never having looked as having looked and
+   * found nothing.
+   *
+   * Older backends do not send the field. Treating that as `STORED` keeps the
+   * previous wording for them rather than accusing them of not having searched.
+   */
+  const traceStatus = propData?.trace_status ?? 'STORED'
+  const traceNotRun = traceStatus === 'NOT_RUN'
+  const tracing = propagation.phase === 'loading'
+
+  const runTrace = () => {
+    setTraceRequested(true)
+    traceProvenance()
+  }
 
   const origin: Origin | null = propData?.origin ?? analysisData?.origin ?? null
   const graph = propData?.graph ?? null
@@ -120,9 +268,6 @@ export function ScreenProvenance({
 
   const subjectNode = nodes.find((n) => n.is_case_evidence) ?? null
   const earliestEvidenceId = origin?.evidence_id ?? null
-
-  // No synthesised case number: an internal UUID is shown as an internal UUID.
-  const activeCaseNumber = caseRecord?.case_number || null
 
   /** Elapsed span across the real node timestamps, or null when undatable. */
   const span = useMemo(() => propagationSpan(nodes.map((n) => n.timestamp)), [nodes])
@@ -138,16 +283,6 @@ export function ScreenProvenance({
     [nodes, earliestEvidenceId],
   )
 
-  /** Workflow position, derived from real state. Nothing is pre-ticked. */
-  const steps = useMemo(
-    () => [
-      { label: 'Case', done: Boolean(caseRecord) },
-      { label: 'Evidence', done: evidence.length > 0 },
-      { label: 'Analysis', done: isReady(analysis) || Boolean(caseRecord?.latest_verdict) },
-    ],
-    [caseRecord, evidence.length, analysis],
-  )
-
   // Select subject node by default if none selected
   const activeSelectedNode =
     nodes.find((n) => n.evidence_id === (selectedNodeId || earliestEvidenceId || subjectNode?.evidence_id)) ||
@@ -157,27 +292,71 @@ export function ScreenProvenance({
   const seededMatches = analysisData?.matches ?? null
   const effectiveMatches = liveMatches ?? seededMatches
 
+  /**
+   * Run near-duplicate retrieval, and record that it ran.
+   *
+   * A write: it replaces the case's stored match set and appends
+   * `MATCH_SEARCHED`. Correct behind the operator's button, which is now the
+   * only thing that calls it -- see `loadStoredCandidates` for the mount path.
+   */
   const runCandidateSearch = () => {
     if (!currentCaseId) return
+    // Snapshot: matches for Case A must not land in the list rendered for
+    // Case B after a rapid switch. Last-issued wins, not last-resolved.
+    const requestCaseId = currentCaseId
     setSearching(true)
     setSearchError(null)
-    api.matches(currentCaseId).then(
+    api.matches(requestCaseId).then(
       (data) => {
+        if (requestCaseId !== (caseId || caseRecord?.case_id || null)) return
         setLiveMatches(data)
+        setCandidatesSearched(true)
         setSearching(false)
       },
       (err) => {
+        if (requestCaseId !== (caseId || caseRecord?.case_id || null)) return
         setSearchError(err)
         setSearching(false)
       },
     )
   }
 
-  // Auto-fetch candidates when case is selected or loaded
+  /**
+   * Read the candidates already stored for the case. Retrieval is not run.
+   *
+   * This is what opening the screen is entitled to do. It used to call
+   * `runCandidateSearch`, so arriving here POSTed to `/matches` and appended a
+   * `MATCH_SEARCHED` row to the case's audit chain -- forensic history written
+   * because somebody navigated. The GET on the same path returns exactly what
+   * the last search stored, plus `searched`, which is the one thing the
+   * candidate list cannot tell us: whether anybody has ever looked.
+   */
+  const loadStoredCandidates = () => {
+    if (!currentCaseId) return
+    const requestCaseId = currentCaseId
+    setSearching(true)
+    setSearchError(null)
+    api.storedMatches(requestCaseId).then(
+      (data) => {
+        if (requestCaseId !== (caseId || caseRecord?.case_id || null)) return
+        setLiveMatches(data)
+        setCandidatesSearched(data.searched)
+        setSearching(false)
+      },
+      (err) => {
+        if (requestCaseId !== (caseId || caseRecord?.case_id || null)) return
+        setSearchError(err)
+        setSearching(false)
+      },
+    )
+  }
+
+  // Read the stored candidates when the case changes. A read, never a search.
   useEffect(() => {
     if (currentCaseId) {
-      runCandidateSearch()
+      loadStoredCandidates()
     }
+
   }, [currentCaseId])
 
   const candidatesList = useMemo(() => {
@@ -197,66 +376,57 @@ export function ScreenProvenance({
 
   return (
     <div className="screen stack" style={{ gap: 'var(--space-4)' }}>
-      {/* 1. TOP: CASE CONTEXT & 6-PHASE STEPPER */}
-      <div
-        className="row"
-        style={{
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          padding: '10px 18px',
-          background: 'var(--surface-2)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius)',
-          flexWrap: 'wrap',
-          gap: 12,
-        }}
-      >
-        <div className="row" style={{ gap: 10, alignItems: 'center' }}>
-          <span style={{ fontSize: '10px', color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.08em', fontFamily: 'var(--mono)', fontWeight: 700 }}>
-            {activeCaseNumber ? 'CASE NUMBER' : 'INTERNAL CASE ID'}
-          </span>
-          <code style={{ fontSize: 'var(--text-sm)', fontWeight: 800, color: 'var(--accent-bright)' }}>
-            {activeCaseNumber ? `#${activeCaseNumber}` : shortHash(currentCaseId, 12)}
-          </code>
-          {caseRecord?.title ? (
-            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-strong)', fontWeight: 600 }}>
-              · {caseRecord.title}
-            </span>
-          ) : null}
-        </div>
-
-        {/* Workflow stepper. Ticks reflect real state; nothing is pre-ticked. */}
-        <nav className="row" style={{ gap: 6, alignItems: 'center', fontSize: 'var(--text-xs)', fontFamily: 'var(--mono)' }} aria-label="Investigation Workflow">
-          {steps.map((step, idx) => (
-            <span key={step.label} className="row" style={{ gap: 6, alignItems: 'center' }}>
-              <span
-                style={{
-                  color: step.done ? 'var(--ok-bright)' : 'var(--text-faint)',
-                  fontWeight: step.done ? 600 : 400,
-                }}
-              >
-                {idx + 1}. {step.label} {step.done ? '✓' : '·'}
-              </span>
-              <span style={{ color: 'var(--text-faint)' }}>→</span>
-            </span>
-          ))}
-          <span style={{ background: 'var(--accent)', color: '#ffffff', padding: '2px 8px', borderRadius: 4, fontWeight: 700 }}>4. Provenance</span>
-          <span style={{ color: 'var(--text-faint)' }}>→</span>
-          <span style={{ color: 'var(--text-muted)' }}>5. Audit</span>
-          <span style={{ color: 'var(--text-faint)' }}>→</span>
-          <span style={{ color: 'var(--text-muted)' }}>6. Report</span>
-        </nav>
-      </div>
+      {/* The case workflow stepper (Case → Evidence → … → Provenance → …) is
+          owned by the app shell and rendered once, above this screen. It is
+          not rendered here. */}
 
       {/* 2. PAGE HEADER */}
       <div className="screen__head">
         <div>
-          <h1 className="screen__title">PROVENANCE</h1>
+          <h1 className="screen__title">PROVENANCE &amp; SOURCE TRACE</h1>
           <p className="screen__lead">
             Trace this file to the earliest instance of it held in the indexed evidence corpus.
           </p>
         </div>
+        {/*
+          The trace is an act, so it needs a control.
+
+          It had none: the screen ran the recording trace silently on mount and
+          offered no way to ask for one, which is backwards on both counts --
+          arriving somewhere wrote to a forensic record, and wanting the work
+          done was not something the operator could express. The label says which
+          of the two it is, because re-running against a corpus that has since
+          grown is a different request from running for the first time.
+        */}
+        <button
+          type="button"
+          className="btn btn--primary"
+          onClick={runTrace}
+          // Double-submit prevention: each click runs retrieval across the
+          // corpus and appends to the chain, so a second one mid-flight would
+          // duplicate real work and real audit rows.
+          disabled={tracing || !currentCaseId}
+        >
+          {tracing ? 'Tracing…' : traceNotRun ? 'Trace Provenance' : 'Re-Trace Provenance'}
+        </button>
       </div>
+
+      {/*
+        Never searched is not the same as searched and found nothing, and only
+        one of them is a result. Said once, at the top, because every panel below
+        renders from the same empty graph.
+      */}
+      {propagation.phase === 'ready' && traceNotRun ? (
+        <Banner
+          tone="info"
+          title="NOT MEASURED — NO PROVENANCE TRACE ON RECORD FOR THIS CASE"
+          detail={
+            propData?.trace_status_meaning ||
+            'No near-duplicate retrieval has been run for this case. Nothing has been measured about copies of this evidence elsewhere in the corpus.'
+          }
+          meta="Run Trace Provenance to search the indexed corpus. The trace is recorded in this case's audit chain."
+        />
+      ) : null}
 
       {/*
         A failed or in-flight trace must not render as a finding. Without this,
@@ -265,17 +435,36 @@ export function ScreenProvenance({
         failure as a negative forensic result.
       */}
       {propagation.phase === 'error' ? (
-        <ErrorBanner error={propagation.error} context="Provenance trace" onRetry={loadPropagation} />
+        <ErrorBanner
+          error={propagation.error}
+          context="Provenance trace"
+          // Retrying is a read, so the flag has to come back down or the next
+          // spinner would claim a corpus search that is not running.
+          onRetry={() => {
+            setTraceRequested(false)
+            loadPropagation()
+          }}
+        />
       ) : null}
-      {propagation.phase === 'loading' ? <Spinner label="Tracing provenance..." /> : null}
+      {/* Reading the reconstruction and running the retrieval are different
+          waits; naming the one actually happening keeps the label honest. */}
+      {propagation.phase === 'loading' ? (
+        <Spinner
+          label={
+            traceRequested
+              ? 'Running provenance trace against the indexed corpus…'
+              : 'Loading provenance reconstruction…'
+          }
+        />
+      ) : null}
 
-      {/* 3. 2-COLUMN MAIN WORKSPACE (MATCHING PANEL 6 IN COLLAGE) */}
+      {/* 3. 2-COLUMN MAIN WORKSPACE (MATCHING PANEL 6 IN COLLAGE).
+
+          `workspace-2col` collapses to one column under 960px. */}
       <div
+        className="workspace-2col"
         style={{
-          display: 'grid',
           gridTemplateColumns: 'minmax(0, 1fr) 280px',
-          gap: 'var(--space-4)',
-          alignItems: 'start',
         }}
       >
         {/* LEFT MAIN COLUMN */}
@@ -373,18 +562,37 @@ export function ScreenProvenance({
                 ) : null}
               </>
             ) : propagation.phase === 'ready' ? (
+              /*
+                Two different absences share this slot, and the screen used to
+                print the first one's wording over both: "NO MATCH FOUND / Trace
+                search completed" appeared for cases where no trace had ever been
+                run, reporting the absence of a search as the absence of copies.
+              */
               <div style={{ padding: '12px 16px', background: 'var(--surface-2)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
-                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--text-strong)' }}>No prior instance found</span>
+                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: traceNotRun ? 'var(--text-muted)' : 'var(--text-strong)' }}>
+                  {traceNotRun ? 'NOT MEASURED' : 'NO MATCH FOUND'}
+                </span>
                 <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: '4px 0 0' }}>
-                  No earlier instance of this file was identified in the indexed evidence corpus. The absence of a prior match is not a finding that the file is authentic.
+                  {traceNotRun
+                    ? 'No provenance trace has been run for this case, so no earliest instance has been established. This is not a finding about the file: nothing has been measured.'
+                    : 'Trace search completed against the indexed evidence corpus. No earlier or matching instance was identified. The absence of a prior match is not proof that the file is an original or authentic upload.'}
+                </p>
+              </div>
+            ) : propagation.phase === 'error' ? (
+              <div style={{ padding: '12px 16px', background: 'var(--surface-2)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--warn-bright)' }}>UNAVAILABLE</span>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: '4px 0 0' }}>
+                  The provenance trace service could not complete. This is not a finding of originality or of manipulation.
                 </p>
               </div>
             ) : (
-              <Empty>
-                {propagation.phase === 'error'
-                  ? 'The provenance trace did not complete, so no earliest instance can be reported.'
-                  : 'Provenance has not been traced for this case yet.'}
-              </Empty>
+              <div style={{ padding: '12px 16px', background: 'var(--surface-2)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--text-muted)' }}>NOT MEASURED</span>
+                <p style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', margin: '4px 0 0' }}>
+                  Provenance has not been computed for this case yet. Use "Trace Provenance" above to
+                  search the indexed corpus.
+                </p>
+              </div>
             )}
           </div>
 
@@ -430,9 +638,9 @@ export function ScreenProvenance({
                         fontWeight: 700,
                         color:
                           n.evidence_id === earliestEvidenceId
-                            ? '#38bdf8'
+                            ? 'var(--info)'
                             : n.is_case_evidence
-                            ? '#ef4444'
+                            ? 'var(--danger-bright)'
                             : 'var(--text-strong)',
                       }}
                     >
@@ -467,14 +675,37 @@ export function ScreenProvenance({
                   const isSubject = node.is_case_evidence
                   const isSelected = activeSelectedNode?.evidence_id === node.evidence_id
 
-                  const nodeColor = isEarliest ? '#38bdf8' : isSubject ? '#ef4444' : '#94a3b8'
+                  /*
+                   * Node colours are semantic tokens, not literals, so they
+                   * track the light/dark theme: the earliest instance reads as
+                   * info, the case evidence as danger, intermediates as faint.
+                   * The translucent fills use color-mix because a CSS variable
+                   * cannot carry an appended hex alpha.
+                   */
+                  const nodeColor = isEarliest
+                    ? 'var(--info)'
+                    : isSubject
+                    ? 'var(--danger-bright)'
+                    : 'var(--text-faint)'
 
                   return (
                     <div key={node.evidence_id} style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1 }}>
-                      <div
+                      {/*
+                        A real button, not a div claiming to be one. It had
+                        `role="button"` and `tabIndex={0}` but no key handler, so
+                        a keyboard user could focus a lineage node and then had
+                        no way to open it -- the one combination that is worse
+                        than leaving it unfocusable, because it looks reachable.
+                        `aria-pressed` carries the selected state that the border
+                        and shadow show visually.
+                      */}
+                      <button
+                        type="button"
                         onClick={() => setSelectedNodeId(node.evidence_id)}
-                        role="button"
-                        tabIndex={0}
+                        aria-pressed={isSelected}
+                        title={`Show the details recorded for this instance${
+                          node.platform ? ` (${node.platform})` : ''
+                        }`}
                         style={{
                           background: isSelected ? 'var(--surface-3)' : 'var(--surface-2)',
                           border: `1px solid ${isSelected ? nodeColor : 'var(--border)'}`,
@@ -488,7 +719,8 @@ export function ScreenProvenance({
                           cursor: 'pointer',
                           minWidth: 140,
                           flex: 1,
-                          boxShadow: isSelected ? `0 0 0 2px ${nodeColor}33` : undefined,
+                          font: 'inherit',
+                          boxShadow: isSelected ? `0 0 0 2px color-mix(in srgb, ${nodeColor} 20%, transparent)` : undefined,
                         }}
                       >
                         <div
@@ -496,7 +728,7 @@ export function ScreenProvenance({
                             width: 36,
                             height: 36,
                             borderRadius: '50%',
-                            background: `${nodeColor}22`,
+                            background: `color-mix(in srgb, ${nodeColor} 13%, transparent)`,
                             border: `2px solid ${nodeColor}`,
                             color: nodeColor,
                             display: 'flex',
@@ -529,7 +761,7 @@ export function ScreenProvenance({
                         <span style={{ fontSize: '10px', color: node.platform ? 'var(--text-faint)' : 'var(--text-muted)' }}>
                           {node.platform || 'Platform not recorded'}
                         </span>
-                      </div>
+                      </button>
 
                       {idx < arr.length - 1 ? (
                         <span style={{ color: 'var(--text-faint)', fontSize: 16 }}>→</span>
@@ -596,7 +828,7 @@ export function ScreenProvenance({
 
             <div className="card stack" style={{ padding: 'var(--space-3) var(--space-4)', gap: 6 }}>
               <span className="label" style={{ color: 'var(--text-strong)' }}>
-                TIMELINE SUMMARY
+                TRACE SUMMARY
               </span>
               <div className="row" style={{ justifyContent: 'space-between', fontSize: 'var(--text-xs)' }}>
                 <span style={{ color: 'var(--text-muted)' }}>Span across dated instances:</span>
@@ -714,7 +946,9 @@ export function ScreenProvenance({
               RELATED / NEAR-DUPLICATE CANDIDATES ({candidatesList.length})
             </span>
             <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-              Retrieved through DINOv2 visual embedding retrieval and verified against perceptual hashes (pHash/dHash/aHash).
+              {effectiveMatches?.interpretation
+                ? effectiveMatches.interpretation
+                : 'Retrieved from the indexed evidence corpus; verification basis is listed per candidate.'}
             </span>
           </div>
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
@@ -767,8 +1001,21 @@ export function ScreenProvenance({
                       </span>
                     </td>
                     <td>
+                      {/*
+                        The backend labels every candidate with a real
+                        `match_basis`: "Exact SHA-256 byte match" only when the
+                        bytes are identical, "Multi-hash verified (pHash dist N,
+                        ...)" with the measured distances, or "Perceptual match".
+                        The old fallback re-derived a claim from `distance === 0`
+                        and printed "Exact SHA-256 byte match" for a perceptual
+                        distance of zero -- which is not byte-identity -- or a
+                        bare "Multi-hash verified" with no distances. Both stated
+                        a verification the data had not performed, so the field is
+                        shown as the backend sent it and left as a placeholder
+                        when absent rather than invented.
+                      */}
                       <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                        {cand.match_basis || (cand.distance === 0 ? 'Exact SHA-256 byte match' : 'Multi-hash verified')}
+                        {orPlaceholder(cand.match_basis)}
                       </span>
                     </td>
                     <td>
@@ -796,19 +1043,333 @@ export function ScreenProvenance({
             </table>
           </div>
         ) : (
+          /*
+            An empty candidate table has two causes and they are not
+            interchangeable: retrieval ran and matched nothing, or retrieval has
+            never run. This printed the first wording for both, so a case nobody
+            had searched read as one searched without result.
+          */
           <div style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: 'var(--radius)', textAlign: 'center' }}>
             <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>
-              {searching ? 'Searching indexed evidence corpus...' : 'No near-duplicate candidates retrieved from the indexed evidence corpus for this item.'}
+              {searching
+                ? 'Reading stored candidates…'
+                : candidatesSearched
+                  ? 'Near-duplicate retrieval ran and returned no candidates from the indexed evidence corpus. That is not proof that no other copies exist.'
+                  : 'NOT MEASURED — no near-duplicate retrieval has been run for this case. Use "Run Candidate Search" below to search the indexed corpus; the search is recorded in the audit chain.'}
             </span>
           </div>
         )}
       </div>
 
-      {/* 4. DISCLOSURE FOR TOPOLOGICAL GRAPH & TECHNICAL DETAILS */}
+      {/* ========================================================================= */}
+      {/* 4. PUBLIC WEB DISCOVERY (Google Cloud Vision Web Detection)               */}
+      {/* ========================================================================= */}
+      <details className="disclosure card" open style={{ padding: 'var(--space-5)', border: '1px solid var(--border-subtle)', background: 'var(--surface-1)' }}>
+        <summary className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap', fontWeight: 800 }}>
+          <Icon name="arrow-right" size={13} className="disclosure__chevron" />
+          <span style={{ fontSize: 'var(--text-base)', letterSpacing: '0.02em' }}>PUBLIC WEB DISCOVERY</span>
+          <span className="badge badge--neutral mono" style={{ fontSize: '10px', padding: '2px 8px', letterSpacing: '0.05em' }}>
+            GOOGLE CLOUD VISION
+          </span>
+          {/* Four states, not two: this deployment can run the stage, cannot run
+              it, has not answered yet, or could not be asked. */}
+          {probe === 'loading' ? (
+            <span className="badge badge--muted" style={{ fontSize: '10px' }}>CHECKING…</span>
+          ) : webDiscoveryAvailable === true ? (
+            <span className="badge badge--success" style={{ fontSize: '10px' }}>AVAILABLE</span>
+          ) : webDiscoveryAvailable === false ? (
+            <span className="badge badge--muted" style={{ fontSize: '10px' }}>UNAVAILABLE / OPTIONAL</span>
+          ) : (
+            <span
+              className="badge badge--muted"
+              style={{ fontSize: '10px' }}
+              title="The backend did not answer when this screen asked whether public web discovery is configured. That is not the same as the stage being switched off."
+            >
+              STATUS UNKNOWN
+            </span>
+          )}
+        </summary>
+        <div className="disclosure__panel stack" style={{ gap: 'var(--space-4)', marginTop: 'var(--space-3)' }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
+            <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--text-muted)', maxWidth: '60ch' }}>
+              Secondary forensic layer searching for publicly indexed external web occurrences. Independent of internal evidence corpus.
+            </p>
+
+            <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+              <button
+                type="button"
+                className="btn btn--primary btn--sm"
+                onClick={() => handleRunWebDiscovery()}
+                /* Disabled only when the backend has said outright that the
+                   stage cannot run -- not while the answer is still in flight,
+                   and not because the probe failed. An examiner should not be
+                   invited to press a button whose only possible outcome is an
+                   error banner, and should not be locked out of one that would
+                   have worked. */
+                disabled={runningWebDiscovery || webDiscoveryAvailable === false}
+                title={
+                  webDiscoveryBlockedReason
+                    ? `Cannot run on this deployment: ${webDiscoveryBlockedReason}`
+                    : 'Query Google Cloud Vision Web Detection for public copies of this exhibit'
+                }
+                style={{ fontWeight: 700 }}
+              >
+                {runningWebDiscovery ? <Spinner label="Querying Web..." /> : <Icon name="external" size={13} />}
+                Run Public Web Discovery
+              </button>
+            </div>
+          </div>
+
+        {/* Optional Custom Public Image URL Input */}
+        <div className="row" style={{ gap: 8, alignItems: 'center', background: 'var(--surface-2)', padding: 'var(--space-2) var(--space-3)', borderRadius: 'var(--radius-sm)' }}>
+          {/* A real label rather than a span that merely sits next to the field:
+              the caption is already on screen, so it costs nothing to make it
+              the field's name and click target too. */}
+          <label
+            htmlFor="web-discovery-url"
+            style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontWeight: 600 }}
+          >
+            Inspect Image URL:
+          </label>
+          <input
+            id="web-discovery-url"
+            type="url"
+            value={customImageUrl}
+            onChange={(e) => setCustomImageUrl(e.target.value)}
+            placeholder="https://example.com/image.jpg (Optional public URL)"
+            className="input"
+            style={{ flex: 1, fontSize: 'var(--text-xs)', padding: '4px 8px', height: '28px' }}
+          />
+          {customImageUrl && (
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              style={{ height: '28px', fontSize: '11px', padding: '0 8px' }}
+              onClick={() => handleRunWebDiscovery(customImageUrl)}
+              disabled={runningWebDiscovery || webDiscoveryAvailable === false}
+              title={
+                webDiscoveryBlockedReason
+                  ? `Cannot run on this deployment: ${webDiscoveryBlockedReason}`
+                  : 'Run public web discovery against this URL instead of the case exhibit'
+              }
+            >
+              Inspect This URL
+            </button>
+          )}
+        </div>
+
+        {webDiscoveryError ? (
+          <ErrorBanner error={webDiscoveryError} context="Public web discovery" onRetry={() => handleRunWebDiscovery()} />
+        ) : null}
+
+        {/* State A: Unavailable */}
+        {webDiscovery && !webDiscovery.available && (
+          <Banner
+            tone="info"
+            title="Public web discovery unavailable."
+            detail={
+              webDiscovery.unavailable_reason ||
+              'Google Cloud Vision Web Detection credentials (GOOGLE_APPLICATION_CREDENTIALS) are not configured or PRAMAAN_WEB_DISCOVERY_ENABLED is set to false.'
+            }
+            meta="Internal evidence corpus provenance and perceptual matching continue to operate independently of public web discovery."
+          />
+        )}
+
+        {/* State B: Available and Executed with Results */}
+        {webDiscovery && webDiscovery.available && webDiscovery.status === 'SUCCESS' && (
+          <div className="stack" style={{ gap: 'var(--space-4)' }}>
+            {/* Earliest Discovered Public Web Occurrence */}
+            {webDiscovery.earliest_discovered_occurrence && (
+              <div
+                style={{
+                  background: 'var(--info-wash)',
+                  border: '1px solid var(--info-line)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: 'var(--space-3) var(--space-4)',
+                }}
+              >
+                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', color: 'var(--accent-bright)', letterSpacing: '0.06em' }}>
+                    EARLIEST DISCOVERED PUBLIC WEB OCCURRENCE
+                  </span>
+                  <span className="badge badge--accent mono" style={{ fontSize: '10px' }}>
+                    {webDiscovery.earliest_discovered_occurrence.match_type}
+                  </span>
+                </div>
+                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                  <div className="stack" style={{ gap: 2 }}>
+                    <a
+                      href={webDiscovery.earliest_discovered_occurrence.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ fontSize: 'var(--text-sm)', fontWeight: 700, color: 'var(--text-strong)', textDecoration: 'underline' }}
+                    >
+                      {webDiscovery.earliest_discovered_occurrence.page_title || webDiscovery.earliest_discovered_occurrence.url}
+                    </a>
+                    <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                      Source domain: {webDiscovery.earliest_discovered_occurrence.domain}
+                    </span>
+                  </div>
+                  <div className="row" style={{ gap: 12, alignItems: 'center' }}>
+                    {webDiscovery.earliest_discovered_occurrence.similarity !== null && (
+                      <div className="stack" style={{ alignItems: 'flex-end', gap: 2 }}>
+                        <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>SIMILARITY</span>
+                        <strong className="mono" style={{ fontSize: 'var(--text-sm)', color: 'var(--accent-bright)' }}>
+                          {(webDiscovery.earliest_discovered_occurrence.similarity * 100).toFixed(1)}%
+                        </strong>
+                      </div>
+                    )}
+                    <div className="stack" style={{ alignItems: 'flex-end', gap: 2 }}>
+                      <span style={{ fontSize: '10px', color: 'var(--text-faint)' }}>TIMESTAMP</span>
+                      <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                        {formatTimestamp(webDiscovery.earliest_discovered_occurrence.published_at || webDiscovery.earliest_discovered_occurrence.discovered_at)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Public Web Timeline */}
+            {webDiscovery.timeline.length > 0 && (
+              <div className="stack" style={{ gap: 8 }}>
+                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
+                    PUBLIC WEB TIMELINE
+                  </span>
+                  <span className="mono" style={{ fontSize: '11px', color: 'var(--text-faint)' }}>
+                    {webDiscovery.timeline.length} public occurrences
+                  </span>
+                </div>
+                <div className="row" style={{ gap: 8, overflowX: 'auto', paddingBottom: 6 }}>
+                  {webDiscovery.timeline.map((node, idx) => (
+                    <div
+                      key={node.node_id}
+                      className="card stack"
+                      style={{
+                        minWidth: 190,
+                        maxWidth: 240,
+                        padding: 'var(--space-2) var(--space-3)',
+                        gap: 4,
+                        fontSize: '11px',
+                        background: node.is_earliest ? 'var(--info-wash)' : 'var(--surface-2)',
+                        border: node.is_earliest ? '1px solid var(--accent-bright)' : '1px solid var(--border-subtle)',
+                      }}
+                    >
+                      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontWeight: 800, color: node.is_earliest ? 'var(--accent-bright)' : 'var(--text-muted)' }}>
+                          Step {idx + 1}
+                        </span>
+                        <span className="badge badge--neutral mono" style={{ fontSize: '9px', padding: '1px 4px' }}>
+                          {node.timestamp_type}
+                        </span>
+                      </div>
+                      <span style={{ fontWeight: 600, color: 'var(--text-strong)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }} title={node.label}>
+                        {node.domain}
+                      </span>
+                      <span className="mono" style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                        {formatTimestampShort(node.timestamp)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Web Occurrences Table */}
+            {webDiscovery.occurrences.length > 0 && (
+              <div className="stack" style={{ gap: 8 }}>
+                <span style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
+                  DISCOVERED PUBLIC WEB OCCURRENCES ({webDiscovery.occurrences.length})
+                </span>
+                <div style={{ overflowX: 'auto', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-md)' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--text-xs)' }}>
+                    <thead>
+                      <tr style={{ background: 'var(--surface-2)', borderBottom: '1px solid var(--border-subtle)', textAlign: 'left' }}>
+                        <th style={{ padding: '8px 12px' }}>Source / URL</th>
+                        <th style={{ padding: '8px 12px' }}>Match Type</th>
+                        <th style={{ padding: '8px 12px' }}>Similarity</th>
+                        <th style={{ padding: '8px 12px' }}>Match Basis</th>
+                        <th style={{ padding: '8px 12px' }}>Timestamp</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {webDiscovery.occurrences.map((occ) => (
+                        <tr key={occ.occurrence_id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                          <td style={{ padding: '8px 12px' }}>
+                            <div className="stack" style={{ gap: 2, maxWidth: 300 }}>
+                              <strong style={{ color: 'var(--text-strong)' }}>{occ.domain}</strong>
+                              <a href={occ.url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-bright)', fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {occ.page_title || occ.url}
+                              </a>
+                            </div>
+                          </td>
+                          <td style={{ padding: '8px 12px' }}>
+                            <span className="badge badge--neutral mono" style={{ fontSize: '10.5px' }}>
+                              {occ.match_type}
+                            </span>
+                          </td>
+                          <td style={{ padding: '8px 12px' }}>
+                            {occ.similarity !== null ? (
+                              <strong className="mono" style={{ color: 'var(--accent-bright)' }}>
+                                {(occ.similarity * 100).toFixed(1)}%
+                              </strong>
+                            ) : (
+                              <span style={{ color: 'var(--text-faint)' }}>—</span>
+                            )}
+                          </td>
+                          <td style={{ padding: '8px 12px' }}>
+                            <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                              {occ.match_basis}
+                            </span>
+                          </td>
+                          <td style={{ padding: '8px 12px' }}>
+                            <span className="mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                              {occ.published_at ? `Pub: ${formatTimestampShort(occ.published_at)}` : `Disc: ${formatTimestampShort(occ.discovered_at)}`}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Web Entities */}
+            {webDiscovery.web_entities.length > 0 && (
+              <div className="stack" style={{ gap: 6 }}>
+                <span style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', color: 'var(--text-muted)', letterSpacing: '0.05em' }}>
+                  DETECTED WEB ENTITIES
+                </span>
+                <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                  {webDiscovery.web_entities.map((ent, idx) => (
+                    <span key={idx} className="badge badge--neutral" style={{ fontSize: '11px', padding: '3px 8px' }}>
+                      {ent.description} {ent.score ? `(${Math.round(ent.score * 100)}%)` : ''}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* State C: No Results */}
+        {webDiscovery && webDiscovery.available && webDiscovery.status === 'NO_RESULTS' && (
+          <div style={{ padding: 'var(--space-4)', background: 'var(--surface-2)', borderRadius: 'var(--radius-md)' }}>
+            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+              Google Cloud Vision Web Detection returned no matching web pages, full matches, or visually similar occurrences for this item.
+            </span>
+          </div>
+        )}
+        </div>
+      </details>
+
+      {/* 5. DISCLOSURE FOR PROPAGATION GRAPH & TECHNICAL DETAILS */}
       <details className="disclosure card" style={{ padding: 'var(--space-3) var(--space-4)' }}>
         <summary style={{ fontWeight: 700, fontSize: 'var(--text-sm)' }}>
           <Icon name="arrow-right" size={13} className="disclosure__chevron" />
-          Topological Lineage Graph &amp; Technical Details ({nodes.length} nodes, {propData?.graph?.edges?.length ?? 0} edges)
+          Propagation Graph &amp; Technical Details ({nodes.length} nodes, {propData?.graph?.edges?.length ?? 0} edges)
         </summary>
         <div className="disclosure__panel stack" style={{ gap: 'var(--space-4)', marginTop: 'var(--space-3)' }}>
           {/*
@@ -854,11 +1415,22 @@ export function ScreenProvenance({
           ) : null}
 
           {graph && graph.nodes.length > 0 ? (
-            <PropagationGraph graph={graph} earliestEvidenceId={earliestEvidenceId} />
+            <div className="stack" style={{ gap: 'var(--space-2)' }}>
+              <span className="label" style={{ color: 'var(--text-strong)' }}>
+                PROPAGATION GRAPH
+              </span>
+              <PropagationGraph graph={graph} earliestEvidenceId={earliestEvidenceId} />
+            </div>
           ) : null}
 
           {searchError ? (
-            <ErrorBanner error={searchError} context="Candidate search" onRetry={runCandidateSearch} />
+            <ErrorBanner
+              error={searchError}
+              context="Candidate search"
+              // Retry the read, not the search: the failure being retried is a
+              // failed load, and retrying it must not silently run retrieval.
+              onRetry={loadStoredCandidates}
+            />
           ) : null}
 
           <div className="btn-row">
@@ -869,7 +1441,9 @@ export function ScreenProvenance({
               disabled={searching}
             >
               {searching ? <Spinner label="Searching..." /> : <Icon name="search" size={13} />}
-              Re-run Candidate Search
+              {/* "Re-run" was wrong on every case that had never been searched,
+                  which was most of them: it implied a previous run. */}
+              {candidatesSearched ? 'Re-run Candidate Search' : 'Run Candidate Search'}
             </button>
           </div>
         </div>
@@ -897,14 +1471,24 @@ export function ScreenProvenance({
           </span>
         </div>
 
-        <button
-          type="button"
-          className="btn btn--primary"
-          style={{ padding: '8px 22px', fontWeight: 700 }}
-          onClick={() => onNavigate('audit', { caseId: currentCaseId })}
-        >
-          Verify Audit →
-        </button>
+        <div className="btn-row">
+          <button
+            type="button"
+            className="btn btn--ghost"
+            style={{ padding: '8px 16px', fontSize: 'var(--text-xs)' }}
+            onClick={() => onNavigate('analysis', { caseId: currentCaseId })}
+          >
+            ← Back to Analysis
+          </button>
+          <button
+            type="button"
+            className="btn btn--primary"
+            style={{ padding: '8px 22px', fontWeight: 700 }}
+            onClick={() => onNavigate('audit', { caseId: currentCaseId })}
+          >
+            Verify Audit →
+          </button>
+        </div>
       </div>
     </div>
   )

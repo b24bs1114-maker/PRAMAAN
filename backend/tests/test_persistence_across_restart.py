@@ -8,9 +8,13 @@ evidence bytes and the append-only audit chain exactly as the exited process lef
 them. So each boot below is a **separate OS process** against one
 ``PRAMAAN_DATA_DIR``:
 
-    ingest    a fresh store: upload one image, report what was written
-    observe   new interpreter, same store: is it all still there, does the chain
-              still verify, does appending a new event keep it verifying
+    ingest    a fresh store: seed an operator, sign in, upload one image, report
+              what was written
+    observe   new interpreter, same store: sign in against the account the last
+              boot seeded -- nothing can be read without a token -- then check that
+              it is all still there, that the chain still verifies, that this
+              boot's own sign-in linked onto the head hash the exited process left,
+              and that appending further events keeps it verifying
     (tamper)  edit one historical row's payload directly in SQLite, leaving its
               stored row_hash untouched -- the realistic attack on an append-only
               log in a file you can open
@@ -40,8 +44,12 @@ import pytest
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 WORKER = Path(__file__).resolve()
 
-#: Ingesting one image writes exactly these, in this order.
+#: Ingesting one image writes exactly these, in this order. The login comes
+#: first: intake is authenticated, and signing in is itself an auditable act, so
+#: a cold boot that ingests one file starts its chain with the operator's
+#: sign-in and not with the case.
 INGEST_EVENTS = (
+    "USER_LOGIN",
     "CASE_CREATED",
     "EVIDENCE_INGESTED",
     "HASH_CALCULATED",
@@ -54,7 +62,14 @@ INGEST_EVENTS = (
 ALGORITHM = "SHA-256(previous_hash || canonical_json(payload))"
 
 CASE_TITLE = "Persistence across a process restart"
-EXAMINER = "restart-regression"
+CASE_DESCRIPTION = "Ingested once, then re-read from a new interpreter."
+#: The operator each boot signs in as. Pinned here rather than relying on the
+#: shipped defaults, so this test states the credentials it depends on. The
+#: examiner recorded against the case is this operator's display name -- intake
+#: takes no examiner field.
+OPERATOR_USERNAME = "restart-operator"
+OPERATOR_PASSWORD = "restart-regression-password"
+EXAMINER = "Restart Regression Examiner"
 
 
 def _worker_env(store: Path) -> dict[str, str]:
@@ -82,6 +97,12 @@ def _worker_env(store: Path) -> dict[str, str]:
             "PRAMAAN_IMAGE_DETECTOR_ENTRYPOINT": "",
             "PRAMAAN_VIDEO_DETECTOR_ENTRYPOINT": "",
             "PRAMAAN_AUDIO_DETECTOR_ENTRYPOINT": "",
+            # The operator the first boot seeds and every boot signs in as. Pinned
+            # so this test does not depend on the shipped placeholder credentials,
+            # and so the seeding itself is exercised on a genuinely empty store.
+            "PRAMAAN_SEED_OPERATOR_USERNAME": OPERATOR_USERNAME,
+            "PRAMAAN_SEED_OPERATOR_DISPLAY_NAME": EXAMINER,
+            "PRAMAAN_SEED_OPERATOR_PASSWORD": OPERATOR_PASSWORD,
             "PYTHONDONTWRITEBYTECODE": "1",
         }
     )
@@ -121,6 +142,29 @@ def _client():
     return TestClient(app)
 
 
+def _sign_in(client) -> dict:
+    """Sign in for real and leave the bearer token on ``client``.
+
+    No dependency override: the point of a separate process is that nothing from
+    the pytest interpreter reaches it, and that includes ``conftest.py``'s stand-in
+    operator. This boot has to seed an account, authenticate against it and carry
+    the token, exactly as a browser does.
+    """
+    response = client.post(
+        "/api/auth/login",
+        json={"username": OPERATOR_USERNAME, "password": OPERATOR_PASSWORD},
+    )
+    response.raise_for_status()
+    body = response.json()
+    client.headers["Authorization"] = f"{body['token_type']} {body['token']}"
+    return {
+        "status_code": response.status_code,
+        "token_type": body["token_type"],
+        "username": body["user"]["username"],
+        "display_name": body["user"]["display_name"],
+    }
+
+
 def _audit(client) -> dict:
     trail = client.get("/api/audit", params={"limit": 5000}).json()
     return {
@@ -129,6 +173,18 @@ def _audit(client) -> dict:
         "genesis_hash": trail["genesis_hash"],
         "algorithm": trail["algorithm"],
         "events": [event.get("event") for event in trail["events"]],
+        # Row identity, not just the event names: "the chain survived" is then
+        # checkable as "these exact rows came back", which a list of labels cannot
+        # distinguish from a chain rewritten with the same shape.
+        "rows": [
+            {
+                "seq": event.get("seq"),
+                "event": event.get("event"),
+                "previous_hash": event.get("previous_hash"),
+                "row_hash": event.get("row_hash"),
+            }
+            for event in trail["events"]
+        ],
     }
 
 
@@ -154,17 +210,21 @@ def _phase_ingest() -> dict:
 
     payload = png_bytes(seed=41)
     with _client() as client:
+        login = _sign_in(client)
         response = client.post(
             "/api/cases/upload",
             files={"file": ("restart-regression.png", payload, "image/png")},
-            data={"title": CASE_TITLE, "examiner": EXAMINER},
+            data={"title": CASE_TITLE, "description": CASE_DESCRIPTION},
         )
         response.raise_for_status()
         body = response.json()
         evidence = body["evidence"]
         return {
             "status_code": response.status_code,
+            "login": login,
             "case_id": body["case"]["case_id"],
+            "case_number": body["case"]["case_number"],
+            "case_examiner": body["case"]["examiner"],
             "evidence_id": evidence["evidence_id"],
             "sha256": evidence.get("sha256") or evidence.get("hashes", {}).get("sha256"),
             "uploaded_bytes": len(payload),
@@ -177,12 +237,19 @@ def _phase_ingest() -> dict:
 def _phase_observe() -> dict:
     """The restart boot. Ordering matters and is the point.
 
-    The chain is measured *first*, before this process does anything auditable:
-    re-reading the stored bytes is itself an audited act, so checking afterwards
-    would be measuring this test's own footprint rather than what survived.
+    The chain cannot be read anonymously: ``/api/audit`` is authenticated like
+    everything else that touches case material, and signing in is itself an
+    audited act. So this boot cannot look at the store without leaving exactly one
+    mark on it, and the honest thing is to put that mark first and name it. The
+    sign-in is therefore the boot's first and only footprint before the
+    measurement, which is what lets the tests state precisely what must hold: the
+    rows the exited process wrote come back unchanged, and this boot's login
+    chains onto the head hash that process left behind.
     """
     with _client() as client:
+        boot_login = _sign_in(client)
         observed: dict[str, object] = {
+            "boot_login": boot_login,
             "audit_at_boot": _audit(client),
             "verify_at_boot": _verify(client),
         }
@@ -192,6 +259,8 @@ def _phase_observe() -> dict:
         case = client.get(f"/api/cases/{case_id}")
         observed["case_status_code"] = case.status_code
         observed["case_title"] = case.json().get("title") if case.status_code == 200 else None
+        observed["case_number"] = case.json().get("case_number") if case.status_code == 200 else None
+        observed["case_examiner"] = case.json().get("examiner") if case.status_code == 200 else None
 
         listing = client.get(f"/api/cases/{case_id}/evidence")
         observed["evidence_status_code"] = listing.status_code
@@ -221,12 +290,27 @@ def _phase_observe() -> dict:
         observed["verify_recorded"] = _verify(client, record=True)
         observed["audit_after_record"] = _audit(client)
         observed["verify_after_record"] = _verify(client)
+
+        # A second sign-in, at the end. That the seeded account survived is already
+        # settled by `boot_login` above -- this boot could not have read anything
+        # otherwise. What this adds is the accounting: one sign-in appends exactly
+        # one row, and the chain still verifies with it in place.
+        observed["relogin"] = _sign_in(client)
+        observed["audit_after_relogin"] = _audit(client)
+        observed["verify_after_relogin"] = _verify(client)
         return observed
 
 
 def _phase_check() -> dict:
+    """The post-tamper boot. Signs in first, for the same reason ``observe`` does.
+
+    Appending that row cannot conceal the tamper: ``record()`` chains onto the
+    *stored* head hash, so the edited row stays the earliest one whose recomputed
+    hash disagrees with what is on disk.
+    """
     with _client() as client:
-        return {"verify": _verify(client), "audit": _audit(client)}
+        login = _sign_in(client)
+        return {"login": login, "verify": _verify(client), "audit": _audit(client)}
 
 
 PHASES = {"ingest": _phase_ingest, "observe": _phase_observe, "check": _phase_check}
@@ -318,14 +402,41 @@ def test_the_chain_is_valid_and_complete_the_moment_it_is_written(ingested: dict
 
 
 def test_the_audit_chain_carries_over_a_restart(ingested: dict, reopened: dict) -> None:
-    """A new interpreter, a new engine, a new connection pool, the same rows."""
+    """A new interpreter, a new engine, a new connection pool, the same rows.
+
+    The restart boot has to authenticate before it can read anything, and signing
+    in appends a row, so the chain it reads is the surviving chain *plus one*. That
+    makes the claim sharper rather than weaker, and all four parts of it are
+    checked here: every row the exited process wrote comes back with the same seq,
+    event and row_hash; the genesis is unchanged; the new boot's first row links
+    onto the head hash the old process left -- which is what makes the restart
+    boundary a link in the chain and not a seam in it -- and the whole thing still
+    verifies.
+    """
     before, after = ingested["audit"], reopened["audit_at_boot"]
-    assert after["count"] == before["count"], (
-        f"{after['count']} audit rows after the restart, {before['count']} before"
+    surviving = before["count"]
+
+    assert after["count"] == surviving + 1, (
+        f"{after['count']} audit rows after the restart; expected the {surviving} "
+        "that were written before it, plus this boot's own sign-in"
     )
-    assert after["head_hash"] == before["head_hash"], "the head hash changed across the restart"
+    assert after["rows"][:surviving] == before["rows"], (
+        "the rows written before the restart did not come back unchanged"
+    )
+    assert after["events"][:surviving] == before["events"], after["events"]
     assert after["genesis_hash"] == before["genesis_hash"], "the genesis hash changed"
-    assert after["events"] == before["events"], after["events"]
+
+    boot_row = after["rows"][surviving]
+    assert boot_row["event"] == "USER_LOGIN", (
+        f"the only row this boot should have added is its sign-in, not {boot_row}"
+    )
+    assert boot_row["previous_hash"] == before["head_hash"], (
+        "this boot's first row does not chain onto the head hash the exited "
+        f"process left: {boot_row['previous_hash']} vs {before['head_hash']}"
+    )
+    assert after["head_hash"] == boot_row["row_hash"], (
+        "the head after the restart is not the row this boot appended"
+    )
     assert reopened["verify_at_boot"]["valid"] is True, reopened["verify_at_boot"]
 
 
@@ -339,6 +450,64 @@ def test_the_case_and_its_evidence_carry_over_a_restart(
     assert reopened["evidence_sha256"] == ingested["sha256"], (
         "the recorded SHA-256 changed across the restart"
     )
+
+
+def test_the_examiner_recorded_is_the_signed_in_operator(ingested: dict) -> None:
+    """Intake takes no examiner field: the name on the case is the display name of
+    whoever was authenticated, which is the only reason it can be trusted."""
+    assert ingested["login"]["status_code"] == 200, ingested["login"]
+    assert ingested["login"]["username"] == OPERATOR_USERNAME, ingested["login"]
+    assert ingested["login"]["display_name"] == EXAMINER, ingested["login"]
+    assert ingested["case_examiner"] == EXAMINER, (
+        f"the case records {ingested['case_examiner']!r} as examiner, but the "
+        f"operator who signed in to ingest it is {EXAMINER!r}"
+    )
+
+
+def test_the_examiner_and_case_number_carry_over_a_restart(
+    ingested: dict, reopened: dict
+) -> None:
+    """Both are database columns, so both have to come back unchanged. The case
+    number is also checked for shape: a compact sequential identifier, not a UUID."""
+    assert reopened["case_examiner"] == ingested["case_examiner"] == EXAMINER, (
+        f"the examiner read back after the restart is {reopened['case_examiner']!r}"
+    )
+    assert reopened["case_number"] == ingested["case_number"], (
+        f"the case number changed across the restart: {ingested['case_number']!r} "
+        f"became {reopened['case_number']!r}"
+    )
+    number = ingested["case_number"]
+    assert isinstance(number, str) and number.startswith("PRAMAAN-"), number
+    sequence = number.removeprefix("PRAMAAN-")
+    assert sequence.isdigit(), f"{number!r} is not PRAMAAN-<digits>"
+    assert int(sequence) >= 1001, f"the first issued number should be 1001 or later: {number}"
+
+
+def test_the_operator_account_survives_a_restart(reopened: dict) -> None:
+    """Credentials are not process state. A new interpreter authenticates against
+    the row the previous one seeded, and that sign-in chains onto the log it left.
+
+    Two sign-ins are checked, because they answer different questions. The boot
+    login is the one that proves the account survived -- this boot could not have
+    read the chain at all without it. The second one is the arithmetic: a sign-in
+    appends exactly one row, no more, and the chain still verifies afterwards.
+    """
+    boot_login = reopened["boot_login"]
+    assert boot_login["status_code"] == 200, boot_login
+    assert boot_login["username"] == OPERATOR_USERNAME, boot_login
+    assert boot_login["display_name"] == EXAMINER, boot_login
+
+    relogin = reopened["relogin"]
+    assert relogin["status_code"] == 200, relogin
+    assert relogin["display_name"] == EXAMINER, relogin
+    assert reopened["audit_after_relogin"]["events"][-1] == "USER_LOGIN", (
+        reopened["audit_after_relogin"]["events"][-3:]
+    )
+    assert (
+        reopened["audit_after_relogin"]["count"]
+        == reopened["audit_after_record"]["count"] + 1
+    ), "signing in wrote something other than exactly one row"
+    assert reopened["verify_after_relogin"]["valid"] is True, reopened["verify_after_relogin"]
 
 
 def test_the_stored_bytes_reread_after_a_restart_still_hash_to_the_ingest_digest(

@@ -86,14 +86,26 @@ def _load_audio(path: str | Path, target_sr: int = TARGET_SR) -> tuple[np.ndarra
             raise
 
 
-def _aggregate_audio(scores: list[float]) -> tuple[float, float]:
-    """Aggregate per-window audio scores."""
+def _aggregate_audio(scores: list[float]) -> tuple[Optional[float], None]:
+    """Mean of the per-window scores, or ``None`` when no window was scored.
+
+    Two changes from the original, both because the old return values were
+    fabrications rather than measurements:
+
+    An empty list used to return ``0.5`` -- a score the model never produced,
+    landing exactly on the decision midpoint. ``None`` says what actually
+    happened: nothing was measured.
+
+    The second element used to be ``min(abs(mean - 0.5) * 2, 1.0)``, a
+    "confidence" computed from the score itself. That is a restatement of
+    distance from the midpoint, not a calibrated probability, and the backend
+    contract is explicit that a number derived from the score is not a
+    confidence. AASIST publishes no calibrated confidence for this deployment,
+    so this returns ``None`` and lets ``make_result`` record the absence.
+    """
     if not scores:
-        return 0.5, 0.0
-    arr = np.array(scores)
-    mean_score = float(np.mean(arr))
-    conf = min(abs(mean_score - 0.5) * 2.0, 1.0)
-    return mean_score, float(conf)
+        return None, None
+    return float(np.mean(np.array(scores))), None
 
 
 def _pad_or_truncate_audio(x: np.ndarray, max_len: int = NB_SAMP) -> np.ndarray:
@@ -125,7 +137,12 @@ class AudioDetector:
 
         if resolved_path.exists():
             try:
-                sd = torch.load(resolved_path, map_location="cpu", weights_only=False)
+                # weights_only=True: the AASIST checkpoint is a plain tensor
+                # state dict (verified against the manifest digest), so pickle
+                # deserialisation of arbitrary objects is never required. If a
+                # future checkpoint needs richer objects, torch will refuse to
+                # load it here rather than silently accepting unsafe input.
+                sd = torch.load(resolved_path, map_location="cpu", weights_only=True)
                 if isinstance(sd, dict):
                     sd = sd.get("state_dict", sd)
                 self.model.load_state_dict(sd, strict=True)
@@ -234,7 +251,29 @@ class AudioDetector:
                 if score > 0.65:
                     timestamps.append({"start_ms": start_ms, "end_ms": end_ms, "score": round(score, 4)})
 
-        final_score = float(np.mean(window_scores)) if window_scores else 0.0
+        # No window scored means the model measured nothing, so there is nothing
+        # to average. This used to fall back to 0.0, which is the *cleanest
+        # possible* anti-spoofing score -- a file the model never scored was
+        # reported as bona fide speech. Abstain instead: no score, and an
+        # explanation that says outright it is not a finding in either direction.
+        if not window_scores:
+            return make_result(
+                media_type="audio",
+                score=None,
+                confidence=None,
+                model=AUDIO_MODEL_NAME,
+                model_version=AUDIO_MODEL_VERSION,
+                weights_hash=self.weights_hash,
+                latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+                explanation=(
+                    f"No analysis window could be scored from this {duration:.2f}s "
+                    "recording, so the anti-spoofing model produced no "
+                    "measurement. This is NOT a finding of bona fide speech and "
+                    "NOT a finding of spoofing -- the signal is missing."
+                ),
+            )
+
+        final_score = float(np.mean(window_scores))
         explanation = _explain_audio(final_score, duration, len(timestamps))
 
         res = make_result(

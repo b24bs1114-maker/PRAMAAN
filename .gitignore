@@ -34,6 +34,8 @@ data/evidence/
 backend/data/evidence/
 backend/data/uploads/
 backend/data/tmp/
+backend/data-qa/
+frontend/public/qa-corpus/
 
 # --- SQLite databases ---
 *.db
@@ -69,7 +71,7 @@ corpus/**/*.mov
 !corpus/**/manifest.json
 !corpus/**/*.manifest.json
 
-# --- Node / frontend (Rahul) ---
+# --- Node / frontend ---
 node_modules/
 npm-debug.log*
 yarn-error.log*

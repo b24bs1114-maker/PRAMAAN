@@ -165,3 +165,136 @@ def test_hex_to_vector_rejects_malformed_input() -> None:
         except ValueError:
             continue
         raise AssertionError(f"expected ValueError for {bad!r}")
+
+
+# --- Staleness: another process rewrote the index files ----------------------
+#
+# The index is a *file-backed* artefact with a process-wide in-memory copy.
+# ``scripts/build_index.py`` writes those files from a separate process, and a
+# second worker sharing the data directory writes them too. A server that reads
+# them once at start-up then answers every later query from that snapshot
+# reports "no candidates" for evidence the index can in fact match -- a silently
+# wrong forensic result. These tests pin the reload behaviour.
+
+
+def _isolated_settings(tmp_path, settings):
+    """A Settings pointing at an empty index directory of its own."""
+    return settings.model_copy(update={"data_dir": tmp_path})
+
+
+def _other_process_writes(index_settings, entries: list[tuple[str, str]]) -> int:
+    """Rewrite the on-disk index through a separate index object."""
+    writer = PerceptualIndex(index_settings)
+    writer.load()
+    return writer.replace_all(entries)
+
+
+def test_refresh_picks_up_an_out_of_process_rebuild(tmp_path, settings) -> None:
+    isolated = _isolated_settings(tmp_path, settings)
+    reader = PerceptualIndex(isolated)
+    reader.load()
+    assert reader.count == 0
+
+    _other_process_writes(isolated, [("ev-a", "0" * 16), ("ev-b", "f" * 16)])
+
+    assert reader.refresh_if_stale() is True
+    assert reader.count == 2
+    assert reader.contains("ev-a")
+    # And the reloaded vectors are searchable, not merely counted.
+    assert reader.query("0" * 16, top_k=1)[0]["evidence_id"] == "ev-a"
+
+
+def test_refresh_is_a_no_op_when_nothing_changed(tmp_path, settings) -> None:
+    isolated = _isolated_settings(tmp_path, settings)
+    _other_process_writes(isolated, [("ev-a", "0" * 16)])
+    reader = PerceptualIndex(isolated)
+    reader.load()
+
+    assert reader.refresh_if_stale() is False
+    assert reader.refresh_if_stale() is False
+    assert reader.count == 1
+
+
+def test_own_save_does_not_look_stale_to_itself(tmp_path, settings) -> None:
+    """Writing the index must not make the writer re-read its own bytes."""
+    isolated = _isolated_settings(tmp_path, settings)
+    index = PerceptualIndex(isolated)
+    index.load()
+    index.add("ev-a", "0" * 16)
+
+    assert index.refresh_if_stale() is False
+    assert index.count == 1
+
+
+def test_failed_reload_keeps_the_working_index(tmp_path, settings) -> None:
+    """A corrupt *replacement* must not empty an index that is already serving."""
+    isolated = _isolated_settings(tmp_path, settings)
+    _other_process_writes(isolated, [("ev-a", "0" * 16), ("ev-b", "f" * 16)])
+    reader = PerceptualIndex(isolated)
+    reader.load()
+    assert reader.count == 2
+
+    # Sidecar now disagrees with the vector file: the same failure a half-written
+    # or foreign-format write would produce.
+    reader.sidecar_path.write_text('{"ids": ["only-one"]}', encoding="utf-8")
+
+    assert reader.refresh_if_stale() is False
+    assert reader.count == 2
+    assert reader.query("0" * 16, top_k=1)[0]["evidence_id"] == "ev-a"
+
+
+def test_failed_reload_is_retried_only_when_the_bytes_change_again(
+    tmp_path, settings
+) -> None:
+    isolated = _isolated_settings(tmp_path, settings)
+    _other_process_writes(isolated, [("ev-a", "0" * 16)])
+    reader = PerceptualIndex(isolated)
+    reader.load()
+
+    reader.sidecar_path.write_text("not json at all", encoding="utf-8")
+    assert reader.refresh_if_stale() is False
+    # Second call sees an unchanged (still broken) file and does not re-read it.
+    assert reader.refresh_if_stale() is False
+
+    # A good write is picked up, so the failure is not sticky.
+    _other_process_writes(isolated, [("ev-a", "0" * 16), ("ev-c", "1" * 16)])
+    assert reader.refresh_if_stale() is True
+    assert reader.count == 2
+
+
+def test_first_load_of_a_corrupt_index_still_starts_empty(tmp_path, settings) -> None:
+    """Unchanged behaviour: a corrupt index on first touch must not raise."""
+    isolated = _isolated_settings(tmp_path, settings)
+    _other_process_writes(isolated, [("ev-a", "0" * 16)])
+    isolated.index_dir.joinpath("index_meta.json").write_text("{", encoding="utf-8")
+
+    fresh = PerceptualIndex(isolated)
+    fresh.load()
+    assert fresh.count == 0
+    assert fresh.query("0" * 16, top_k=5) == []
+
+
+def test_removed_index_files_do_not_empty_a_loaded_index(tmp_path, settings) -> None:
+    isolated = _isolated_settings(tmp_path, settings)
+    _other_process_writes(isolated, [("ev-a", "0" * 16)])
+    reader = PerceptualIndex(isolated)
+    reader.load()
+
+    reader.vectors_path.unlink()
+    reader.sidecar_path.unlink()
+
+    assert reader.refresh_if_stale() is False
+    assert reader.count == 1
+
+
+def test_get_index_reloads_after_an_out_of_process_rebuild(tmp_path, settings) -> None:
+    """The regression this fix exists for, at the accessor every caller uses."""
+    isolated = _isolated_settings(tmp_path, settings)
+    reset_index_singleton()
+    try:
+        assert get_index(isolated).count == 0
+        _other_process_writes(isolated, [("ev-a", "0" * 16), ("ev-b", "f" * 16)])
+        # Same accessor, same settings, no restart.
+        assert get_index(isolated).count == 2
+    finally:
+        reset_index_singleton()

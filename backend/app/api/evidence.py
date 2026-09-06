@@ -294,6 +294,7 @@ def get_evidence(
                     .where(Evidence.case_id == case.id)
                 ).scalar_one()
             ),
+            report_count=ingestion.report_count(db, case.id),
         ),
         file=file_state,
         stages=stages,

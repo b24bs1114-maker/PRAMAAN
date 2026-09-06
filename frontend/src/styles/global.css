@@ -198,12 +198,22 @@ code,
   display: flex;
   align-items: center;
   gap: 8px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  padding: 9px 16px;
+  padding: 8px 14px;
   width: 460px;
   max-width: 100%;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.search-box:hover {
+  border-color: var(--border-strong);
+}
+
+.search-box:focus-within {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px var(--accent-wash);
 }
 
 .search-box__input {
@@ -367,6 +377,45 @@ code,
   box-shadow: var(--nav-active-shadow);
 }
 
+/* A case-scoped destination with no case open. It stays legible -- the examiner
+   needs to see that Analysis, Provenance, Audit and Reports exist -- but it does
+   not invite a click that could only land on "no case is selected". */
+.sidebar-nav__item:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+  background: none;
+  color: var(--text-faint);
+}
+
+.sidebar-nav__item:disabled:hover {
+  background: none;
+  color: var(--text-faint);
+}
+
+/* The case number the CASE group is scoped to, under its label. */
+.sidebar-nav__scope {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: var(--label-tracking);
+  color: var(--text-muted);
+  padding: 0 8px 6px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-nav__scope--empty {
+  color: var(--text-faint);
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--sans);
+  font-size: var(--text-2xs);
+  white-space: normal;
+  line-height: 1.4;
+}
+
 .sidebar-nav__footer {
   border-top: 1px solid var(--border);
   background: var(--sidebar-bg);
@@ -400,6 +449,14 @@ code,
   border-radius: 50%;
   background: #16a34a;
   box-shadow: 0 0 8px #16a34a;
+}
+
+/* The "backend down" state the connectivity dot is emitted with. Without it a
+   dead backend keeps showing the green up-state dot, which inverts the one
+   signal an operator would use to diagnose the very failure. */
+.sidebar-status-card__dot--down {
+  background: #dc2626;
+  box-shadow: 0 0 8px #dc2626;
 }
 
 .sidebar-status-card__title {
@@ -469,7 +526,6 @@ code,
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 8px;
-  cursor: pointer;
 }
 
 .sidebar-user-pill__avatar {
@@ -499,16 +555,70 @@ code,
   font-size: 11px;
   font-weight: 700;
   color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sidebar-user-pill__role {
   font-size: 9.5px;
   color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.sidebar-user-pill__chevron {
-  font-size: 10px;
+/* The only control on the pill. The pill itself is no longer a button: it never
+   opened anything, and a cursor:pointer on a static label is a false affordance. */
+.sidebar-user-pill__signout {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--text-muted);
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+
+.sidebar-user-pill__signout:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--border-strong);
+  background: var(--surface-3);
+}
+
+.sidebar-user-pill__signout:focus-visible {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px var(--accent-wash);
+}
+
+/* Marks an identity that came from the local development auth bypass rather than
+   a login. Warning-toned on purpose: this is not a decoration but a statement
+   that the server is not currently authenticating anyone. */
+.sidebar-user-pill__badge {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--warning-line);
+  border-radius: var(--radius-sm);
+  background: var(--warning-wash);
+  color: var(--warning);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.4;
+  cursor: help;
+}
+
+.sidebar-user-pill__signout:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .app__main {
@@ -570,6 +680,7 @@ code,
 
 .btn-new-case:hover {
   background: var(--btn-cta-hover);
+  border-color: var(--accent-bright);
   color: #ffffff;
 }
 
@@ -1084,6 +1195,38 @@ code,
 .priority-case-tr td {
   padding: 10px 10px;
   vertical-align: middle;
+}
+
+/*
+ * The keyboard and assistive-technology path into a case row.
+ *
+ * The row stays a `<tr>`. It used to carry `role="button"`, which tells a screen
+ * reader the row is a button: the case queue stopped being navigable as a table,
+ * and each row was announced by concatenating every cell it contains -- priority,
+ * number, title, examiner, status, verdict and dates -- into one button name.
+ *
+ * The real control is this button on the case number. It inherits the cell's
+ * type and colour so nothing moves visually, and it picks up the global
+ * focus-visible ring, which the focusable row never had.
+ */
+.case-open-btn {
+  display: inline-block;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: var(--text-xs);
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+  text-align: left;
+  cursor: pointer;
+}
+
+.case-open-btn:hover {
+  text-decoration: underline;
 }
 
 .priority-case-id-text {
@@ -2671,6 +2814,120 @@ code,
   line-height: var(--leading-tight);
 }
 
+/* --- Evidence intake form ---------------------------------------------------
+   The intake form is read in one pass, top to bottom, by someone who has to
+   attest to what they entered. Each block is labelled with what it is for, and
+   nothing that the backend decides (case number, analyst, stored digest) is
+   rendered as an input. */
+.intake-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.intake-section__label {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+
+/* Marks a field the backend will refuse the request without. */
+.field__req {
+  color: var(--danger-bright);
+  font-weight: 700;
+}
+
+.field__hint {
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+  line-height: var(--leading-tight);
+}
+
+/* The analyst block: displayed, never typed. Styled as a record rather than a
+   control so it does not read as something the operator can change. */
+.intake-analyst {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+
+.intake-analyst__mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--accent-wash);
+  color: var(--accent-bright);
+}
+
+.intake-analyst__body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.intake-analyst__name {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-strong);
+}
+
+.intake-analyst__meta {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
+
+.intake-analyst__lock {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* Why the seal button is disabled. Naming the missing fields is the whole point:
+   a greyed-out button with no explanation is the same as no feedback at all. */
+.intake-blockers {
+  margin: 0;
+  padding: 0 0 0 16px;
+  list-style: none;
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
+
+.intake-blockers li {
+  position: relative;
+  line-height: 1.7;
+}
+
+.intake-blockers li::before {
+  content: '';
+  position: absolute;
+  left: -12px;
+  top: 0.62em;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--warn-bright);
+}
+
 /* Forensic Inspection Frame */
 .forensic-inspection-frame {
   position: relative;
@@ -2818,6 +3075,19 @@ code,
   box-shadow: var(--card-glow);
 }
 
+.card--elevated {
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  box-shadow: 0 4px 14px -2px rgba(0, 0, 0, 0.25);
+}
+
+.card--selected {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 1px var(--accent-line), var(--card-glow);
+}
+
 .btn {
   appearance: none;
   font-family: var(--sans);
@@ -2838,6 +3108,18 @@ code,
 
 .btn:hover:not(:disabled) {
   background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+.btn:disabled,
+.btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .btn--primary {
@@ -2848,6 +3130,17 @@ code,
 
 .btn--primary:hover:not(:disabled) {
   background: var(--btn-cta-hover);
+}
+
+.btn--secondary {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+}
+
+.btn--secondary:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--accent-primary);
 }
 
 .btn--ghost {
@@ -2872,11 +3165,15 @@ code,
   border-radius: 4px;
 }
 
-.pill--ok { background: var(--ok-wash); color: var(--ok-bright); }
-.pill--warn { background: var(--warn-wash); color: var(--warn-bright); }
-.pill--error { background: var(--danger-wash); color: var(--danger-bright); }
+.pill--ok,
+.pill--success { background: var(--ok-wash); color: var(--ok-bright); }
+.pill--warn,
+.pill--warning { background: var(--warn-wash); color: var(--warn-bright); }
+.pill--error,
+.pill--danger { background: var(--danger-wash); color: var(--danger-bright); }
 .pill--accent { background: var(--accent-wash); color: var(--accent-bright); }
 .pill--neutral { background: var(--state-neutral-bg); color: var(--state-neutral-fg); }
+.pill--selected { background: var(--accent-primary); color: #ffffff; }
 
 .table-wrapper {
   overflow-x: auto;
@@ -2958,11 +3255,25 @@ code,
 }
 
 .stack { display: flex; flex-direction: column; gap: var(--space-3); }
+/* Tighter variant for nested lists (e.g. the signal basis table) */
+.stack--tight { gap: var(--space-2); }
 .row { display: flex; align-items: center; gap: var(--space-2); }
 .row--wrap { flex-wrap: wrap; }
 .btn-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .grid-2col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .grid-asymmetric { display: grid; grid-template-columns: 1.6fr 1fr; gap: var(--space-4); }
+
+/*
+ * A fixed two-column workspace (detail rail + main panel, or main panel +
+ * rail) that collapses to one column when there is no room for both. The
+ * screens that use it set their own column widths inline; this class only
+ * owns the breakpoint behaviour, so no screen needs a media query of its own
+ * and the two-column layout at desktop widths is unchanged.
+ */
+.workspace-2col { display: grid; gap: var(--space-4); align-items: start; }
+@media (max-width: 960px) {
+  .workspace-2col { grid-template-columns: minmax(0, 1fr) !important; }
+}
 
 .label {
   font-family: var(--mono);
@@ -3003,11 +3314,34 @@ code,
   font-family: var(--sans);
   font-size: var(--text-xs);
   color: var(--text-strong);
-  background: var(--surface);
-  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  padding: 6px 8px;
+  padding: 6px 10px;
   width: 100%;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.input:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px var(--accent-wash);
+}
+
+.input[aria-invalid="true"],
+.input--error {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px var(--danger-wash);
+}
+
+.input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: var(--surface-2);
 }
 
 .disclosure { border-top: 1px dashed var(--border); padding-top: var(--space-2); }
@@ -3577,3 +3911,668 @@ code,
 .switch-toggle--active .switch-toggle__thumb {
   transform: translateX(20px);
 }
+
+/* ==========================================================================
+   Live components shipped without styles.
+   Only global.css is imported (src/main.tsx), so every class the live
+   components render must be defined here in this file's token vocabulary.
+   Without these, the delete-case dialog, the signal drawer's small/danger
+   buttons, the propagation graph, the analysis progress strips and the
+   web-discovery badges render unstyled in the production build.
+   ========================================================================== */
+
+/* Screen-reader-only content (Feedback.Spinner's status message). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* --- Buttons (Primitives.Button variants used by CaseDelete/Drawer/CopyButton) --- */
+.btn--danger {
+  background: #dc2626;
+  border: 1px solid #b91c1c;
+  color: #ffffff;
+}
+.btn--danger:hover:not(:disabled) {
+  background: #b91c1c;
+}
+.btn--sm {
+  font-size: 11px;
+  padding: 4px 10px;
+  gap: 4px;
+}
+/* The large size the analysis screen's primary "Run Analysis" control asks for */
+.btn--lg {
+  font-size: var(--text-sm);
+  padding: 10px 24px;
+}
+.btn--bare {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 4px;
+}
+.btn--bare:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text-strong);
+}
+.btn--icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+.btn--icon.btn--sm {
+  width: 24px;
+  height: 24px;
+}
+
+/* --- Banner internals (components/Banner.tsx) --- */
+.banner__icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--text-muted);
+}
+.banner--error .banner__icon { color: var(--danger-bright); }
+.banner--ok .banner__icon { color: var(--ok-bright); }
+.banner--warn .banner__icon { color: var(--warn-bright); }
+.banner--info .banner__icon { color: var(--accent-bright); }
+.banner__body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+.banner__title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-strong);
+}
+.banner__detail {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.banner__meta {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  overflow-wrap: anywhere;
+}
+
+/* --- Modal (components/Overlays.tsx, used by the case delete dialog) --- */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+}
+.modal .scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.55);
+  backdrop-filter: blur(2px);
+  animation: pm-fade-in 160ms ease-out both;
+}
+.scrim--leaving {
+  animation: pm-fade-out 160ms ease-out both;
+}
+.modal__panel {
+  position: relative;
+  width: min(560px, 100%);
+  max-height: min(80vh, 720px);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 60px rgba(2, 6, 23, 0.35);
+  animation: pm-scale-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  overflow: hidden;
+}
+.modal__panel--leaving {
+  animation: pm-scale-out 160ms ease-out both;
+}
+.modal__head {
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  flex: none;
+}
+.modal__eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--danger-bright);
+  margin-bottom: 6px;
+}
+.modal__title {
+  font-size: var(--text-md);
+  font-weight: 700;
+  color: var(--text-strong);
+  line-height: 1.3;
+  margin: 0;
+}
+.modal__sub {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+.modal__body {
+  padding: 0 var(--space-5) var(--space-5);
+  overflow-y: auto;
+}
+.modal__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  flex: none;
+}
+
+/* Drawer close button alignment (components/Drawer.tsx head already styled) */
+.drawer__head .btn--bare {
+  margin-left: auto;
+}
+
+/* --- Signal pills: the six variants lib/signals.pillVariant emits,
+       plus the three verdict tones. Previously only ok/warn/error/accent/neutral
+       were styled, so signal direction rendered as an unstyled bare span. --- */
+.pill--strong-authentic {
+  background: var(--ok-wash);
+  color: var(--ok-bright);
+  border: 1px solid var(--ok-bright);
+}
+.pill--weak-authentic {
+  background: var(--ok-wash);
+  color: var(--ok-bright);
+}
+.pill--weak-manipulated {
+  background: var(--danger-wash);
+  color: var(--danger-bright);
+}
+.pill--strong-manipulated {
+  background: var(--danger-wash);
+  color: var(--danger-bright);
+  border: 1px solid var(--danger-bright);
+}
+.pill--unavailable {
+  background: transparent;
+  color: var(--text-faint);
+  border: 1px dashed var(--border-strong);
+}
+.pill--authentic {
+  background: var(--ok-wash);
+  color: var(--ok-bright);
+}
+.pill--manipulated {
+  background: var(--danger-wash);
+  color: var(--danger-bright);
+}
+.pill--inconclusive {
+  background: var(--warn-wash);
+  color: var(--warn-bright);
+}
+
+/* --- Badges (web-discovery section, ScreenProvenance) --- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.badge--neutral {
+  background: var(--surface-2);
+  color: var(--text-muted);
+  border: 1px solid var(--border-strong);
+}
+.badge--success {
+  background: var(--ok-wash);
+  color: var(--ok-bright);
+  border: 1px solid var(--ok-bright);
+}
+.badge--muted {
+  background: transparent;
+  color: var(--text-faint);
+  border: 1px dashed var(--border-strong);
+}
+.badge--accent {
+  background: var(--accent-wash);
+  color: var(--accent-bright);
+  border: 1px solid var(--accent-bright);
+}
+
+/* --- Analysis progress strips (components/ProgressStrips.tsx) --- */
+.strips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+.strip {
+  display: grid;
+  grid-template-columns: minmax(140px, 220px) 1fr 90px;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-xs);
+  padding: 6px 0;
+}
+.strip__name {
+  color: var(--text-strong);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.strip__track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+  position: relative;
+}
+.strip--running .strip__fill {
+  height: 100%;
+  width: 40%;
+  border-radius: 3px;
+  background: var(--accent);
+  animation: strip-sweep 1.2s ease-in-out infinite;
+}
+.strip--done .strip__fill {
+  height: 100%;
+  width: 100%;
+  border-radius: 3px;
+  background: var(--ok-bright);
+}
+.strip__state {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  text-align: right;
+}
+@keyframes strip-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(260%); }
+}
+
+/* --- Propagation graph (components/PropagationGraph.tsx) --- */
+.graph {
+  width: 100%;
+  height: auto;
+  display: block;
+  background:
+    radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0)
+    0 0 / 22px 22px,
+    var(--surface-2);
+  border-radius: var(--radius);
+}
+.graph__edge {
+  stroke: var(--text-faint);
+  stroke-width: 1.5;
+  opacity: 0.6;
+}
+.graph__node {
+  fill: var(--surface);
+  stroke: var(--text-faint);
+  stroke-width: 2;
+}
+.graph__node--earliest {
+  stroke: var(--accent-bright);
+  fill: var(--accent-wash);
+}
+.graph__node--subject {
+  stroke: var(--accent-primary);
+  fill: var(--accent-soft);
+}
+.graph__label {
+  font-size: 9px;
+  font-family: var(--mono);
+  fill: var(--text-faint);
+}
+.graph-legend {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  flex-wrap: wrap;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: var(--space-2);
+}
+.graph-legend__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.graph-legend__swatch {
+  color: var(--text-faint);
+  flex: none;
+}
+.graph-legend__swatch--earliest {
+  color: var(--accent-bright);
+}
+.graph-legend__swatch--subject {
+  color: var(--accent-primary);
+}
+
+/* --- Three-column grid (ScreenProvenance earliest-instance box) --- */
+.grid-3col {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+/* --- Misc small utilities used by live screens --- */
+
+/* Text for assistive technology only.
+   Several controls in this console carry meaning in colour plus a glyph -- a
+   completed workflow step is green with a tick, a signal pill is toned. Where
+   that is the only carrier, the word itself goes here so a screen reader
+   reaches the same conclusion as the eye. Not display:none, which would remove
+   it from the accessibility tree along with the layout. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.note {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+.dropzone__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.input--sm {
+  font-size: var(--text-xs);
+  padding: 4px 8px;
+  height: 28px;
+}
+.tab__count {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-faint);
+  margin-left: 4px;
+}
+.loading-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  padding: var(--space-2) 0;
+}
+
+/* --- Sign in -------------------------------------------------------------- */
+/*
+ * The gate in front of the console. Deliberately plain: one card, two fields,
+ * one button. Nothing here is decorative enough to distract from the fact that
+ * whoever signs in is the name that will be recorded on evidence.
+ */
+.login-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+  background: var(--bg-page);
+}
+
+.login-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 100%;
+  max-width: 380px;
+  padding: var(--space-6) var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--card-glow);
+}
+
+.login-card__brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: var(--space-2);
+}
+
+.login-card__logo {
+  height: 34px;
+  width: auto;
+  object-fit: contain;
+}
+
+.login-card__tagline {
+  margin: 0;
+  font-size: var(--text-2xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.login-card__notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.login-card__notice svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.login-card__foot {
+  margin: 0;
+  text-align: center;
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+}
+
+/* Shown only while a stored token is being verified against /api/auth/me. */
+.login-restore {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* --- Motion keyframes referenced by components above --- */
+@keyframes pm-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes pm-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes pm-scale-in {
+  from { opacity: 0; transform: scale(0.96) translateY(4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes pm-scale-out {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.97); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scrim,
+  .scrim--leaving,
+  .modal__panel,
+  .modal__panel--leaving,
+  .strip--running .strip__fill {
+    animation: none;
+  }
+}
+
+/* --- Case Workflow Breadcrumbs --- */
+.case-workflow-breadcrumb-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 8px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  margin-bottom: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.case-workflow-breadcrumb-bar__case {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.case-workflow-breadcrumb-bar__tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+
+.case-workflow-breadcrumb-bar__case-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  transition: background 150ms ease;
+}
+
+.case-workflow-breadcrumb-bar__case-btn:hover {
+  background: var(--surface-3);
+}
+
+.case-workflow-breadcrumb-bar__case-num {
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--accent-bright);
+}
+
+.case-workflow-breadcrumb-bar__case-title {
+  color: var(--text-secondary);
+  font-weight: 500;
+  max-width: 260px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.case-workflow-breadcrumb-bar__no-case {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.case-workflow-breadcrumb-bar__steps {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.case-workflow-breadcrumb-bar__step-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.case-workflow-breadcrumb-bar__step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.case-workflow-breadcrumb-bar__step:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--surface-3);
+}
+
+.case-workflow-breadcrumb-bar__step--active {
+  color: #ffffff;
+  background: var(--accent-primary);
+  border-color: var(--accent-hover);
+  font-weight: 700;
+}
+
+/* A completed step keeps its tick without stealing the active step's emphasis. */
+.case-workflow-breadcrumb-bar__step--done {
+  color: var(--ok-bright);
+  font-weight: 600;
+}
+
+.case-workflow-breadcrumb-bar__step:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.case-workflow-breadcrumb-bar__step-idx {
+  font-family: var(--mono);
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.case-workflow-breadcrumb-bar__sep {
+  font-size: 11px;
+  color: var(--text-faint);
+  user-select: none;
+}
+

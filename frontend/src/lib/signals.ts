@@ -43,19 +43,40 @@ export function isExcluded(signal: Signal): boolean {
  * Each phrasing states what happened, never a conclusion. "Not available" is
  * not "clean"; "inconclusive" is not "suspicious".
  */
-export function statusLabel(status: SignalStatus | string): string {
+export function statusLabel(status: SignalStatus | string, signal?: Partial<Signal>): string {
+  if (signal) {
+    if (signal.status === 'UNSUPPORTED_MEDIA') return 'NOT APPLICABLE'
+    const basis = signal.evidence_basis
+    if (
+      signal.status === 'INCONCLUSIVE' ||
+      basis?.availability === 'ran_and_declined' ||
+      basis?.abstained === true ||
+      String(signal.explanation || '').toLowerCase().includes('abstained')
+    ) {
+      return 'RAN — ABSTAINED'
+    }
+    if (signal.included && signal.score !== null) {
+      return 'CONTRIBUTED'
+    }
+    if (signal.included === false) {
+      if (signal.status === 'UNAVAILABLE') return 'UNAVAILABLE'
+      if (signal.status === 'ERROR') return 'ERROR'
+      return 'EXCLUDED FROM FUSION'
+    }
+  }
+
   switch (status) {
     case 'OK':
-      return 'ASSESSED'
+      return 'CONTRIBUTED'
     case 'NO_MATCH':
       return 'NO MATCH'
     case 'NOT_PRESENT':
     case 'NOT_FOUND':
       return 'NOT PRESENT'
     case 'UNAVAILABLE':
-      return 'NOT AVAILABLE'
+      return 'UNAVAILABLE'
     case 'INCONCLUSIVE':
-      return 'INCONCLUSIVE'
+      return 'RAN — ABSTAINED'
     case 'ERROR':
       return 'ERROR'
     case 'UNSUPPORTED_MEDIA':
@@ -98,6 +119,7 @@ export type PillVariant =
   | 'weak-manipulated'
   | 'strong-manipulated'
   | 'unavailable'
+  | 'warn'
 
 /**
  * Pill styling for a signal.
@@ -111,6 +133,8 @@ export function signalPillVariant(
   signal: Signal,
   thresholds?: Verdict['thresholds'] | null,
 ): PillVariant {
+  const lbl = statusLabel(signal.status, signal)
+  if (lbl === 'RAN — ABSTAINED') return 'warn'
   if (isExcluded(signal) || signal.score === null) return 'unavailable'
 
   const manipulatedAt = thresholds?.manipulated_at_or_above
@@ -160,6 +184,35 @@ export function verdictTone(band: VerdictBand | string | null | undefined): Verd
       // shown as inconclusive rather than being forced into a decision.
       return 'inconclusive'
   }
+}
+
+/**
+ * Chip tone for a verdict band, for the `Pill` component.
+ *
+ * Distinct from `verdictTone`, which names the band semantically for the hero
+ * treatment. This one answers a narrower question -- which of the chip colours a
+ * status pill should take -- and the two are deliberately not merged: the hero
+ * has three states and the chip has four, because a chip also has to render "no
+ * verdict at all".
+ *
+ * That fourth state is the reason this lives here rather than in three screens.
+ * `neutral` for absent is the whole point: a case with no fused verdict is not
+ * inconclusive, and colouring it like an inconclusive one would turn a case that
+ * has never been examined into a finding. The Cases queue, the case record and
+ * the Analysis screen all show this chip, and they each had their own copy of the
+ * mapping -- three places for that distinction to drift.
+ *
+ * The return type is spelled out rather than imported as `PillTone` to keep this
+ * module free of a dependency on the component that consumes it; every member is
+ * a valid `PillTone`.
+ */
+export function verdictPillTone(
+  band: VerdictBand | string | null | undefined,
+): PillVariant | 'ok' | 'error' {
+  if (!band) return 'neutral'
+  if (band.includes('MANIPULATED')) return 'error'
+  if (band.includes('AUTHENTIC')) return 'ok'
+  return 'warn'
 }
 
 /**
@@ -240,13 +293,12 @@ export function confidenceBandNote(confidence: string | null | undefined): strin
 /**
  * The evidence-base line that sits beneath the band.
  *
- * Rahul calls this "the strongest credibility sentence in the product": the
- * interface always states how much of the evidence base the verdict rests on.
- *
- * `signals_available` is the count that was actually assessed; `signals_total`
- * is the count that was considered. Reading the total as "assessed" -- which an
- * earlier phrasing did -- overstates the evidence base by however many signals
- * were unavailable.
+ * *Media-aware.* All three counts come from the backend verdict and are scoped
+ * to the signals APPLICABLE to this item's media type: `signals_total` is the
+ * applicable set, `signals_evaluated` how many of them ran, and
+ * `signals_available` how many contributed to the fused score. Inapplicable
+ * signals are in none of the numbers -- not applicable is not failed and not
+ * zero, so they are hidden rather than counted.
  */
 export function coverageLine(verdict: Verdict): string {
   const total = verdict.signals_total
@@ -254,8 +306,33 @@ export function coverageLine(verdict: Verdict): string {
   return `${available} OF ${total} SIGNALS ASSESSED`
 }
 
-/** Longer form, spelling out the fraction of the evidence base. */
+/** Longer form, spelling out the fraction of the applicable evidence base. */
 export function coverageSentence(verdict: Verdict): string {
   const pct = Math.round((verdict.signal_coverage ?? 0) * 100)
   return `Verdict computed on ${verdict.signals_available} of ${verdict.signals_total} signals - ${pct}% of the evidence base by weight.`
+}
+
+/**
+ * The media-aware summary line: Applicable / Evaluated / Contributing.
+ *
+ * Every value is the backend's own, scoped to this item's media type. The
+ * applicability set itself is the backend's (verdict.applicable_signals when
+ * present, falling back to the signal list the backend actually fused); the
+ * frontend never decides applicability on its own.
+ */
+export function mediaAwareSummary(verdict: Verdict): {
+  applicable: number
+  evaluated: number
+  contributing: number
+  line: string
+} {
+  const applicable = verdict.signals_total
+  const evaluated = verdict.signals_evaluated
+  const contributing = verdict.signals_available
+  return {
+    applicable,
+    evaluated,
+    contributing,
+    line: `Applicable: ${applicable} · Evaluated: ${evaluated} · Contributing: ${contributing}`,
+  }
 }

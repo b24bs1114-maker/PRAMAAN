@@ -106,3 +106,35 @@ export function orPlaceholder(val: string | number | null | undefined): string {
   if (val === null || val === undefined || val === '') return NOT_MEASURED
   return String(val)
 }
+
+/**
+ * A case status token, as a label.
+ *
+ * The backend stores statuses as lowercase snake_case tokens (`open`,
+ * `under_review`). Both the Cases queue and the Dashboard queue list the same
+ * cases side by side, and they formatted this differently -- the Cases table
+ * upper-cased and un-snaked it, the Dashboard printed the raw token -- so the same
+ * case read `OPEN` on one screen and `open` on the other. That is a small thing
+ * that makes a tool look like two tools.
+ *
+ * Unknown tokens pass through the same transformation rather than being mapped to
+ * a known one; nothing here decides what a status means.
+ */
+export function caseStatusLabel(status: string | null | undefined): string {
+  if (!status) return NOT_MEASURED
+  return status.replace(/_/g, ' ').toUpperCase()
+}
+
+/**
+ * An exhibit count with its noun agreeing.
+ *
+ * "1 items" is the kind of detail that reads as a prototype. Shared so the two
+ * queues that print this count cannot disagree again.
+ *
+ * A null count is not zero: the field is absent when the endpoint did not count,
+ * and "0 items" would state that the case holds no evidence.
+ */
+export function evidenceCountLabel(count: number | null | undefined): string {
+  if (count === null || count === undefined) return NOT_MEASURED
+  return `${count} ${count === 1 ? 'item' : 'items'}`
+}

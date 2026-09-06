@@ -1,18 +1,12 @@
 /**
- * Evidence media URLs.
+ * Which evidence can be shown inline.
  *
- * The backend streams the stored bytes of one evidence item from
- * `GET /api/evidence/{id}/file` (append `?download=true` to force a download
- * rather than an inline preview). This is the only correct source for a preview
- * - never the JSON list endpoint. Reads here are plain GETs and write no audit
- * rows.
+ * The bytes themselves are fetched, not linked: `GET /api/evidence/{id}/file`
+ * requires the operator's bearer token, and a browser-initiated `<img src>`
+ * cannot carry an Authorization header. `components/EvidenceMedia` owns that
+ * fetch and the object-URL lifetime; this module only answers the question the
+ * screens ask before mounting a preview.
  */
-import { apiUrl } from '../api'
-
-export function evidenceFileUrl(evidenceId: string, opts: { download?: boolean } = {}): string {
-  const query = opts.download ? '?download=true' : ''
-  return apiUrl(`/api/evidence/${encodeURIComponent(evidenceId)}/file${query}`)
-}
 
 /** Only images can be shown inline in an <img>; video/audio fall back to an icon. */
 export function isImageMedia(mediaType: string | null | undefined): boolean {

@@ -36,7 +36,6 @@ export type RoutePath =
 export interface RouteState {
   path: RoutePath
   caseId: string | null
-  evidenceId: string | null
   filter: string | null
   q: string | null
 }
@@ -67,7 +66,6 @@ export function parseHash(hash: string): RouteState {
   return {
     path,
     caseId: params.get('caseId'),
-    evidenceId: params.get('evidenceId'),
     filter: params.get('filter'),
     q: params.get('q'),
   }
@@ -87,11 +85,10 @@ export function useRouter() {
   const navigate = useCallback(
     (
       path: RoutePath,
-      params?: { caseId?: string | null; evidenceId?: string | null; filter?: string | null; q?: string | null },
+      params?: { caseId?: string | null; filter?: string | null; q?: string | null },
     ) => {
       const query = new URLSearchParams()
       if (params?.caseId) query.set('caseId', params.caseId)
-      if (params?.evidenceId) query.set('evidenceId', params.evidenceId)
       if (params?.filter) query.set('filter', params.filter)
       if (params?.q) query.set('q', params.q)
 

@@ -28,7 +28,6 @@ dev = ["pytest>=7.4.0"]
 [project.scripts]
 pramaan-detect    = "scripts.detect:main"
 pramaan-benchmark = "scripts.benchmark:main"
-pramaan-export    = "scripts.export_onnx:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

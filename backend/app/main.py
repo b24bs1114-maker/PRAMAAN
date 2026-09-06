@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request, Response, status
+from fastapi import Depends, FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -29,6 +29,7 @@ from app.api import (
     alerts as alerts_api,
     analysis,
     audit as audit_api,
+    auth as auth_api,
     cases,
     dashboard as dashboard_api,
     detector as detector_api,
@@ -37,9 +38,11 @@ from app.api import (
     reports as reports_api,
     system as system_api,
 )
+from app.api.deps import get_current_user
 from app.config import Settings, configure_logging, get_settings
-from app.models import init_db
-from app.services import detector as detector_service
+from app.models import init_db, session_scope
+from app.services import detector as detector_service, identity
+from app.services.pipeline import EvidenceIntegrityError
 
 logger = logging.getLogger("pramaan.app")
 access_logger = logging.getLogger("pramaan.access")
@@ -59,11 +62,18 @@ def _error_response(
     message: str,
     request_id: str,
     details: Any | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     """Build the single error envelope every failure path returns.
 
     Internal details -- stack traces, file paths, driver messages -- are logged
     server side and never serialised into the response.
+
+    ``headers`` carries the response headers an ``HTTPException`` declared. Those
+    are part of the HTTP semantics of the failure, not decoration: a 401 without
+    ``WWW-Authenticate`` tells the client it is unauthorised but not how to
+    authenticate, which RFC 9110 forbids. The request-id header is applied last so
+    a raising endpoint cannot displace it.
     """
     error: dict[str, Any] = {"type": error_type, "message": message}
     if details is not None:
@@ -71,7 +81,7 @@ def _error_response(
     return JSONResponse(
         status_code=status_code,
         content={"error": error, "request_id": request_id},
-        headers={REQUEST_ID_HEADER: request_id},
+        headers={**(headers or {}), REQUEST_ID_HEADER: request_id},
     )
 
 
@@ -156,6 +166,7 @@ def _register_exception_handlers(app: FastAPI) -> None:
             error_type="http_error",
             message=message,
             request_id=request_id,
+            headers=getattr(exc, "headers", None),
         )
 
     @app.exception_handler(RequestValidationError)
@@ -185,6 +196,47 @@ def _register_exception_handlers(app: FastAPI) -> None:
             message="Request validation failed.",
             request_id=request_id,
             details=details,
+        )
+
+    @app.exception_handler(EvidenceIntegrityError)
+    async def evidence_integrity_handler(
+        request: Request, exc: EvidenceIntegrityError
+    ) -> JSONResponse:
+        """A refused analysis, answered as a conflict rather than a crash.
+
+        The pipeline raises this when a stored file no longer hashes to the
+        digest recorded at intake. Without a handler it would fall through to the
+        catch-all below and reach the examiner as "an internal error occurred",
+        which is both wrong and the single least useful thing to say about a
+        chain-of-custody failure. 409 is the same status this deployment already
+        uses for evidence that is registered but not present on the host: the
+        request is well formed, the stored state contradicts it.
+
+        The digests are in the response because they are what the examiner needs
+        to act -- neither of them is a secret; one is already published on the
+        evidence record and the other is a hash of bytes the operator holds.
+        """
+        request_id = _request_id(request)
+        logger.error(
+            "Refused analysis of evidence %s on %s rid=%s: stored bytes no longer "
+            "match the intake digest",
+            exc.evidence_id,
+            request.url.path,
+            request_id,
+        )
+        return _error_response(
+            status_code=status.HTTP_409_CONFLICT,
+            error_type="evidence_integrity_mismatch",
+            message=str(exc),
+            request_id=request_id,
+            details=[
+                {
+                    "evidence_id": exc.evidence_id,
+                    "filename": exc.filename,
+                    "recorded_sha256": exc.expected,
+                    "recomputed_sha256": exc.recomputed,
+                }
+            ],
         )
 
     @app.exception_handler(Exception)
@@ -221,6 +273,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.settings = current_settings
         current_settings.ensure_directories()
         init_db(current_settings)
+        # Operator accounts are required before anyone can sign in, and identity
+        # is what the ingestion endpoint stamps as the examiner. Seeding is a
+        # no-op once the users table is populated, so restarts never overwrite
+        # a password an operator has changed.
+        with session_scope() as session:
+            identity.seed_operators(session, current_settings)
         logger.info(
             "%s v%s starting (environment=%s, debug=%s)",
             current_settings.app_name,
@@ -235,6 +293,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             current_settings.corpus_dir,
         )
         logger.info("CORS allowed origins: %s", ", ".join(current_settings.cors_origins))
+        if current_settings.dev_auth_bypass_active:
+            # Loud, every start, at WARNING. A server that stopped requiring
+            # authentication must never be something an operator has to go
+            # looking for -- and if this line appears anywhere it should not,
+            # that is exactly the signal it exists to give.
+            logger.warning(
+                "DEVELOPMENT AUTH BYPASS IS ACTIVE (environment=%s). Requests "
+                "without a bearer token resolve to %r. Real login still works and "
+                "is unchanged. Set PRAMAAN_DEV_AUTH_BYPASS=false to restore "
+                "authentication.",
+                current_settings.environment,
+                current_settings.dev_auth_bypass_username,
+            )
+        elif current_settings.dev_auth_bypass:
+            # The flag is on but the environment refused it. Say so, or someone
+            # will spend an afternoon wondering why the bypass "does not work".
+            logger.warning(
+                "PRAMAAN_DEV_AUTH_BYPASS is set but IGNORED because "
+                "environment=%s. Authentication remains required.",
+                current_settings.environment,
+            )
         if not current_settings.enable_ai_detector:
             logger.info("AI detector disabled for demo/stability mode")
         else:
@@ -270,17 +349,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     _register_middleware(app, settings)
     _register_exception_handlers(app)
-    app.include_router(cases.router)
-    app.include_router(dashboard_api.router)
-    app.include_router(analysis.router)
-    app.include_router(evidence_api.router)
-    app.include_router(index_api.router)
-    app.include_router(detector_api.router)
-    app.include_router(reports_api.router)
-    app.include_router(reports_api.library_router)
-    app.include_router(alerts_api.router)
-    app.include_router(audit_api.router)
-    app.include_router(system_api.router)
+
+    # --- Routing and authorization ------------------------------------------
+    #
+    # Authorization is applied here, at the point every router is mounted, and
+    # not route by route: this is the one list of what the API exposes, so a
+    # router added without a decision about who may call it is visible in the
+    # same three lines as the decision itself.
+    #
+    # `PROTECTED` is everything that reads or writes case material -- cases,
+    # evidence, analysis, provenance, the audit chain, reports, the perceptual
+    # index, alerts, and the capability probes that describe this deployment.
+    # Every one of these was reachable with no credentials at all until now,
+    # including `DELETE /api/cases/{case_id}`, which destroys a case, its
+    # evidence files, its report PDFs and its index vectors. The console has
+    # always claimed there is "no coherent way to run intake anonymously"; this
+    # is what makes that true of reading and deletion as well as of ingest.
+    #
+    # Deliberately public: `POST /api/auth/login`, which is how a token is
+    # obtained in the first place, and `GET /health`, which a load balancer or
+    # container orchestrator probes without credentials. `auth_api.router`
+    # therefore carries no blanket dependency -- `/api/auth/me` and
+    # `/api/auth/logout` authenticate themselves, per-route.
+    PROTECTED = (
+        cases.router,
+        dashboard_api.router,
+        analysis.router,
+        evidence_api.router,
+        index_api.router,
+        detector_api.router,
+        reports_api.router,
+        reports_api.library_router,
+        alerts_api.router,
+        audit_api.router,
+        system_api.router,
+    )
+
+    app.include_router(auth_api.router)
+    for protected in PROTECTED:
+        app.include_router(protected, dependencies=[Depends(get_current_user)])
 
     @app.get("/health", tags=["system"], summary="Liveness probe")
     async def health() -> dict[str, str]:

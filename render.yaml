@@ -16,13 +16,13 @@
 #     custody that does not survive a restart is not a chain of custody, so this
 #     blueprint declares a disk.
 #
-#  2. 512 MB cannot hold either detector. Swin-B peaks at 396 MB resident on the
-#     memory-mapped path (1052 MB without it) before the web process itself, and
-#     the wav2vec2 audio model peaks at ~1.67 GB. Both are measured and recorded
-#     in pramaan-detector/weights/model_manifest.json.
+#  2. 512 MB cannot hold the image detector. The current checkpoints are
+#     measured and recorded in pramaan-detector/weights/model_manifest.json:
+#     image (ViT-S/16, OwensLab/commfor-model-384) peaks at ~220 MB resident,
+#     audio (AASIST) at ~25 MB, video (VideoMAE) at ~450 MB.
 #
 # So the plan below is 1c-2g (1 CPU / 2 GB), which is the smallest one that both
-# supports a disk and can actually run the image detector.
+# supports a disk and can run all three detectors together.
 #
 # --- Cheaper profile: no AI, storage still persistent ------------------------
 # Change three lines to run the honest non-AI deployment on the smallest paid
@@ -74,22 +74,16 @@ services:
       - key: PRAMAAN_REPORTS_DIR
         value: /data/reports
       # --- Which checkpoints the image is built with (build args) -------------
-      # "image" only. Adding ",audio" needs 2c-4g or larger: 1.67 GB of audio
-      # model plus the resident image model does not fit in 2 GB, and the result
-      # would be an OOM kill mid-request instead of a forensic result. "video" is
-      # not a valid value -- no video checkpoint is published.
+      # All three modalities fit on 1c-2g with the current checkpoints
+      # (image ~220 MB, audio ~25 MB, video ~450 MB peak, per the manifest).
+      # Drop a modality from this list on smaller instances; the omitted
+      # detector then reports INSUFFICIENT_EVIDENCE and names no model.
       #
       # The release repo and tag come from model_manifest.json, which is the
       # source of truth for what a given checkpoint should hash to; override
       # PRAMAAN_WEIGHTS_RELEASE_REPO/TAG here only to point at a mirror.
       - key: PRAMAAN_WEIGHTS_MODALITIES
-        value: image
-      # Writes the memory-mapped safetensors directory the image loader prefers:
-      # 396 MB resident instead of 1052 MB. On a 2 GB instance this is what makes
-      # the difference between running the detector and being killed by the OOM
-      # reaper, so it is on here even though it is optional in the Dockerfile.
-      - key: PRAMAAN_CONVERT_SAFETENSORS
-        value: "1"
+        value: image,audio,video
       # "1" would fail the build if the checkpoint could not be fetched or did not
       # match its manifest digest. Left at "0" so a GitHub outage degrades to an
       # honest UNAVAILABLE detector rather than taking the whole service down.

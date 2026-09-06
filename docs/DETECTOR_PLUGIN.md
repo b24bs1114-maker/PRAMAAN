@@ -59,7 +59,7 @@ Preprocessing is described by an optional JSON sidecar next to the model —
   "layout": "NCHW",
   "positive_index": 1,
   "output_activation": "softmax",
-  "model_name": "rahul-image-v1",
+  "model_name": "example-image-v1",
   "model_version": "1.0.0"
 }
 ```
@@ -74,7 +74,7 @@ classifier (multi-crop, temporal aggregation, custom decoding, an ensemble):
 
 ```bash
 PRAMAAN_VIDEO_MODEL_PATH=/models/video-detector.pt          # optional
-PRAMAAN_VIDEO_DETECTOR_ENTRYPOINT=rahul_engine.video:analyse # module:callable
+PRAMAAN_VIDEO_DETECTOR_ENTRYPOINT=example_engine.video:analyse # module:callable
 ```
 
 The callable receives whichever of these keyword arguments it declares — PRAMAAN
@@ -101,7 +101,7 @@ def analyse(path, media_type=None, model_path=None, spec=None):
     return {
         "score": 0.87,                 # None means "I cannot say" -> honest abstention
         "confidence": 0.91,            # the MODEL's own confidence; omit if it has none
-        "model": "rahul-video-detector",
+        "model": "example-video-detector",
         "model_version": "1.2.0",
         "weights_hash": "…",           # omit: PRAMAAN hashes the model file itself
         "explanation": "Temporal inconsistency across frames 120-184.",
@@ -128,7 +128,7 @@ For an engine that is imported rather than configured (and for tests):
 from app.services import detector
 
 detector.register_inference(
-    "audio", run_audio, model_name="rahul-audio", model_version="0.9.0"
+    "audio", run_audio, model_name="example-audio", model_version="0.9.0"
 )
 ```
 

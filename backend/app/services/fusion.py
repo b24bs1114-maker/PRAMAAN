@@ -1,26 +1,38 @@
-"""Transparent multi-signal fusion and verdict generation.
+"""Signal measurement and the traceable arithmetic behind one assessment.
+
+This module *measures*. It turns each stage's raw payload into a signal record
+carrying a score, a status, a declared weight and the evidence that produced it.
+It does not decide: :func:`fuse` calls
+:func:`app.services.assessment.evaluate` exactly once, and the legacy
+``verdict`` / ``manipulation_score`` / ``confidence`` / ``rationale`` fields it
+returns are a projection of that one assessment. There is no second decision
+layer here and no consumer downstream is permitted to build one.
 
 Design rules, in order of precedence:
 
 1. **Nothing is hidden.** Every signal reports its own score, declared weight,
-   effective (normalised) weight, contribution to the fused score, status, a
-   plain-language explanation, and the measurements that produced it. The fused
-   score is reproducible by hand from the ``signals`` list.
+   effective (normalised) weight, contribution to the assessment score, status,
+   its assessment role, a plain-language explanation, and the measurements that
+   produced it. The score is reproducible by hand from the ``signals`` list.
 2. **A missing signal is missing, not zero.** Signals that could not produce a
    measurement are given status ``INCONCLUSIVE`` / ``UNAVAILABLE`` / ``ERROR`` /
    ``UNSUPPORTED_MEDIA``, are excluded from the weighted mean, and the remaining
    weights are renormalised. Absent EXIF, an absent C2PA manifest, an empty
    perceptual index and an uninstalled detector all mean *we do not know* -- they
-   never push the score toward either verdict.
-3. **Low coverage produces no verdict.** If the available signals do not account
-   for at least ``fusion_min_effective_weight`` of the declared total, the verdict
-   is ``INSUFFICIENT_EVIDENCE`` regardless of what the fused score happens to be.
-4. **AUTHENTIC needs a primary signal.** The weak heuristics in this prototype
-   (metadata leads, perceptual derivation, compression history) cannot establish
-   authenticity. A low fused score only becomes an AUTHENTIC verdict when a
-   primary signal -- a working AI detector, or a cryptographically validated C2PA
-   manifest -- is among the available signals. Otherwise the honest answer is
-   ``INSUFFICIENT_EVIDENCE``.
+   never push the score in either direction.
+3. **Measuring something is not the same as being allowed to decide.** Each
+   signal declares an ``assessment_role``. Only signals eligible for the assessed
+   task (:data:`app.services.assessment.ELIGIBLE_CHECKS`) contribute to the
+   assessment score; the rest are published as forensic observations for an
+   examiner. A metadata lead, a perceptual near-duplicate distance, a
+   quantisation-table anomaly and a broken C2PA signature are all real findings
+   and none of them is a synthetic-media finding, so none of them is averaged
+   into the number behind one.
+4. **Different modalities are different questions.** Each media type's detector
+   is scoped to its own task and no score crosses modalities.
+5. **Low eligible coverage produces no finding.** If the eligible checks do not
+   account for at least ``fusion_min_effective_weight`` of their declared weight,
+   the state is ``NOT_ASSESSED`` regardless of what any score happens to be.
 
 **The weights and thresholds are prototype defaults, not validated science.**
 They are configurable (``PRAMAAN_FUSION_WEIGHT_*``, ``PRAMAAN_VERDICT_*``) and
@@ -33,9 +45,10 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any
+from typing import Any, Callable
 
 from app.config import Settings
+from app.services import assessment
 from app.services import detector as detector_service
 from app.services import forensics as forensics_service
 from app.services import provenance as provenance_service
@@ -59,7 +72,13 @@ EXCLUDED_STATUSES = (
     SIGNAL_UNSUPPORTED,
 )
 
-# --- Verdicts -------------------------------------------------------------- #
+# --- Legacy verdict tokens ------------------------------------------------- #
+# Retained as the projection of the assessment state for existing routes, stored
+# rows, dashboard counters and alert rules. They are LOSSY: NOT_ASSESSED and
+# INCONCLUSIVE both project onto INSUFFICIENT_EVIDENCE, so anything that needs to
+# tell "we did not assess this" from "we assessed it and could not decide" must
+# read ``assessment.state``. Nothing derives a verdict from a score any more --
+# see ``assessment.LEGACY_VERDICT_BY_STATE``.
 VERDICT_AUTHENTIC = "AUTHENTIC"
 VERDICT_MANIPULATED = "MANIPULATED"
 VERDICT_INSUFFICIENT = "INSUFFICIENT_EVIDENCE"
@@ -114,6 +133,67 @@ SIGNAL_NAMES = {
     "compression_forensics": "Compression forensics",
 }
 
+#: Which signals can apply to which media type -- the single source of truth the
+#: API, the UI and the report all render from. A signal absent from a media
+#: type's set is *not applicable*: it is neither failed nor zero nor part of the
+#: coverage denominator, and fusion never builds it for that media.
+#:
+#: - ``ai_detection``: the detector interface covers all three modalities, and
+#:   each abstains for itself, so the signal is built everywhere and the
+#:   detector's own status explains any absence.
+#: - ``metadata_integrity``: the extractor reads image EXIF and ISO-BMFF video
+#:   containers; audio has no reader in this build.
+#: - ``provenance_c2pa``: the container scan covers JPEG/PNG/BMFF embedding
+#:   containers, which is what both video and still images use.
+#: - ``perceptual_duplication``: image-only by construction -- pHash/dHash are
+#:   computed from pixels, videos and audio carry no perceptual hash at all.
+#: - ``compression_forensics``: analyses JPEG quantisation tables and an 8x8
+#:   luminance grid, which only a still image has.
+SIGNAL_APPLICABILITY: dict[str, frozenset[str]] = {
+    "image": frozenset(
+        {
+            "ai_detection",
+            "perceptual_duplication",
+            "metadata_integrity",
+            "provenance_c2pa",
+            "compression_forensics",
+        }
+    ),
+    "video": frozenset({"ai_detection", "metadata_integrity", "provenance_c2pa"}),
+    "audio": frozenset({"ai_detection"}),
+}
+
+SIGNAL_APPLICABILITY_NOTE = (
+    "Signal applicability is scoped by media type in the fusion engine. Signals "
+    "outside a media type's set are NOT APPLICABLE: they are hidden from the "
+    "analysis UI, kept out of the coverage denominator, and never treated as "
+    "failed or as zero."
+)
+
+
+def applicable_signals(media_type: str) -> list[dict[str, Any]]:
+    """The signal set that can apply to this media type, in declared order.
+
+    The single source of truth for the whole system: fusion builds exactly these
+    signals, the API exposes them, the UI renders them, and the report prints
+    them. A signal missing from this list for a media type is not applicable to
+    that media -- it is not "unavailable", not an error, and not part of any
+    coverage fraction.
+    """
+    ordered = [
+        "ai_detection",
+        "perceptual_duplication",
+        "metadata_integrity",
+        "provenance_c2pa",
+        "compression_forensics",
+    ]
+    allowed = SIGNAL_APPLICABILITY.get(media_type, SIGNAL_APPLICABILITY["image"])
+    return [
+        {"signal_id": sid, "name": SIGNAL_NAMES[sid], "applicable": True}
+        for sid in ordered
+        if sid in allowed
+    ]
+
 
 def _signal(
     signal_id: str,
@@ -122,8 +202,25 @@ def _signal(
     status: str,
     explanation: str,
     basis: dict[str, Any] | None = None,
+    role: str = assessment.ROLE_DESCRIPTIVE,
+    execution: str | None = None,
 ) -> dict[str, Any]:
-    """Assemble one signal record. Weights are filled in by ``fuse``."""
+    """Assemble one signal record. Weights are filled in by ``fuse``.
+
+    ``role`` declares whether this measurement is eligible to determine the
+    assessment state (:data:`assessment.ROLE_DECISIVE`) or is a forensic
+    observation for examiner review (:data:`assessment.ROLE_DESCRIPTIVE`). It
+    defaults to descriptive: a builder has to say so explicitly before its
+    number can move a finding, and for provenance the role depends on *what the
+    manifest turned out to say*, not merely on which signal it is.
+
+    ``execution`` overrides the default status-to-execution mapping for cases
+    where the signal status alone is ambiguous. ``INCONCLUSIVE`` normally means
+    "ran and declined" (``ABSTAINED``), but for provenance it can also mean
+    "there was no manifest to validate", which is an ``UNAVAILABLE`` input and
+    not an abstention. Keeping those apart is what decides between
+    ``INCONCLUSIVE`` and ``NOT_ASSESSED`` downstream.
+    """
     return {
         "signal_id": signal_id,
         "name": SIGNAL_NAMES.get(signal_id, signal_id),
@@ -131,6 +228,9 @@ def _signal(
         "status": status,
         "explanation": explanation,
         "evidence_basis": basis or {},
+        "assessment_role": role,
+        "assessment_role_note": assessment.ROLE_NOTES[role],
+        "execution_status": execution,
         # Filled in during normalisation so the arithmetic stays in one place.
         "weight": 0.0,
         "effective_weight": 0.0,
@@ -210,6 +310,7 @@ def ai_detection_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
                 "available. " + detector_service.UNAVAILABLE_EXPLANATION
             ),
             basis={"availability": "not_installed", "detector_status": None},
+            role=assessment.ROLE_DECISIVE,
         )
 
     status = str(payload.get("status", detector_service.STATUS_UNAVAILABLE))
@@ -263,6 +364,7 @@ def ai_detection_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
                 + detector_service.SCORE_SEMANTICS
             ),
             basis=basis,
+            role=assessment.ROLE_DECISIVE,
         )
 
     if availability == "scored" and not score_is_valid:
@@ -280,6 +382,7 @@ def ai_detection_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
                 "authenticity and NOT a finding of manipulation."
             ),
             basis=basis,
+            role=assessment.ROLE_DECISIVE,
         )
 
     mapped = _AVAILABILITY_TO_SIGNAL_STATUS.get(availability, SIGNAL_UNAVAILABLE)
@@ -297,6 +400,7 @@ def ai_detection_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
         status=mapped,
         explanation=f"{prefix} ({status}). {detail}",
         basis=basis,
+        role=assessment.ROLE_DECISIVE,
     )
 
 
@@ -594,6 +698,10 @@ def provenance_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
                 "This is a signed statement by the producing tool."
             ),
             basis=basis,
+            # Decisive: a validated signature makes this a signed declaration
+            # about how the asset was produced, which is exactly the assessed
+            # question -- not an inference from an absence.
+            role=assessment.ROLE_DECISIVE,
         )
     if state == provenance_service.STATE_VERIFIED:
         return _signal(
@@ -607,6 +715,10 @@ def provenance_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
                 "what happened in front of the camera."
             ),
             basis=basis,
+            # Decisive in the negative direction, on the same basis as the
+            # generative case: a validated manifest declaring no generative
+            # involvement is a signed statement about production.
+            role=assessment.ROLE_DECISIVE,
         )
     if state == provenance_service.STATE_INVALID:
         return _signal(
@@ -619,6 +731,12 @@ def provenance_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
                 "substantive integrity finding."
             ),
             basis=basis,
+            # Descriptive by default: a broken signature is a serious INTEGRITY
+            # finding, but it does not say the media was synthetically generated
+            # -- re-encoding for a CDN breaks signatures too. It goes to the
+            # examiner as an observation instead of manufacturing a
+            # synthetic-media finding.
+            role=assessment.ROLE_DESCRIPTIVE,
         )
     if state == provenance_service.STATE_UNVERIFIED and generative:
         return _signal(
@@ -633,6 +751,10 @@ def provenance_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
                 "validated declaration for that reason."
             ),
             basis=basis,
+            # Descriptive: an unvalidated self-declaration is a strong lead but
+            # it is unauthenticated, so it is reported rather than treated as
+            # decisive.
+            role=assessment.ROLE_DESCRIPTIVE,
         )
     if state == provenance_service.STATE_UNVERIFIED:
         return _signal(
@@ -647,6 +769,10 @@ def provenance_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
                 + str(payload.get("detail", ""))
             ),
             basis=basis,
+            # UNAVAILABLE, not ABSTAINED: validation could not be performed
+            # because the library is missing. Nothing declined to answer -- the
+            # check never got to ask, which is a different kind of absence.
+            execution=assessment.CHECK_UNAVAILABLE,
         )
 
     return _signal(
@@ -659,6 +785,11 @@ def provenance_signal(payload: dict[str, Any] | None) -> dict[str, Any]:
             "evidence of manipulation; this signal is excluded from the score."
         ),
         basis=basis,
+        # UNAVAILABLE, not ABSTAINED: there was no manifest to validate, so this
+        # check had no input rather than declining to answer. Treating it as an
+        # abstention would make every ordinary file without Content Credentials
+        # look like a check that ran and could not decide.
+        execution=assessment.CHECK_UNAVAILABLE,
     )
 
 
@@ -732,15 +863,26 @@ def build_signals(
     provenance_payload: dict[str, Any] | None = None,
     forensics_payload: dict[str, Any] | None = None,
     sha256: str | None = None,
+    media_type: str = "image",
 ) -> list[dict[str, Any]]:
-    """Build all five signals from the stage payloads, in declared order."""
-    return [
-        ai_detection_signal(detector_payload),
-        perceptual_signal(match_payload, sha256=sha256),
-        metadata_signal(metadata_payload),
-        provenance_signal(provenance_payload),
-        forensics_signal(forensics_payload),
-    ]
+    """Build the signals *applicable to this media type*, in declared order.
+
+    A signal outside the media type's applicability set is not built at all --
+    it is not applicable, so it is neither a row in the response nor part of the
+    coverage denominator. Stages whose payload is ``None`` still produce their
+    signal (reported UNAVAILABLE); only inapplicable signals are absent.
+    """
+    allowed = SIGNAL_APPLICABILITY.get(media_type, SIGNAL_APPLICABILITY["image"])
+    builders: dict[str, Callable[[], dict[str, Any]]] = {
+        "ai_detection": lambda: ai_detection_signal(detector_payload),
+        "perceptual_duplication": lambda: perceptual_signal(
+            match_payload, sha256=sha256
+        ),
+        "metadata_integrity": lambda: metadata_signal(metadata_payload),
+        "provenance_c2pa": lambda: provenance_signal(provenance_payload),
+        "compression_forensics": lambda: forensics_signal(forensics_payload),
+    }
+    return [builders[sid]() for sid in builders if sid in allowed]
 
 
 def _confidence(coverage: float, score: float, settings: Settings) -> str:
@@ -757,30 +899,81 @@ def _confidence(coverage: float, score: float, settings: Settings) -> str:
 def fuse(
     signals: list[dict[str, Any]], settings: Settings, *, media_type: str = "image"
 ) -> dict[str, Any]:
-    """Combine signals into a verdict. Pure function: no I/O, no database.
+    """Assemble the signal arithmetic and attach the one assessment.
 
-    Mutates the passed signals in place to fill in weight, effective_weight,
-    contribution and included, so the returned arithmetic is fully traceable.
+    Pure function: no I/O, no database. Mutates the passed signals in place to
+    fill in weight, effective_weight, contribution, measured and included, so the
+    returned arithmetic is fully traceable.
+
+    The decision itself belongs to :func:`app.services.assessment.evaluate`,
+    which is called exactly once here. This function does not decide anything on
+    its own: the legacy ``verdict`` / ``manipulation_score`` / ``confidence`` /
+    ``rationale`` fields are a *projection* of that assessment, kept so existing
+    routes, stored rows and reports stay readable.
+
+    Two coverage-style quantities are published and they mean different things:
+
+    - ``signal_coverage`` -- share of applicable declared weight that produced
+      any measurement at all. This is the observational completeness of the
+      examination and it is what the UI's coverage line has always shown.
+    - ``assessment.coverage`` -- share of the weight of the checks ELIGIBLE for
+      the assessed task that contributed to the finding. This is what gates the
+      assessment, and it is usually the smaller number.
     """
     declared = settings.fusion_weights
-    total_declared = sum(declared.values())
+    # Only the declared weights of the signals present (the applicable set)
+    # form the denominator. A weight configured for a signal this media type
+    # cannot carry is deliberately excluded.
+    total_declared = sum(
+        declared.get(signal["signal_id"], 0.0) for signal in signals
+    )
 
     for signal in signals:
         signal["weight"] = float(declared.get(signal["signal_id"], 0.0))
 
-    included = [
+    # A signal that produced a usable number. Distinct from ``included`` below:
+    # measuring something and being eligible to decide the assessment are two
+    # different things now.
+    measured = [
         s
         for s in signals
         if s["status"] == SIGNAL_OK
-        and isinstance(s["score"], (int, float))
+        and assessment.usable_score(s["score"]) is not None
         and s["weight"] > 0.0
     ]
+    measured_weight = sum(s["weight"] for s in measured)
+    coverage = measured_weight / total_declared if total_declared > 0 else 0.0
+
+    # The one authoritative assessment. Derived here, once, from the same signal
+    # records the response carries and the same configured thresholds -- so the
+    # API, the frontend and the PDF all read this object instead of deriving a
+    # state of their own from scores.
+    evidence_assessment = assessment.evaluate(
+        signals=signals,
+        media_type=media_type,
+        declared_weights=declared,
+        manipulated_at_or_above=settings.verdict_manipulated_threshold,
+        authentic_at_or_below=settings.verdict_authentic_threshold,
+        minimum_eligible_coverage=settings.fusion_min_effective_weight,
+    )
+
+    # ``included`` means "contributed to the assessment score". Only checks the
+    # policy accepted as eligible qualify, which is what stops a metadata lead,
+    # a perceptual distance or a compression irregularity from being averaged
+    # into the number behind a synthetic-media finding.
+    contributing_ids = {
+        str(c["check_id"]) for c in evidence_assessment["contributing_checks"]
+    }
+    measured_marks = {id(s) for s in measured}
+    included = [s for s in measured if str(s["signal_id"]) in contributing_ids]
+    included_marks = {id(s) for s in included}
     available_weight = sum(s["weight"] for s in included)
-    coverage = available_weight / total_declared if total_declared > 0 else 0.0
-    included_ids = {id(s) for s in included}
 
     for signal in signals:
-        if id(signal) in included_ids:
+        # Did it measure anything? Independent of whether it was allowed to
+        # decide, so a descriptive observation is never mistaken for a failure.
+        signal["measured"] = id(signal) in measured_marks
+        if id(signal) in included_marks:
             signal["effective_weight"] = round(signal["weight"] / available_weight, 6)
             signal["contribution"] = round(
                 float(signal["score"]) * signal["effective_weight"], 6
@@ -796,8 +989,19 @@ def fuse(
         "authentic_at_or_below": settings.verdict_authentic_threshold,
         "minimum_signal_coverage": settings.fusion_min_effective_weight,
     }
+
+    # Everything that did not contribute to the assessment score, with the two
+    # reasons kept apart: it could not measure anything, or it measured something
+    # that is not eligible to decide this task. The old shape (signal_id, status,
+    # reason) is preserved for existing consumers and extended, not replaced.
     excluded = [
-        {"signal_id": s["signal_id"], "status": s["status"], "reason": s["explanation"]}
+        {
+            "signal_id": s["signal_id"],
+            "status": s["status"],
+            "reason": s["explanation"],
+            "measured": s["measured"],
+            "assessment_role": s["assessment_role"],
+        }
         for s in signals
         if not s["included"]
     ]
@@ -807,124 +1011,153 @@ def fuse(
         "fusion_version": FUSION_VERSION,
         "media_type": media_type,
         "signals": signals,
+        # Media-aware counts. ``signals_total`` is the number of signals
+        # APPLICABLE to this media type that were considered (== len(signals));
+        # ``signals_available`` those that produced a measurement and were
+        # folded into the score; ``signals_evaluated`` those that actually ran
+        # (were attempted) whether or not they could decide. Inapplicable
+        # signals are absent from all three -- they are not failed, not zero,
+        # and not in any denominator.
         "signals_total": len(signals),
+        # Signals whose score is behind the assessment. Formerly this counted
+        # everything that produced a number; ``signals_measured`` now carries
+        # that meaning, and this counts the eligible contributors.
         "signals_available": len(included),
+        "signals_measured": len(measured),
+        "signals_evaluated": sum(1 for s in signals if s["status"] != SIGNAL_UNAVAILABLE),
+        "applicable_signals": [
+            {"signal_id": s["signal_id"], "name": s["name"]} for s in signals
+        ],
         "declared_weights": declared,
         "declared_weight_total": round(total_declared, 6),
         "available_weight": round(available_weight, 6),
+        "measured_weight": round(measured_weight, 6),
+        # Observational completeness: how much of the applicable declared weight
+        # produced any measurement. NOT the gate on the assessment -- that is
+        # ``assessment.coverage``, over the eligible checks only.
         "signal_coverage": round(coverage, 6),
         "thresholds": thresholds,
         "excluded_signals": excluded,
         "score_semantics": SCORE_SEMANTICS,
         "caveat": CAVEAT,
         "primary_signals": list(PRIMARY_SIGNALS),
+        # The authoritative assessment contract. The legacy fields set below
+        # (``verdict``, ``manipulation_score``, ``confidence``, ``rationale``,
+        # ``arithmetic``, ``primary_signal_available``) are a PROJECTION of this
+        # object, computed from it and never alongside it.
+        "assessment": evidence_assessment,
     }
 
-    if not included:
-        result.update(
-            verdict=VERDICT_INSUFFICIENT,
-            manipulation_score=None,
-            confidence=CONFIDENCE_NONE,
-            primary_signal_available=False,
-            rationale=(
-                "No signal produced a measurement, so no score was computed. "
-                f"All {len(signals)} signals are excluded: "
-                + "; ".join(f"{e['signal_id']} ({e['status']})" for e in excluded)
-                + ". This is an absence of evidence, not evidence of either "
-                "authenticity or manipulation."
-            ),
-        )
-        return result
+    state = evidence_assessment["state"]
+    score = evidence_assessment["score"]
+    reason_codes = evidence_assessment["reason_codes"]
 
-    score = round(sum(float(s["contribution"]) for s in included), 6)
-    primary_available = any(s["signal_id"] in PRIMARY_SIGNALS for s in included)
-    arithmetic = " + ".join(
-        f"{s['score']:.4f}x{s['effective_weight']:.4f}" for s in included
-    )
     result.update(
+        verdict=assessment.legacy_verdict(state),
         manipulation_score=score,
-        primary_signal_available=primary_available,
-        arithmetic=f"{arithmetic} = {score:.4f}",
-    )
-
-    if coverage < settings.fusion_min_effective_weight:
-        result.update(
-            verdict=VERDICT_INSUFFICIENT,
-            confidence=CONFIDENCE_NONE,
-            rationale=(
-                f"Available signals account for {coverage:.0%} of the declared "
-                f"weight, below the {settings.fusion_min_effective_weight:.0%} "
-                "minimum required to reach a verdict. A fused score of "
-                f"{score:.4f} was computed from "
-                f"{len(included)}/{len(signals)} signals but is not sufficient "
-                "to support a conclusion."
-            ),
-        )
-        return result
-
-    confidence = _confidence(coverage, score, settings)
-
-    if score >= settings.verdict_manipulated_threshold:
-        result.update(
-            verdict=VERDICT_MANIPULATED,
-            confidence=confidence,
-            rationale=(
-                f"Fused score {score:.4f} is at or above the manipulated "
-                f"threshold {settings.verdict_manipulated_threshold}, computed "
-                f"from {len(included)}/{len(signals)} signals covering "
-                f"{coverage:.0%} of declared weight. Leading contributors: "
-                + ", ".join(
-                    f"{s['name']} ({s['contribution']:.4f})"
-                    for s in sorted(
-                        included, key=lambda s: s["contribution"], reverse=True
-                    )[:3]
-                )
-                + "."
-            ),
-        )
-        return result
-
-    if score <= settings.verdict_authentic_threshold:
-        if not primary_available:
-            result.update(
-                verdict=VERDICT_INSUFFICIENT,
-                confidence=CONFIDENCE_NONE,
-                rationale=(
-                    f"Fused score {score:.4f} is at or below the authentic "
-                    f"threshold {settings.verdict_authentic_threshold}, but no "
-                    "primary signal was available: neither a working AI detector "
-                    "nor a cryptographically validated C2PA manifest contributed. "
-                    "The remaining signals (metadata leads, perceptual "
-                    "derivation, compression history) are too weak to establish "
-                    "authenticity, so no authenticity finding is issued."
-                ),
-            )
-            return result
-        result.update(
-            verdict=VERDICT_AUTHENTIC,
-            confidence=confidence,
-            rationale=(
-                f"Fused score {score:.4f} is at or below the authentic threshold "
-                f"{settings.verdict_authentic_threshold}, with a primary signal "
-                "available, computed from "
-                f"{len(included)}/{len(signals)} signals covering {coverage:.0%} "
-                "of declared weight. This means no evidence of manipulation was "
-                "found by the signals that ran -- it is not a guarantee that the "
-                "media is unaltered."
-            ),
-        )
-        return result
-
-    result.update(
-        verdict=VERDICT_INSUFFICIENT,
-        confidence=CONFIDENCE_LOW,
-        rationale=(
-            f"Fused score {score:.4f} falls between the authentic threshold "
-            f"{settings.verdict_authentic_threshold} and the manipulated "
-            f"threshold {settings.verdict_manipulated_threshold}, so the signals "
-            "point in no clear direction. Computed from "
-            f"{len(included)}/{len(signals)} signals covering {coverage:.0%} of "
-            "declared weight."
+        primary_signal_available=bool(evidence_assessment["contributing_checks"]),
+        arithmetic=evidence_assessment["arithmetic"],
+        # A band, never a percentage, and never 'high': no threshold here is
+        # calibrated. Only a conclusive state gets a band at all.
+        confidence=(
+            _confidence(evidence_assessment["coverage"], score, settings)
+            if state in assessment.CONCLUSIVE_STATES and score is not None
+            else CONFIDENCE_NONE
         ),
+        rationale=_rationale(evidence_assessment, signals, settings),
     )
     return result
+
+
+def _rationale(
+    evidence_assessment: dict[str, Any],
+    signals: list[dict[str, Any]],
+    settings: Settings,
+) -> str:
+    """Prose for the assessment. Rendered FROM the state, never alongside it.
+
+    Every consumer that needs to branch reads ``state`` and ``reason_codes``;
+    this text exists so a human reading the response or the PDF sees the same
+    reasoning in words. It adds no logic of its own.
+    """
+    state = evidence_assessment["state"]
+    score = evidence_assessment["score"]
+    codes = evidence_assessment["reason_codes"]
+    contributing = evidence_assessment["contributing_checks"]
+    coverage = evidence_assessment["coverage"]
+    observations = evidence_assessment["descriptive_observations"]
+
+    contributors = ", ".join(
+        f"{c['name']} ({float(c['score']):.4f})" for c in contributing
+    )
+    observed = (
+        " "
+        + f"{len(observations)} forensic observation(s) were recorded for examiner "
+        "review and did not contribute to this state: "
+        + ", ".join(o["name"] for o in observations)
+        + "."
+        if observations
+        else ""
+    )
+
+    if state == assessment.STATE_INDICATORS_DETECTED:
+        return (
+            f"{contributors} reached or exceeded the positive threshold "
+            f"{settings.verdict_manipulated_threshold} for "
+            f"{evidence_assessment['scope']}. Indicators were detected; this is "
+            "not a determination that the media is fake and no calibrated error "
+            f"rate is known for this threshold.{observed}"
+        )
+
+    if state == assessment.STATE_NO_INDICATORS_DETECTED:
+        return (
+            f"{contributors} is at or below the negative threshold "
+            f"{settings.verdict_authentic_threshold} for "
+            f"{evidence_assessment['scope']}. No indicators were detected by the "
+            "checks that ran -- this is not a certification that the media is "
+            f"unaltered.{observed}"
+        )
+
+    if state == assessment.STATE_INCONCLUSIVE:
+        if assessment.REASON_CONFLICTING_RESULTS in codes:
+            return (
+                "Eligible checks for "
+                f"{evidence_assessment['scope']} point in opposite directions "
+                f"({contributors}) and no validated conflict policy exists, so no "
+                f"finding is issued.{observed}"
+            )
+        if assessment.REASON_DETECTOR_ABSTAINED in codes and not contributing:
+            return (
+                "An eligible check for "
+                f"{evidence_assessment['scope']} ran and declined to return a "
+                "score, so the question could not be decided. An abstention is "
+                "not a measurement and is not a vote in either "
+                f"direction.{observed}"
+            )
+        return (
+            f"{contributors or 'The eligible checks'} produced a score of "
+            f"{score if score is None else format(score, '.4f')}, between the "
+            f"negative threshold {settings.verdict_authentic_threshold} and the "
+            f"positive threshold {settings.verdict_manipulated_threshold}, so it "
+            f"supports no finding in either direction.{observed}"
+        )
+
+    # NOT_ASSESSED
+    missing = "; ".join(
+        f"{item['check_id']} ({item['execution_status']})"
+        for item in evidence_assessment["unavailable_checks"]
+    )
+    if assessment.REASON_INSUFFICIENT_ELIGIBLE_EVIDENCE in codes and contributing:
+        return (
+            f"Eligible checks covered {coverage:.0%} of the declared eligible "
+            f"weight for {evidence_assessment['scope']}, below the "
+            f"{settings.fusion_min_effective_weight:.0%} minimum this deployment "
+            f"requires, so the question was not assessed.{observed}"
+        )
+    return (
+        "No eligible check produced a result for "
+        f"{evidence_assessment['scope']}, so the question was not assessed"
+        + (f" ({missing})" if missing else "")
+        + ". This is an absence of evidence -- neither a finding of manipulation "
+        f"nor a finding of authenticity.{observed}"
+    )

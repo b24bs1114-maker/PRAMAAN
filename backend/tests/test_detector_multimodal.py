@@ -14,12 +14,16 @@ from app.services.detector import (
     VideoDetector,
     reset_detector_singleton,
 )
+from conftest import install_operator_override
 from tests.helpers import jpeg_bytes
 
 
 def test_detector_status_endpoint(settings):
     reset_detector_singleton()
     app = create_app(settings)
+    # Capability probes describe this deployment, so they sit behind the bearer
+    # gate with everything else. Built here, so this app needs its own operator.
+    install_operator_override(app)
     client = TestClient(app)
 
     res = client.get("/api/detector/status")
@@ -38,6 +42,7 @@ def test_detect_endpoint_uninstalled_model(settings):
     reset_detector_singleton()
     try:
         app = create_app(settings)
+        install_operator_override(app)
         client = TestClient(app)
 
         unique_bytes = jpeg_bytes(seed=88888)

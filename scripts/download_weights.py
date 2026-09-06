@@ -24,7 +24,7 @@ Environment
                                     ``none`` provisions nothing (for an instance
                                     too small to load any checkpoint).
 ``PRAMAAN_IMAGE_WEIGHTS_URL``       explicit URL, overrides the release asset.
-``PRAMAAN_VIDEO_WEIGHTS_URL``       (no video checkpoint is published; see manifest)
+``PRAMAAN_VIDEO_WEIGHTS_URL``       explicit URL, overrides the release asset.
 ``PRAMAAN_AUDIO_WEIGHTS_URL``
 ``PRAMAAN_WEIGHTS_RELEASE_TAG``     release tag to pull assets from.
 ``PRAMAAN_WEIGHTS_RELEASE_REPO``    ``owner/repo`` holding the release.

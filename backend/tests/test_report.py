@@ -269,6 +269,78 @@ def test_report_is_listed_with_its_hash(client, reported_case):
     assert match[0]["renderer"] == body["renderer"]
 
 
+def test_a_listed_report_carries_the_standing_printed_in_the_document(
+    client, reported_case
+):
+    """The caveat is a property of the report, so listing one must not lose it.
+
+    ``document_status`` is the paragraph printed onto the document itself --
+    prototype output, demonstration thresholds, requires examiner review. It was
+    returned only by the generate call, so a report opened from the library came
+    back without it and the console had nothing to show; the standing quietly
+    disappeared the moment the examiner navigated away and came back.
+    """
+    body = reported_case["body"]
+    case_id = reported_case["case_id"]
+
+    per_case = client.get(f"/api/cases/{case_id}/reports").json()
+    row = next(r for r in per_case["reports"] if r["report_id"] == body["report_id"])
+    assert row["document_status"] == report_service.DOCUMENT_STATUS
+    assert row["document_status"] == body["document_status"]
+
+    library = client.get("/api/reports", params={"case_id": case_id}).json()
+    listed = next(r for r in library["reports"] if r["report_id"] == body["report_id"])
+    assert listed["document_status"] == report_service.DOCUMENT_STATUS
+
+
+def test_a_listed_report_is_not_described_by_today_s_renderer(client, reported_case):
+    """A stored PDF keeps the renderer that wrote it, not the one installed now.
+
+    ``renderer_status()`` probes what is importable at call time. Copying it onto
+    a historical row would restate the environment as a fact about a document
+    that was written in a different one -- a report produced by the built-in
+    writer would begin claiming ReportLab as soon as ReportLab was installed.
+    The row carries ``renderer``, which is what actually produced it; the
+    envelope carries current-environment state, where it is true of the reader
+    rather than of the document.
+    """
+    case_id = reported_case["case_id"]
+    listing = client.get(f"/api/cases/{case_id}/reports").json()
+    row = listing["reports"][0]
+
+    assert "renderer_status" not in row
+    assert row["renderer"] == reported_case["body"]["renderer"]
+
+    library = client.get("/api/reports", params={"case_id": case_id}).json()
+    assert "renderer_status" not in library["reports"][0]
+    # The envelope is where "which renderer is available right now" belongs.
+    assert library["renderer"]["renderer"] == report_service.renderer_status()[
+        "renderer"
+    ]
+
+
+def test_a_listing_does_not_hand_out_the_server_s_filesystem_layout(
+    client, reported_case
+):
+    """A row addresses its document by URL, not by path on the host.
+
+    The generate response returns ``path`` because the caller just caused that
+    file to be written. A listing has no such reason: ``download_url`` is what a
+    client needs, and enumerating the reports directory row by row only
+    publishes where this deployment keeps its evidence output.
+    """
+    case_id = reported_case["case_id"]
+    for reports in (
+        client.get(f"/api/cases/{case_id}/reports").json()["reports"],
+        client.get("/api/reports", params={"case_id": case_id}).json()["reports"],
+    ):
+        for row in reports:
+            assert "path" not in row
+            assert row["download_url"] == (
+                f"/api/cases/{row['case_id']}/reports/{row['report_id']}"
+            )
+
+
 def test_a_second_report_is_a_distinct_document(client, reported_case):
     response = client.post(
         f"/api/cases/{reported_case['case_id']}/report",
@@ -306,19 +378,16 @@ def test_report_carries_every_required_section(reported_case):
     # passed because the text extractor returned "" and every one of them skipped.
     for heading in (
         "PROTOTYPE OUTPUT",
+        "FINAL ASSESSMENT",
         "EXECUTIVE FINDING",
-        "EVIDENCE SNAPSHOT",
-        "CASE IDENTITY",
-        "EXHIBIT INDEX",
-        "SIGNAL MATRIX",
-        "FUSION & INTERPRETATION",
-        "EVIDENCE INTEGRITY",
-        "MODEL RECORD",
-        "REVIEW NOTE",
+        "EVIDENCE IDENTITY",
+        "FORENSIC SIGNALS",
+        "FUSION",
         "PROVENANCE & LINEAGE",
+        "MODEL RECORD",
         "AUDIT INTEGRITY",
-        "CASE TIMELINE",
         "EXAMINER REVIEW",
+        "LIMITATIONS",
     ):
         assert heading in text, f"missing section: {heading}"
 
@@ -326,7 +395,7 @@ def test_report_carries_every_required_section(reported_case):
     # evidence it rests on, and the sign-off must come last.
     positions = [
         text.index(h)
-        for h in ("EXECUTIVE FINDING", "SIGNAL MATRIX", "FUSION & INTERPRETATION",
+        for h in ("EXECUTIVE FINDING", "FORENSIC SIGNALS", "FUSION",
                   "AUDIT INTEGRITY", "EXAMINER REVIEW")
     ]
     assert positions == sorted(positions), "sections are out of order"
@@ -366,9 +435,14 @@ def test_report_prints_the_signal_breakdown_and_its_arithmetic(client, reported_
         f"/api/cases/{reported_case['case_id']}/verdict"
     ).json()["items"]
 
-    # Every exhibit's verdict appears -- the snapshot table covers all of them.
+    # Every exhibit's ASSESSMENT STATE appears -- the snapshot table covers all
+    # of them. The document prints the state the backend decided, not the legacy
+    # verdict token, so what a reader sees is the same object the API returned.
     for verdict in verdicts:
-        assert verdict["verdict"] in text
+        state = verdict["assessment"]["state"]
+        assert state.replace("_", " ") in text, (
+            f"assessment state {state} must be printed for every exhibit"
+        )
 
     # The signal matrix, the arithmetic and the rationale belong to the primary
     # exhibit, which is the only one the document analyses in full. Asserting them
@@ -404,12 +478,20 @@ def test_an_unscored_exhibit_shows_a_dash_not_a_zero(client, reported_case):
         f"/api/cases/{reported_case['case_id']}/verdict"
     ).json()["items"]
 
-    # The video exhibit has no detector, so fusion returns no score. NULL is not
-    # zero: printing 0.0000 for it would read as a measured absence of
-    # manipulation.
-    unscored = [v for v in verdicts if v.get("manipulation_score") is None]
-    assert unscored, "fixture must include an exhibit with no fused score"
-    assert "INSUFFICIENT_EVIDENCE" in text
+    # The video exhibit has no detector, so no eligible check produced a score.
+    # NULL is not zero: printing 0.0000 for it would read as a measured absence
+    # of manipulation.
+    unscored = [v for v in verdicts if v["assessment"]["score"] is None]
+    assert unscored, "fixture must include an exhibit with no assessed score"
+    # No score means no eligible check measured anything, so the state is one of
+    # the two non-findings -- and each prints as itself. "Ran and could not
+    # decide" and "was not assessed" are different statements to put in a
+    # forensic document; the legacy token collapses them and the document must
+    # not.
+    for verdict in unscored:
+        state = verdict["assessment"]["state"]
+        assert state in ("NOT_ASSESSED", "INCONCLUSIVE")
+        assert state.replace("_", " ") in text
     assert "0.0000" not in text
 
 
@@ -465,7 +547,7 @@ def test_report_prints_timestamps(reported_case):
     assert re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", text)
 
 
-def test_report_prints_the_audit_trail_and_head_hash(client, reported_case):
+def test_report_prints_the_audit_trail_and_head_hash(reported_case):
     text = _require_text(reported_case)
     packed = reported_case["packed"]
     body = reported_case["body"]
@@ -479,13 +561,12 @@ def test_report_prints_the_audit_trail_and_head_hash(client, reported_case):
     elided = f"{body['audit_head_hash'][:12]}..."
     assert elided not in packed, "the head hash must not be printed elided"
 
-    trail = client.get(f"/api/cases/{reported_case['case_id']}/audit").json()
-    first = trail["events"][0]
-    assert "CASE TIMELINE" in text
-    assert first["event"] in text
-    # The timeline prints time, event and actor -- it carries no row-hash column,
-    # so the old per-row-hash assertion described a table that does not exist.
-    assert first["actor"] in text
+    # The two-page layout carries integrity as a labelled block, not a per-event
+    # timeline: chain status plus the head and genesis hashes a reader needs to
+    # re-verify the case against /api/cases/{id}/audit.
+    assert "AUDIT INTEGRITY" in text
+    assert "HEAD HASH" in text
+    assert "GENESIS HASH" in text
 
 
 def test_report_calls_the_chain_a_linear_hash_chain_not_a_merkle_tree(reported_case):
@@ -574,8 +655,124 @@ def test_footer_is_stamped_on_every_page(reported_case):
     assert text.count("PRAMAAN | Prototype examination report") >= pages
     for number in range(1, pages + 1):
         assert f"Page {number} of {pages}" in text
-    # No page may claim a total the document does not have.
-    assert f"of {pages + 1}" not in text
+    # No page may claim a total the document does not have. Check the footer
+    # pattern specifically -- a bare "of {pages+1}" substring can legitimately
+    # occur in body text (e.g. "3 of 5 signals available"), so match the footer
+    # form "Page N of M" and assert every stamped total equals the real count.
+    footer_totals = {int(m) for m in re.findall(r"Page \d+ of (\d+)", text)}
+    assert footer_totals == {pages}, f"footer stamped a wrong total: {footer_totals}"
+
+
+# --------------------------------------------------------------------------- #
+# The case row says whether a report exists
+# --------------------------------------------------------------------------- #
+def test_case_report_count_is_counted_not_read_from_the_status_string(client):
+    """``CaseOut.report_count`` is the only honest answer to "reported yet?".
+
+    The console's case workflow marks its Report step from this number. It used
+    to look for the substring ``report`` in ``Case.status``, which nothing in
+    this service ever writes -- so the step stayed unticked no matter how many
+    reports had been generated. The count is asserted at each transition, and
+    the status column is asserted *not* to carry the answer, so a future change
+    cannot quietly go back to inferring it from there.
+    """
+    uploaded = _upload(client, None, "count-me.jpg", jpeg_bytes(seed=71), "image/jpeg")
+    case_id = uploaded["case"]["case_id"]
+
+    # The upload response's own case block is counted, not omitted: the client
+    # holds this record until something replaces it.
+    assert uploaded["case"]["report_count"] == 0
+
+    fetched = client.get(f"/api/cases/{case_id}")
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["report_count"] == 0
+
+    first = client.post(f"/api/cases/{case_id}/report", json={})
+    assert first.status_code == 201, first.text
+    assert client.get(f"/api/cases/{case_id}").json()["report_count"] == 1
+
+    second = client.post(f"/api/cases/{case_id}/report", json={})
+    assert second.status_code == 201, second.text
+    assert client.get(f"/api/cases/{case_id}").json()["report_count"] == 2
+
+    # Generating a report does not (and need not) touch the status column. This
+    # is the assertion that makes the field necessary rather than redundant.
+    assert "report" not in client.get(f"/api/cases/{case_id}").json()["status"]
+
+
+def test_every_endpoint_that_returns_a_case_counts_its_reports(client):
+    """One reported case, every case-bearing payload, one consistent count.
+
+    A client that replaces its held case record from whichever response arrives
+    last must not see the count blink away. The analysis response is the one
+    that used to do that: it rebuilds the case block from the pipeline.
+    """
+    uploaded = _upload(client, None, "consistent.jpg", jpeg_bytes(seed=72), "image/jpeg")
+    case_id = uploaded["case"]["case_id"]
+    evidence_id = uploaded["evidence"]["evidence_id"]
+    assert client.post(f"/api/cases/{case_id}/report", json={}).status_code == 201
+
+    # GET /api/cases/{id}
+    assert client.get(f"/api/cases/{case_id}").json()["report_count"] == 1
+
+    # PATCH /api/cases/{id}
+    patched = client.patch(f"/api/cases/{case_id}", data={"priority": "high"})
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["report_count"] == 1
+
+    # GET /api/cases (the queue)
+    listed = client.get("/api/cases", params={"limit": 500})
+    assert listed.status_code == 200, listed.text
+    rows = [c for c in listed.json()["cases"] if c["case_id"] == case_id]
+    assert rows and rows[0]["report_count"] == 1
+
+    # POST /api/cases/{id}/analyse -- the response whose case block replaces the
+    # client's own.
+    analysed = client.post(f"/api/cases/{case_id}/analyse", params={"refresh": "true"})
+    assert analysed.status_code == 200, analysed.text
+    assert analysed.json()["case"]["report_count"] == 1
+
+    # GET /api/evidence/{id}
+    detail = client.get(f"/api/evidence/{evidence_id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["case"]["report_count"] == 1
+
+    # GET /api/dashboard/summary -- recent cases carry the same count. Which
+    # cases are recent depends on what else the suite has created, so the
+    # assertion is over every row it returned: none of them may omit the count.
+    dashboard = client.get("/api/dashboard/summary")
+    assert dashboard.status_code == 200, dashboard.text
+    recent = dashboard.json()["recent_investigations"]
+    assert recent, "the dashboard returned no recent cases to check"
+    assert all(isinstance(c["report_count"], int) for c in recent)
+    for row in recent:
+        if row["case_id"] == case_id:
+            assert row["report_count"] == 1
+
+
+def test_an_uncounted_report_count_is_null_not_zero(client):
+    """``None`` means "not counted here", and never "no reports".
+
+    Turning an absent count into ``0`` would tell the operator a reported case
+    has no report. The serialiser therefore leaves it absent unless a caller
+    counted it.
+    """
+    from app.models import get_session_factory
+    from app.services import ingestion
+
+    session = get_session_factory()()
+    try:
+        case = ingestion.create_case(session, title="Uncounted", examiner=None)
+        session.commit()
+        bare = ingestion.case_to_dict(case)
+        counted = ingestion.case_to_dict(
+            case, report_count=ingestion.report_count(session, case.id)
+        )
+    finally:
+        session.close()
+
+    assert bare["report_count"] is None
+    assert counted["report_count"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -632,14 +829,21 @@ def test_examiner_is_the_supplied_name_or_an_honest_placeholder(client, reported
     text = _require_text(reported_case)
     assert "D. Jain" in text
 
-    # A report requested without an examiner must say so rather than inherit a
-    # smoke-test name.
+    # A report requested without an examiner must say so, or else fall back to the
+    # name the case already carries -- which is the display name of the operator who
+    # was signed in when it was opened. Inheriting a real authenticated identity is
+    # not the fabrication this guards against; a pre-filled smoke-test name is.
+    case_examiner = client.get(f"/api/cases/{reported_case['case_id']}").json()["examiner"]
     response = client.post(f"/api/cases/{reported_case['case_id']}/report", json={})
     assert response.status_code == 201, response.text
     other = _flat(_pdf_text(Path(response.json()["path"]).read_bytes()))
     if other:
         assert "integration-check" not in other
-        assert "Not specified" in other or "D. Jain" in other
+        assert (
+            "Not specified" in other
+            or "D. Jain" in other
+            or (case_examiner and case_examiner in other)
+        ), f"no examiner and no placeholder; the case records {case_examiner!r}"
 
 
 def test_review_decision_ships_unchecked(reported_case):
@@ -740,6 +944,7 @@ def test_non_ascii_is_transliterated_rather_than_dropped():
 
 
 def test_long_content_paginates(reported_case):
-    # The real report is long enough to need several pages; that is the property
-    # being checked, not a specific count.
-    assert reported_case["body"]["pages"] >= 3
+    # The condensed report spans at least the two designed pages; that is the
+    # property being checked, not a specific count (page count is measured, not
+    # assumed, so a long case may overflow to more).
+    assert reported_case["body"]["pages"] >= 2

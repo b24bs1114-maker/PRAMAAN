@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.services import fusion, provenance
+from app.services import assessment, fusion, provenance
 from app.services.detector import DetectorAdapter, reset_detector_singleton, set_detector
 from tests.helpers import jpeg_bytes, jpeg_with_exif_bytes, mp4_bytes
 
@@ -84,13 +84,22 @@ def test_every_signal_publishes_its_full_breakdown(client: TestClient) -> None:
         }
         assert signal["explanation"], f"{signal['signal_id']} has no explanation"
         assert signal["weight"] > 0.0
+        # Two independent facts per signal, and the whole point of the
+        # assessment contract is that they are not the same fact:
+        #   measured  -- did it produce a usable number?
+        #   included  -- was that number eligible to decide the assessment?
+        # A descriptive observation is measured and NOT included, and it keeps
+        # its real score while contributing nothing.
         if signal["included"]:
+            assert signal["measured"] is True
             assert isinstance(signal["score"], float)
             assert signal["contribution"] is not None
+            assert signal["assessment_role"] == "DECISIVE"
         else:
-            assert signal["score"] is None
             assert signal["contribution"] is None
             assert signal["effective_weight"] == 0.0
+            if not signal["measured"]:
+                assert signal["score"] is None
 
     assert body["method"] == fusion.FUSION_METHOD
     assert item["verdict"] in (
@@ -98,6 +107,7 @@ def test_every_signal_publishes_its_full_breakdown(client: TestClient) -> None:
         fusion.VERDICT_MANIPULATED,
         fusion.VERDICT_INSUFFICIENT,
     )
+    assert item["assessment"]["state"] in assessment.ASSESSMENT_STATES
 
 
 def test_fused_score_is_reproducible_from_the_published_signals(
@@ -150,12 +160,22 @@ def test_unavailable_detector_is_excluded_not_scored_zero(client: TestClient) ->
     assert ai["included"] is False
     assert ai["contribution"] is None  # not 0.0 -- it did not contribute at all
 
-    # Its 0.35 declared weight is removed from the denominator, not counted.
+    # Its 0.35 declared weight is removed from the numerator, not counted as 0.
+    # ``signal_coverage`` is observational completeness -- the share of declared
+    # weight that measured anything -- so it is checked against measured_weight.
     assert item["signal_coverage"] == pytest.approx(
-        item["available_weight"] / item["declared_weight_total"], abs=1e-6
+        item["measured_weight"] / item["declared_weight_total"], abs=1e-6
     )
     assert item["primary_signal_available"] is False
     assert any(e["signal_id"] == "ai_detection" for e in item["excluded_signals"])
+
+    # With the only eligible check unavailable, the question was NOT ASSESSED --
+    # not "assessed and inconclusive", and above all not authentic. The
+    # descriptive signals that did measure something cannot fill the gap.
+    assert item["assessment"]["state"] == assessment.STATE_NOT_ASSESSED
+    assert item["assessment"]["score"] is None
+    assert assessment.REASON_DETECTOR_UNAVAILABLE in item["assessment"]["reason_codes"]
+    assert item["assessment"]["descriptive_observations"]
 
 
 def test_stripped_metadata_is_inconclusive_and_never_counted_against_the_file(
@@ -193,16 +213,182 @@ def test_video_evidence_yields_no_verdict_at_all(client: TestClient) -> None:
     assert item["manipulation_score"] is None
     assert item["confidence"] == fusion.CONFIDENCE_NONE
     assert item["signals_available"] == 0
-    assert "absence of evidence" in item["rationale"].lower()
+    # Nothing eligible ran, so the video question was never assessed -- and the
+    # scope names the video task, not a generic authenticity claim.
+    assert item["assessment"]["state"] == assessment.STATE_NOT_ASSESSED
+    assert item["assessment"]["scope"] == "deepfake_or_manipulated_video_indicators"
+    assert "not assessed" in item["rationale"].lower()
+
+    # Media-aware applicability: a video is fused over its applicable set only.
+    # Perceptual matching and compression forensics are image techniques, so
+    # they are NOT APPLICABLE -- absent from the signal list entirely, hidden
+    # rather than rendered as failed rows, and absent from the coverage
+    # denominator (signals_total counts applicable signals only).
+    assert item["signals_total"] == 3
+    assert {s["signal_id"] for s in item["signals"]} == {
+        "ai_detection",
+        "metadata_integrity",
+        "provenance_c2pa",
+    }
+    assert "perceptual_duplication" not in {s["signal_id"] for s in item["signals"]}
+    assert "compression_forensics" not in {s["signal_id"] for s in item["signals"]}
+    # The denominator is the applicable declared weight (0.35 + 0.20 + 0.15 =
+    # 0.70), so the excluded image-only weights never dilute coverage.
+    assert item["declared_weight_total"] == pytest.approx(0.70, abs=1e-6)
+    # The detector interface covers video, so the reason is "not installed"...
     statuses = {s["signal_id"]: s["status"] for s in item["signals"]}
-    # UNAVAILABLE, not UNSUPPORTED: no video detector is installed in this
-    # deployment, and video becomes measurable the moment one is plugged in. The
-    # compression forensics signal is genuinely UNSUPPORTED -- it analyses JPEG
-    # quantisation tables, which a video container does not have. Both statuses
-    # are excluded from the weighted mean, so this distinction changes the label's
-    # truthfulness and not the arithmetic.
     assert statuses["ai_detection"] == fusion.SIGNAL_UNAVAILABLE
-    assert statuses["compression_forensics"] == fusion.SIGNAL_UNSUPPORTED
+
+
+# --------------------------------------------------------------------------- #
+# Media-aware signal applicability
+# --------------------------------------------------------------------------- #
+def test_applicability_map_matches_the_specified_modalities() -> None:
+    """One source of truth: image carries all five; video and audio fewer.
+
+    The map is the contract the whole system renders from, so it is pinned
+    here. If a modality genuinely gains a capability (e.g. audio metadata
+    support), the map, the pipeline stage gating, the UI and this test all
+    change together -- never the UI alone.
+    """
+    assert set(fusion.SIGNAL_APPLICABILITY["image"]) == {
+        "ai_detection",
+        "perceptual_duplication",
+        "metadata_integrity",
+        "provenance_c2pa",
+        "compression_forensics",
+    }
+    assert set(fusion.SIGNAL_APPLICABILITY["video"]) == {
+        "ai_detection",
+        "metadata_integrity",
+        "provenance_c2pa",
+    }
+    # No image-only perceptual indexing, no image-only compression forensics
+    # for video.
+    assert "perceptual_duplication" not in fusion.SIGNAL_APPLICABILITY["video"]
+    assert "compression_forensics" not in fusion.SIGNAL_APPLICABILITY["video"]
+    # Audio: detector interface covers it; no metadata reader or image-only
+    # technique applies.
+    assert set(fusion.SIGNAL_APPLICABILITY["audio"]) == {"ai_detection"}
+
+    ordered = [s["signal_id"] for s in fusion.applicable_signals("image")]
+    assert ordered == [
+        "ai_detection",
+        "perceptual_duplication",
+        "metadata_integrity",
+        "provenance_c2pa",
+        "compression_forensics",
+    ]
+
+
+def test_build_signals_constructs_only_the_applicable_set() -> None:
+    """Inapplicable signals are absent, not UNAVAILABLE or UNSUPPORTED_MEDIA."""
+    video = fusion.build_signals(
+        detector_payload={"status": "OK", "abstained": False, "score": 0.5,
+                          "model": "m", "model_version": "1"},
+        media_type="video",
+    )
+    ids = {s["signal_id"] for s in video}
+    assert ids == {"ai_detection", "metadata_integrity", "provenance_c2pa"}
+    # An inapplicable signal is never materialised with a status at all.
+    assert "compression_forensics" not in ids
+    assert "perceptual_duplication" not in ids
+
+    audio = fusion.build_signals(media_type="audio")
+    assert {s["signal_id"] for s in audio} == {"ai_detection"}
+
+
+def test_coverage_denominator_is_the_applicable_declared_weight(settings) -> None:
+    """Fusing a video must not divide by the five-signal declared total.
+
+    The denominator is the declared weight of the signals actually present
+    (the applicable set), so the 0.30 of image-only weight can never dilute a
+    video's coverage fraction.
+    """
+    signals = fusion.build_signals(
+        detector_payload={"status": "OK", "abstained": False, "score": 0.9,
+                          "model": "m", "model_version": "1"},
+        media_type="video",
+    )
+    result = fusion.fuse(signals, settings, media_type="video")
+
+    expected_total = (
+        settings.fusion_weight_ai_detection
+        + settings.fusion_weight_metadata
+        + settings.fusion_weight_provenance
+    )
+    assert result["declared_weight_total"] == pytest.approx(expected_total, abs=1e-6)
+    # Applicable / evaluated / contributing, all from the applicable set only.
+    assert result["signals_total"] == 3
+    assert result["signals_evaluated"] == 1
+    assert result["signals_available"] == 1
+    # Coverage is the contributing weight over the APPLICABLE declared weight
+    # (0.35 of 0.70 here), never over the five-signal total.
+    assert result["signal_coverage"] == pytest.approx(
+        settings.fusion_weight_ai_detection / expected_total, abs=1e-6
+    )
+    assert result["applicable_signals"] == [
+        {"signal_id": "ai_detection", "name": fusion.SIGNAL_NAMES["ai_detection"]},
+        {"signal_id": "metadata_integrity", "name": fusion.SIGNAL_NAMES["metadata_integrity"]},
+        {"signal_id": "provenance_c2pa", "name": fusion.SIGNAL_NAMES["provenance_c2pa"]},
+    ]
+
+
+def test_verdict_counts_are_media_aware_per_modality(
+    client: TestClient,
+) -> None:
+    """Applicable / evaluated / contributing, separately for each modality."""
+    from tests.helpers import wav_bytes
+
+    reset_detector_singleton()
+
+    # Image: five applicable. How many were evaluated (ran) depends on the
+    # deployment: with no detector installed ai_detection is UNAVAILABLE and
+    # counts as not evaluated, so the assertion is relative to its own signals.
+    _, _, image = _verdict(client, jpeg_bytes(seed=820), "applicability.jpg")
+    assert image["media_type"] == "image"
+    assert image["signals_total"] == 5
+    assert image["signals_evaluated"] == sum(
+        1 for s in image["signals"] if s["status"] != fusion.SIGNAL_UNAVAILABLE
+    )
+    assert image["signals_available"] == sum(
+        1 for s in image["signals"] if s["included"]
+    )
+    assert [a["signal_id"] for a in image["applicable_signals"]] == [
+        "ai_detection",
+        "perceptual_duplication",
+        "metadata_integrity",
+        "provenance_c2pa",
+        "compression_forensics",
+    ]
+
+    # Video: three applicable, no image-only rows in the list.
+    _, _, video = _verdict(client, mp4_bytes(), "applicability.mp4", "video/mp4")
+    assert video["media_type"] == "video"
+    assert video["signals_total"] == 3
+    assert video["signals_evaluated"] == sum(
+        1 for s in video["signals"] if s["status"] != fusion.SIGNAL_UNAVAILABLE
+    )
+    listed = {s["signal_id"] for s in video["signals"]}
+    assert listed == {"ai_detection", "metadata_integrity", "provenance_c2pa"}
+    assert [a["signal_id"] for a in video["applicable_signals"]] == [
+        "ai_detection",
+        "metadata_integrity",
+        "provenance_c2pa",
+    ]
+
+    # Audio: one applicable.
+    audio_upload = client.post(
+        "/api/cases/upload",
+        files={"file": ("applicability.wav", wav_bytes(seed=821), "audio/wav")},
+        data={"title": "Applicability audio", "description": "test"},
+    )
+    audio_case = audio_upload.json()["case"]["case_id"]
+    audio = client.post(f"/api/cases/{audio_case}/verdict?refresh=true").json()["items"][0]
+    assert audio["media_type"] == "audio"
+    assert audio["signals_total"] == 1
+    assert [a["signal_id"] for a in audio["applicable_signals"]] == ["ai_detection"]
+    assert {s["signal_id"] for s in audio["signals"]} == {"ai_detection"}
 
 
 # --------------------------------------------------------------------------- #
@@ -215,12 +401,29 @@ def test_high_detector_score_drives_a_manipulated_verdict(client: TestClient) ->
     assert item["verdict"] == fusion.VERDICT_MANIPULATED
     assert item["manipulation_score"] >= item["thresholds"]["manipulated_at_or_above"]
     assert _by_id(item)["ai_detection"]["score"] == 0.97
-    assert "at or above the manipulated threshold" in item["rationale"]
+
+    # The state is the authoritative form; the verdict token above is its
+    # projection. Consumers branch on the state and the reason code, not on prose.
+    assessed = item["assessment"]
+    assert assessed["state"] == assessment.STATE_INDICATORS_DETECTED
+    assert assessed["conclusive"] is True
+    assert assessment.REASON_ABOVE_THRESHOLD in assessed["reason_codes"]
+    assert assessed["scope"] == "ai_generated_or_manipulated_image_indicators"
+    assert [c["check_id"] for c in assessed["contributing_checks"]] == ["ai_detection"]
+    # Indicators detected is not a determination that the media is fake.
+    assert "not a determination" in item["rationale"].lower()
 
 
 def test_low_detector_score_with_a_primary_signal_yields_authentic(
     client: TestClient,
 ) -> None:
+    """A low eligible score reaches NO_INDICATORS_DETECTED, stated as bounded.
+
+    Note the editing-software EXIF tag this fixture carries. Under the old policy
+    its 0.55 metadata score was averaged into the same number that decided the
+    verdict; now it is a descriptive observation, reported and not folded in, so
+    the finding rests on the detector alone.
+    """
     set_detector(StubDetector(0.02))
     _, _, item = _verdict(
         client,
@@ -231,8 +434,19 @@ def test_low_detector_score_with_a_primary_signal_yields_authentic(
     assert item["primary_signal_available"] is True
     assert item["verdict"] == fusion.VERDICT_AUTHENTIC
     assert item["manipulation_score"] <= item["thresholds"]["authentic_at_or_below"]
-    # An authenticity finding must still be stated as bounded.
-    assert "not a guarantee" in item["rationale"].lower()
+
+    assessed = item["assessment"]
+    assert assessed["state"] == assessment.STATE_NO_INDICATORS_DETECTED
+    assert assessment.REASON_BELOW_THRESHOLD in assessed["reason_codes"]
+    # The score behind the finding is the detector's own, undiluted.
+    assert assessed["score"] == pytest.approx(0.02, abs=1e-6)
+    # "No indicators detected" is never upgraded into a certification.
+    assert "not a certification" in item["rationale"].lower()
+    assert any(
+        "not a certification of authenticity" in note.lower()
+        or "not a certification" in note.lower()
+        for note in [assessed["state_note"]]
+    )
 
 
 def test_authentic_is_withheld_when_no_primary_signal_ran(client: TestClient) -> None:
@@ -242,6 +456,7 @@ def test_authentic_is_withheld_when_no_primary_signal_ran(client: TestClient) ->
 
     assert item["primary_signal_available"] is False
     assert item["verdict"] != fusion.VERDICT_AUTHENTIC
+    assert item["assessment"]["state"] == assessment.STATE_NOT_ASSESSED
 
 
 def test_middle_band_score_reports_insufficient_evidence(client: TestClient) -> None:
@@ -253,7 +468,15 @@ def test_middle_band_score_reports_insufficient_evidence(client: TestClient) -> 
     high = item["thresholds"]["manipulated_at_or_above"]
     assert low < score < high
     assert item["verdict"] == fusion.VERDICT_INSUFFICIENT
-    assert "no clear direction" in item["rationale"]
+
+    # INCONCLUSIVE, not NOT_ASSESSED: an eligible check DID run and produce a
+    # measurement, it simply landed between the thresholds. The two states are
+    # different statements and the reason code says which one this is.
+    assessed = item["assessment"]
+    assert assessed["state"] == assessment.STATE_INCONCLUSIVE
+    assert assessed["conclusive"] is False
+    assert assessment.REASON_INTERMEDIATE_SCORE in assessed["reason_codes"]
+    assert "supports no finding in either direction" in item["rationale"]
 
 
 # --------------------------------------------------------------------------- #
@@ -318,46 +541,63 @@ def _signals(**payloads):
 
 
 def test_weights_are_configurable_and_change_the_arithmetic(settings) -> None:
+    """Weights remain configurable, and they move the arithmetic they govern.
+
+    Two ELIGIBLE checks are used here. The old version of this test paired the
+    detector with compression forensics, which no longer contributes to the
+    assessment score -- so reweighting it could not change anything, correctly.
+    """
     detector_payload = {
         "status": "OK",
         "score": 0.9,
         "model": "m",
         "model_version": "1",
     }
-    forensics_payload = {
+    provenance_payload = {
         "status": "OK",
-        "score": 0.1,
-        "recompression": {},
-        "block_grid": {},
-        "explanation": "x",
+        "state": provenance.STATE_VERIFIED,
+        "manifest_present": True,
+        "signature_validated": True,
+        "declared": {"declares_generative_ai": False, "claim_generator": "Camera"},
     }
 
     default = fusion.fuse(
         _signals(
-            detector_payload=detector_payload, forensics_payload=forensics_payload
+            detector_payload=detector_payload, provenance_payload=provenance_payload
         ),
         settings,
     )
     reweighted = fusion.fuse(
         _signals(
-            detector_payload=detector_payload, forensics_payload=forensics_payload
+            detector_payload=detector_payload, provenance_payload=provenance_payload
         ),
         settings.model_copy(
             update={
                 "fusion_weight_ai_detection": 0.10,
-                "fusion_weight_forensics": 0.90,
+                "fusion_weight_provenance": 0.90,
             }
         ),
     )
 
-    # 0.9 and 0.1 fused; shifting weight toward the low signal must lower the score.
-    assert default["manipulation_score"] > reweighted["manipulation_score"]
+    # 0.9 and 0.15 combined; shifting weight to the low check must lower the score.
+    assert default["assessment"]["score"] > reweighted["assessment"]["score"]
     assert default["declared_weights"]["ai_detection"] == 0.35
     assert reweighted["declared_weights"]["ai_detection"] == 0.10
+    # Eligible checks disagree in direction, so neither run issues a finding.
+    assert default["assessment"]["state"] == assessment.STATE_INCONCLUSIVE
+    assert (
+        assessment.REASON_CONFLICTING_RESULTS in default["assessment"]["reason_codes"]
+    )
 
 
-def test_low_coverage_blocks_a_verdict(settings) -> None:
-    """A single low-weight signal cannot carry a conclusion on its own."""
+def test_a_descriptive_observation_alone_cannot_produce_a_finding(settings) -> None:
+    """Compression forensics is an observation, so it decides nothing on its own.
+
+    Under the previous policy this signal's 0.95 became the fused score and only
+    the coverage gate held the verdict back. Now it cannot reach the assessment
+    score at all: it is reported for examiner review and the question is
+    NOT_ASSESSED because no eligible check ran.
+    """
     only_forensics = fusion.fuse(
         _signals(
             forensics_payload={
@@ -371,12 +611,19 @@ def test_low_coverage_blocks_a_verdict(settings) -> None:
         settings,
     )
 
-    assert only_forensics["signals_available"] == 1
-    assert only_forensics["signal_coverage"] == pytest.approx(0.10, abs=1e-6)
+    # It measured something, and it is not in the assessment.
+    assert only_forensics["signals_measured"] == 1
+    assert only_forensics["signals_available"] == 0
+    assert only_forensics["assessment"]["score"] is None
+    assert only_forensics["assessment"]["state"] == assessment.STATE_NOT_ASSESSED
     assert only_forensics["verdict"] == fusion.VERDICT_INSUFFICIENT
-    assert only_forensics["manipulation_score"] == pytest.approx(0.95)
-    assert "below the" in only_forensics["rationale"]
-    assert "minimum required" in only_forensics["rationale"]
+    assert only_forensics["manipulation_score"] is None
+
+    # The measurement is preserved as an observation rather than discarded.
+    observed = only_forensics["assessment"]["descriptive_observations"]
+    assert [o["observation_id"] for o in observed] == ["compression_forensics"]
+    assert observed[0]["score"] == pytest.approx(0.95)
+    assert "not assessed" in only_forensics["rationale"].lower()
 
 
 def test_low_score_without_a_primary_signal_cannot_reach_authentic(settings) -> None:
@@ -407,10 +654,15 @@ def test_low_score_without_a_primary_signal_cannot_reach_authentic(settings) -> 
     )
 
     assert result["primary_signal_available"] is False
+    # Observational coverage is satisfied -- three signals measured something --
+    # and it still cannot produce a finding, because none of the three is
+    # eligible to answer the synthetic-media question.
     assert result["signal_coverage"] >= settings.fusion_min_effective_weight
-    assert result["manipulation_score"] <= settings.verdict_authentic_threshold
+    assert result["manipulation_score"] is None
     assert result["verdict"] == fusion.VERDICT_INSUFFICIENT
-    assert "no primary signal" in result["rationale"].lower()
+    assert result["assessment"]["state"] == assessment.STATE_NOT_ASSESSED
+    assert result["assessment"]["coverage"] == 0.0
+    assert len(result["assessment"]["descriptive_observations"]) == 3
 
 
 def test_verified_c2pa_manifest_declaring_ai_is_scored_higher_than_unverified(
@@ -661,9 +913,17 @@ def test_an_excluded_detector_never_drags_the_fused_score_toward_zero(settings) 
         ai = next(s for s in result["signals"] if s["signal_id"] == "ai_detection")
         assert ai["included"] is False
         assert ai["contribution"] is None
-        # The forensics score survives untouched; it is not averaged with a zero
-        # that was never measured.
-        assert result["manipulation_score"] == pytest.approx(0.80)
+        # The forensics measurement survives untouched as an observation -- it is
+        # not averaged with a zero that was never measured, and it is not
+        # promoted into a finding either.
+        observed = result["assessment"]["descriptive_observations"]
+        assert observed[0]["observation_id"] == "compression_forensics"
+        assert observed[0]["score"] == pytest.approx(0.80)
+        assert result["assessment"]["score"] is None
+        assert result["assessment"]["state"] in (
+            assessment.STATE_NOT_ASSESSED,
+            assessment.STATE_INCONCLUSIVE,
+        )
 
 
 def test_a_low_uncalibrated_detector_score_is_never_called_verified(settings) -> None:
@@ -672,8 +932,7 @@ def test_a_low_uncalibrated_detector_score_is_never_called_verified(settings) ->
     The image checkpoint scores known Midjourney output as low as 0.0245, so a
     low score genuinely does drive this branch. That is the model's documented
     weakness and is NOT corrected by moving the threshold. What must hold is that
-    the verdict never upgrades "no evidence of manipulation was found" into a
-    verification of authenticity.
+    NO_INDICATORS_DETECTED is never upgraded into a verification of authenticity.
     """
     result = fusion.fuse(
         _signals(
@@ -689,9 +948,12 @@ def test_a_low_uncalibrated_detector_score_is_never_called_verified(settings) ->
     )
 
     rationale = result["rationale"].lower()
-    assert "not a guarantee that the media is unaltered" in rationale
+    assert "not a certification that the media is unaltered" in rationale
     for forbidden in ("verified authentic", "confirmed authentic", "proven", "genuine"):
         assert forbidden not in rationale
+    # The state names what was checked, and it is not an authenticity claim.
+    assert result["assessment"]["state"] == assessment.STATE_NO_INDICATORS_DETECTED
+    assert "not a certification" in result["assessment"]["state_note"].lower()
     # The strongest band this system emits, even here.
     assert result["confidence"] in {
         fusion.CONFIDENCE_NONE,

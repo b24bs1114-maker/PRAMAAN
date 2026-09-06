@@ -43,7 +43,13 @@ PRAMAAN_DEPLOY/
 pramaan-detector/weights/**
 !pramaan-detector/weights/model_manifest.json
 !pramaan-detector/weights/*.pt.json
+!pramaan-detector/weights/*.pth.json
+!pramaan-detector/weights/*.safetensors.json
 !pramaan-detector/weights/README.txt
+!pramaan-detector/weights/audio_meta.yaml
+!pramaan-detector/weights/image_config.json
+!pramaan-detector/weights/video_config.json
+!pramaan-detector/weights/video_preprocessor_config.json
 
 # Keep runtime components:
 # backend/requirements.txt

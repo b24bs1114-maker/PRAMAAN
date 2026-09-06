@@ -25,7 +25,9 @@ Design constraints that shape the whole system:
 
 ## Status
 
-Backend complete. **350 tests pass** (`pytest`, 3.12 venv).
+Backend complete. **485 tests pass** (`pytest`, 3.12 venv; plus 84 in the
+detector package and a 104-check integration verifier — see
+[docs/FINAL_DEMO_CHECKLIST.md](docs/FINAL_DEMO_CHECKLIST.md)).
 
 Implemented end to end:
 
@@ -241,6 +243,31 @@ stored and computes nothing. An item with no stored result is reported as
 | `POST` | `/api/cases/{case_id}/analyse` | `refresh`, `audit_limit` — one call for the whole pipeline |
 | `GET` | `/api/cases/{case_id}/audit` | `limit` |
 | `POST` | `/api/cases/{case_id}/audit/verify` | `record` (default true) — set `false` for a read-only check |
+| `GET` | `/api/system/signals` | the applicable forensic-signal set per media type, from the fusion engine's own applicability map |
+
+#### Media-aware signal applicability
+
+Which signals apply to which media type is decided by the fusion engine
+(`SIGNAL_APPLICABILITY` in `backend/app/services/fusion.py`), published via
+`GET /api/system/signals`, and carried on every verdict. The UI renders from
+that backend response and never hardcodes applicability:
+
+| Media type | Applicable signals |
+| --- | --- |
+| `image` | AI manipulation detector · Perceptual near-duplicate · Metadata integrity · C2PA provenance · Compression forensics |
+| `video` | AI manipulation detector · Metadata integrity · C2PA provenance |
+| `audio` | AI manipulation detector |
+
+A signal outside the media type's set is **NOT APPLICABLE**: it is hidden from
+the analysis UI (not rendered as a failed or zero row), excluded from the
+coverage denominator (the applicable declared weight is the denominator), and
+never treated as failed or as zero. The verdict payload carries
+`signals_total` (applicable), `signals_evaluated` (ran) and `signals_available`
+(contributed), plus the `applicable_signals` list itself — the UI's
+"Applicable: X · Evaluated: Y · Contributing: Z" summary renders those three
+backend values verbatim.
+
+
 
 ### Index
 
@@ -468,6 +495,28 @@ Honest statements of scope, all enforced by tests:
 - **No live socket in the development sandbox.** Tests drive the app through the
   ASGI transport rather than a bound port, so `uvicorn` startup on a real port —
   like `docker compose up` — is a manual verification step.
+
+## Team
+
+Three-member team:
+
+**Daksh — primary technical/product owner.** Responsible for the implementation
+and integration of PRAMAAN across frontend, backend, forensic pipeline
+(SHA-256, pHash/dHash/aHash, indexing, matching, provenance, propagation,
+metadata/C2PA, compression forensics), audit system, case management and
+deletion, PDF reporting, integration of the image / audio / video detector
+models, security hardening, the frontend/backend contract, overall system
+architecture, and the end-to-end product flow.
+
+**Suyash — fusion and forensic demo validation.** Fusion logic and its
+validation, plus checking AI/forensic outputs during demo rehearsal to confirm
+the final demonstrated results make sense.
+
+**Dev — demo QA, reliability, startup/runbook, and recovery readiness.** Final
+demo QA, pre-demo smoke testing, startup/runbook verification, all-three-
+modality readiness checks, backup demo file verification, report
+generation/download verification, case-deletion safety checks, and first-line
+demo recovery support.
 
 ## Logging
 

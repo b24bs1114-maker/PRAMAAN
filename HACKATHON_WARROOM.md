@@ -26,7 +26,7 @@ _Last updated: 2026-09-04 · Stage: build (backend done, frontend redesign mid-m
 
 ## 4. What is DONE — [VERIFIED by running it today]
 - **Backend, complete**: 14,169 LOC app + 8,738 LOC tests, `pytest` exit 0 (11 skips). Ingest → SHA-256 + pHash/dHash/aHash → EXIF/ISO-BMFF → flat exact perceptual index → near-duplicate matching → propagation + earliest known instance → C2PA provenance → compression forensics → transparent weighted fusion → hash-chained audit → PDF report. ~50 endpoints.
-- **Detector engine**: 2,264 LOC, **57/57 tests**. Real weights, digest-verified: image Swin-B 347 MB, audio Wav2Vec2-large 1.26 GB.
+- **Detector engine**: 2,264 LOC, **57/57 tests**. Real weights, digest-verified: image ViT-S/16 (OwensLab/commfor-model-384) 87 MB, audio AASIST 1.3 MB, video VideoMAE (Vansh180/VideoMae-ffc23-deepfake-detector) 345 MB.
 - **API contract**: recorded from the live app and replayed by the frontend — **72/72 checks pass**.
 - **Deployed**: Render backend (`pramaan-6oph.onrender.com`) + Vercel frontend, CORS + `/api/backend/*` proxy wired.
 - **Committed frontend console works**: 10 screens, 12,733 LOC — this is what is live today.
@@ -70,5 +70,6 @@ _Last updated: 2026-09-04 · Stage: build (backend done, frontend redesign mid-m
 
 ## 9. Decision log
 - 2026-08-20 — frontend ownership moved to Daksh; full redesign authorised. Backend + API contract + fusion stay authoritative.
+- 2026-09-05 — FINAL OWNERSHIP (source of truth, applies everywhere): Daksh is the primary technical/product owner for the implementation and integration of the whole system — frontend, backend, forensic pipeline, provenance, models, reporting, architecture, demo flow. Suyash owns fusion and forensic demo validation. Dev owns demo QA, reliability, startup/runbook, and recovery readiness. No other ownership split is correct; older notes implying otherwise are superseded.
 - 2026-09-01 — video and audio detectors made to abstain rather than run an untrained head. Honesty over coverage.
 - 2026-09-04 — audited the tree: backend green, redesign unintegrated and non-compiling. Constraint = the build.

@@ -101,6 +101,21 @@ class Settings(BaseSettings):
     dinov2_similarity_threshold: float = 0.70
     dinov2_device: str = "auto"                        # auto | cpu | mps | cuda
 
+    # --- Public Web Discovery (Google Cloud Vision Web Detection) ------------
+    pramaan_web_discovery_enabled: bool = False
+    google_application_credentials: str = ""
+    google_cloud_vision_api_key: SecretStr = SecretStr("")
+    web_discovery_fetch_timeout_seconds: float = 4.0
+    web_discovery_max_download_bytes: int = 5 * 1024 * 1024
+    web_discovery_max_results: int = 30
+    web_discovery_verify_downloads: bool = True
+    #: Cache for web discovery results. Bounded and TTL'd: an entry survives at
+    #: most this many seconds and the cache holds at most
+    #: ``web_discovery_cache_max_entries`` results, oldest evicted first.
+    #: Only SUCCESS/NO_RESULTS runs are cached; failures never are.
+    web_discovery_cache_ttl_seconds: float = 3600.0
+    web_discovery_cache_max_entries: int = 128
+
     # --- Fusion weights (transparent, configurable) ---------------------------
     # Relative weights; normalised across whichever signals are available.
     fusion_weight_ai_detection: float = 0.35
@@ -136,9 +151,9 @@ class Settings(BaseSettings):
     #: Destination directory for provisioned checkpoints. Empty means the
     #: repository default, ``pramaan-detector/weights``.
     weights_dir: str = ""
-    #: Memory-mapped safetensors directory produced by
-    #: ``scripts/convert_detector_weights.py``. Ignored when absent, or when its
-    #: ``source.json`` names a checkpoint other than the one configured.
+    #: Legacy hook for a memory-mapped weights directory from the retired
+    #: Swin-B conversion path. No current detector reads it; it remains a
+    #: declared, ignored setting so an old .env that sets it is not rejected.
     image_model_hf_dir: str = ""
     #: Which modalities a build provisions, as csv of image,video,audio.
     weights_modalities: str = ""
@@ -166,11 +181,12 @@ class Settings(BaseSettings):
     video_detector_entrypoint: str = "app.services.pramaan_detector_adapter:infer_video"
     audio_detector_entrypoint: str = "app.services.pramaan_detector_adapter:infer_audio"
 
-    # Inference is the most expensive thing this process does: one Swin-B
-    # forward pass costs ~26 MB of activations, and a Grad-CAM pass ~206 MB
-    # (measured). Two concurrent analyses therefore double the peak, so
-    # inference is serialised by default. Raise this only on an instance with
-    # measured headroom.
+    # Inference is the most expensive thing this process does: a single
+    # forward pass across the current detectors (ViT-S image, AASIST audio,
+    # VideoMAE video) holds the slot for seconds and adds activation memory on
+    # top of the resident weights. Two concurrent analyses therefore add their
+    # peaks, so inference is serialised by default. Raise this only on an
+    # instance with measured headroom.
     detector_max_concurrency: int = 1
     #: Seconds a request will wait for the inference slot before abstaining.
     #: Bounded so a queue of analyses cannot hold the worker past the proxy's
@@ -195,6 +211,62 @@ class Settings(BaseSettings):
     # --- Reporting ------------------------------------------------------------
     report_examiner: str = ""
     report_organisation: str = "PRAMAAN Prototype Deployment"
+
+    # --- Authentication -------------------------------------------------------
+    # Operators sign in with a username/password; the console stamps the signed-in
+    # operator as the examiner on evidence they ingest. Passwords are stored as
+    # PBKDF2-HMAC-SHA256 hashes (stdlib only -- no new dependency); login returns
+    # an opaque bearer token whose SHA-256 hash is the only thing persisted.
+    #: Lifetime of a login session before its token is rejected as expired.
+    auth_session_ttl_hours: float = 12.0
+    #: PBKDF2 iteration count for new password hashes. Existing hashes carry their
+    #: own iteration count in the encoded string and verify regardless.
+    auth_pbkdf2_iterations: int = 200_000
+
+    # Seed operators. The service creates any configured account that does not
+    # already exist, so a fresh deployment can be signed into and adding an
+    # operator here actually takes effect. The passwords below are OBVIOUS
+    # development placeholders -- a real deployment MUST override them with
+    # PRAMAAN_SEED_OPERATOR_*_PASSWORD (SecretStr, never logged). The service logs
+    # a loud warning whenever it seeds a placeholder password.
+    seed_operator_username: str = "examiner"
+    seed_operator_display_name: str = "Priya Menon"
+    seed_operator_role: str = "Forensic Examiner"
+    seed_operator_password: SecretStr = SecretStr("change-me-examiner")
+    seed_operator_secondary_username: str = "supervisor"
+    seed_operator_secondary_display_name: str = "Arjun Rao"
+    seed_operator_secondary_role: str = "Senior Forensic Examiner"
+    seed_operator_secondary_password: SecretStr = SecretStr("change-me-supervisor")
+    #: A third, deployment-specific operator. Blank by default -- an empty
+    #: username is skipped entirely, so this slot costs nothing until someone
+    #: sets PRAMAAN_SEED_OPERATOR_TERTIARY_USERNAME. It exists so a real named
+    #: examiner can be added through configuration rather than by editing source,
+    #: which would put their password in the repository.
+    seed_operator_tertiary_username: str = ""
+    seed_operator_tertiary_display_name: str = ""
+    seed_operator_tertiary_role: str = "Forensic Examiner"
+    seed_operator_tertiary_password: SecretStr = SecretStr("")
+
+    # --- Development auth bypass ----------------------------------------------
+    # A LOCAL CONVENIENCE ONLY: when active, requests with no bearer token resolve
+    # to a synthetic development operator instead of being refused, so an agent or
+    # a browser can drive the console without signing in. The real login path is
+    # untouched and still works; this only changes what happens when a token is
+    # *absent*.
+    #
+    # Two independent conditions are required (see ``dev_auth_bypass_active``):
+    # this flag AND a non-production environment. Setting the flag alone in
+    # production does nothing -- authentication stays mandatory there, because the
+    # cost of a single mistaken variable would be an unauthenticated evidence
+    # store.
+    dev_auth_bypass: bool = False
+    #: Identity the bypass presents. Deliberately not a real examiner's name: the
+    #: audit trail and the examiner field on evidence will carry this string, and
+    #: anything ingested this way must be legible afterwards as development
+    #: activity rather than as a person's attested work.
+    dev_auth_bypass_username: str = "dev-bypass"
+    dev_auth_bypass_display_name: str = "Development Operator (auth bypass)"
+    dev_auth_bypass_role: str = "Developer -- local bypass, not a real examiner"
 
     # --- CORS -----------------------------------------------------------------
     # Comma-separated strings (not JSON lists) so a plain .env stays readable.
@@ -224,7 +296,7 @@ class Settings(BaseSettings):
     def _absolute_path(cls, value: Path) -> Path:
         return value if value.is_absolute() else (PROJECT_ROOT / value).resolve()
 
-    @field_validator("image_model_path", "video_model_path", "audio_model_path", mode="after")
+    @field_validator("image_model_path", "video_model_path", "audio_model_path", "google_application_credentials", mode="after")
     @classmethod
     def _absolute_str_path(cls, value: str) -> str:
         if not value:
@@ -237,6 +309,18 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def dev_auth_bypass_active(self) -> bool:
+        """Whether unauthenticated requests get the development operator.
+
+        The single place that answers this question, so no caller can implement
+        half of the rule. Both conditions must hold: the explicit flag *and* a
+        non-production environment. ``PRAMAAN_DEV_AUTH_BYPASS=true`` leaking into
+        a production deployment therefore changes nothing, which is the point of
+        checking the environment rather than trusting the flag alone.
+        """
+        return self.dev_auth_bypass and not self.is_production
 
     @property
     def evidence_dir(self) -> Path:
@@ -291,14 +375,25 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_regex(self) -> str | None:
-        """Compile wildcard domain patterns (e.g. 'https://*.vercel.app') into a regex for CORSMiddleware."""
+        """Compile wildcard origin patterns (e.g. 'https://*.vercel.app') into a regex.
+
+        ``re.escape`` turns the ``*`` into ``\\*``, so the wildcard has to be
+        re-expanded afterwards or the compiled pattern matches only the literal
+        string ``https://*.vercel.app`` -- which is not a value any browser ever
+        sends, i.e. the wildcard would silently allow nothing.
+
+        The expansion is ``[^/]*``, not ``.*``: an Origin header is scheme, host
+        and optional port with no path, so refusing ``/`` keeps a pattern like
+        ``https://*.vercel.app`` from being satisfied by something that merely
+        contains that text later in a longer URL.
+        """
         patterns = [
             origin for origin in self.cors_origins
             if "*" in origin and origin != "*"
         ]
         if not patterns:
             return None
-        regex_parts = [f"^{re.escape(p).replace(r'\\*', r'.*')}$" for p in patterns]
+        regex_parts = [f"^{re.escape(p).replace(re.escape('*'), '[^/]*')}$" for p in patterns]
         return "|".join(regex_parts)
 
     @property
@@ -339,20 +434,15 @@ def _export_model_pipeline_env(settings: Settings) -> None:
     """Publish the model-asset settings that are read via ``os.getenv``.
 
     ``pydantic-settings`` parses ``.env`` into this object; it does not put the
-    values into ``os.environ``. Two consumers only ever see ``os.environ``:
+    values into ``os.environ``. One consumer only ever sees ``os.environ``:
+    ``transformers`` / ``huggingface_hub``, whose offline switches are the thing
+    standing between "load the verified checkpoint from disk" and "quietly
+    download an unpinned revision from the hub".
 
-    * the detector package's loader, which reads ``PRAMAAN_IMAGE_MODEL_HF_DIR``
-      to find the memory-mapped weights directory, and
-    * ``transformers`` / ``huggingface_hub``, whose offline switches are the
-      thing standing between "load the verified checkpoint from disk" and
-      "quietly download an unpinned revision from the hub".
-
-    So a ``.env`` that set either of those had no effect at all. Bridging them
-    here keeps one configuration surface. An explicit process-level environment
-    variable always wins -- this only fills in what the environment left unset.
+    So a ``.env`` that set that had no effect at all. Bridging it here keeps
+    one configuration surface. An explicit process-level environment variable
+    always wins -- this only fills in what the environment left unset.
     """
-    if settings.image_model_hf_dir:
-        os.environ.setdefault("PRAMAAN_IMAGE_MODEL_HF_DIR", settings.image_model_hf_dir)
     if settings.detector_offline:
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")

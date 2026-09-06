@@ -83,8 +83,18 @@ def load_image(checkpoint: Path) -> str:
     release_image_detector()
     detector = ImageDetector(weights_path=str(checkpoint))
     strategy = detector.load_strategy
-    logits = detector.model.config.num_labels
-    return f"SwinForImageClassification via {strategy}, num_labels={logits}"
+    if strategy == "untrained-fallback":
+        # The ViT loader silently falls back to a randomly initialised model
+        # when the checkpoint cannot be read; that must fail the check rather
+        # than report a "loaded" detector that has no trained weights.
+        raise RuntimeError(
+            f"image checkpoint at {checkpoint} did not load trained weights "
+            f"(load_strategy={strategy})"
+        )
+    return (
+        f"OwensLab-CommunityForensics-ViT384 via {strategy} "
+        f"(weights_hash={detector.weights_hash})"
+    )
 
 
 def load_video(checkpoint: Path) -> str:
@@ -100,13 +110,12 @@ def load_video(checkpoint: Path) -> str:
     detector = VideoDetector(weights_path=str(checkpoint))
     if not detector.usable:
         raise RuntimeError(
-            f"loaded no usable frame model (load_strategy="
-            f"{getattr(detector, 'load_strategy', 'unknown')}): "
-            f"{detector.unavailable_reason}"
+            f"video checkpoint at {checkpoint} loaded no usable model "
+            f"(strategy={getattr(detector, 'strategy', 'unknown')}, "
+            f"weights_hash={detector.weights_hash})"
         )
     return (
-        f"{type(detector.frame_model).__name__} loaded via "
-        f"{getattr(detector, 'load_strategy', 'unknown')} "
+        f"VideoMAEForVideoClassification via {detector.strategy} "
         f"(weights_hash={detector.weights_hash})"
     )
 

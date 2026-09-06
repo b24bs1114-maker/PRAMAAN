@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.main import app, create_app
 from app.models import get_session_factory
 from app.services import demo_loader, detector as detector_service
+from conftest import install_operator_override
 from tests.helpers import jpeg_bytes
 
 
@@ -72,6 +73,9 @@ def test_dashboard_disabled_detector_mode():
 
     settings = get_settings()
     test_app = create_app(settings)
+    # Built here, so it needs its own signed-in operator: the dashboard is
+    # authenticated and would otherwise answer 401 regardless of detector state.
+    install_operator_override(test_app)
     with TestClient(test_app) as client:
         res = client.get("/api/dashboard/summary")
         assert res.status_code == 200
@@ -95,40 +99,51 @@ def test_analysis_disabled_detector_mode():
     get_settings.cache_clear()
     detector_service.reset_detector_singleton()
 
-    settings = get_settings()
-    test_app = create_app(settings)
-    with TestClient(test_app) as client:
-        # Ingest image
-        up_res = client.post(
-            "/api/cases/upload",
-            files={"file": ("demo_test.jpg", jpeg_bytes(seed=123), "image/jpeg")},
-            data={"title": "Demo Mode Analysis Test Case"},
-        )
-        assert up_res.status_code in (200, 201)
-        case_id = up_res.json()["case"]["case_id"]
+    try:
+        settings = get_settings()
+        test_app = create_app(settings)
+        # Built here, so it needs its own signed-in operator: ingestion stamps
+        # the examiner from the authenticated user and refuses without one.
+        install_operator_override(test_app)
+        with TestClient(test_app) as client:
+            # Ingest image
+            up_res = client.post(
+                "/api/cases/upload",
+                files={"file": ("demo_test.jpg", jpeg_bytes(seed=123), "image/jpeg")},
+                data={
+                    "title": "Demo Mode Analysis Test Case",
+                    "description": "Detector-disabled analysis check.",
+                },
+            )
+            assert up_res.status_code in (200, 201), up_res.text
+            case_id = up_res.json()["case"]["case_id"]
 
-        # Run analysis
-        an_res = client.post(f"/api/cases/{case_id}/analyse")
-        assert an_res.status_code == 200
-        data = an_res.json()
+            # Run analysis
+            an_res = client.post(f"/api/cases/{case_id}/analyse")
+            assert an_res.status_code == 200
+            data = an_res.json()
 
-        # Check verdict is safe (INSUFFICIENT_EVIDENCE or based on remaining signals)
-        assert "verdict" in data
-        assert data["verdict"]["verdict"] in ("INSUFFICIENT_EVIDENCE", "AUTHENTIC", "MANIPULATED")
+            # Check verdict is safe (INSUFFICIENT_EVIDENCE or based on remaining signals)
+            assert "verdict" in data
+            assert data["verdict"]["verdict"] in (
+                "INSUFFICIENT_EVIDENCE",
+                "AUTHENTIC",
+                "MANIPULATED",
+            )
 
-        # AI detection signal must be UNAVAILABLE
-        ai_signal = next((s for s in data["signals"] if s["signal_id"] == "ai_detection"), None)
-        assert ai_signal is not None
-        assert ai_signal["status"] == "UNAVAILABLE"
-        assert ai_signal.get("score") is None
-
-    detector_service.reset_detector_singleton()
-    get_settings.cache_clear()
-    os.environ.pop("PRAMAAN_ENABLE_AI_DETECTOR", None)
-
-    detector_service.reset_detector_singleton()
-    get_settings.cache_clear()
-    os.environ.pop("PRAMAAN_ENABLE_AI_DETECTOR", None)
+            # AI detection signal must be UNAVAILABLE
+            ai_signal = next(
+                (s for s in data["signals"] if s["signal_id"] == "ai_detection"), None
+            )
+            assert ai_signal is not None
+            assert ai_signal["status"] == "UNAVAILABLE"
+            assert ai_signal.get("score") is None
+    finally:
+        # Unconditional: this test disables the detector process-wide, so a
+        # failure here must not leave every later detector test looking broken.
+        detector_service.reset_detector_singleton()
+        get_settings.cache_clear()
+        os.environ.pop("PRAMAAN_ENABLE_AI_DETECTOR", None)
 
 
 def test_demo_data_loader_ingestion():

@@ -279,6 +279,27 @@ def _persist_timeline(
     session.flush()
 
 
+TRACE_COMPUTED = "COMPUTED"
+TRACE_STORED = "STORED"
+TRACE_NOT_RUN = "NOT_RUN"
+
+TRACE_STATUS_MEANING = {
+    TRACE_COMPUTED: (
+        "Near-duplicate retrieval ran during this request and the reconstruction "
+        "reflects it."
+    ),
+    TRACE_STORED: (
+        "Reconstructed from near-duplicate retrieval already on record for this "
+        "case. Nothing was recomputed."
+    ),
+    TRACE_NOT_RUN: (
+        "No near-duplicate retrieval has ever been recorded for this case, and "
+        "this request did not run one. Nothing has been measured about copies "
+        "elsewhere in the corpus."
+    ),
+}
+
+
 def reconstruct_case(
     session: Session,
     *,
@@ -288,11 +309,36 @@ def reconstruct_case(
     refresh: bool = False,
     top_k: int | None = None,
     max_distance: int | None = None,
+    record: bool = True,
 ) -> dict[str, Any]:
-    """Reconstruct propagation for a case from matches and recorded lineage."""
+    """Reconstruct propagation for a case from matches and recorded lineage.
+
+    ``record=False`` makes this a pure read: no near-duplicate retrieval is run,
+    no timeline rows are rewritten, no analysis result is stored and no audit row
+    is appended. It exists because ``GET /api/cases/{id}/propagation`` is a page
+    load -- opening the Provenance screen used to append ``MATCH_SEARCHED`` and
+    ``PROPAGATION_RECONSTRUCTED`` and move the chain's head hash, so *looking at*
+    a case's provenance wrote forensic history for it. Reconstructing is a
+    derivation from records already held; only actually computing something is an
+    act on the evidence, and only an act belongs in the chain.
+
+    ``refresh=True`` is a request to recompute, so it is incompatible with
+    ``record=False`` -- suppressing the record of a search that genuinely ran
+    would hide a real computation, which is the opposite failure. Callers must
+    not combine them.
+    """
+    if refresh and not record:
+        raise ValueError(
+            "refresh=True re-runs near-duplicate retrieval, which must be "
+            "recorded; it cannot be combined with record=False."
+        )
+
     stored = matching.stored_matches(session, case_id=case.id)
     match_search: dict[str, Any] | None = None
-    if refresh or not stored:
+    # A read never computes. Without this guard the read-only path would still
+    # run a full match search for any case that had none stored -- the exact
+    # write a page load must not perform.
+    if record and (refresh or not stored):
         match_search = matching.search_case(
             session,
             case=case,
@@ -302,6 +348,14 @@ def reconstruct_case(
             actor=actor,
         )
         stored = matching.stored_matches(session, case_id=case.id)
+
+    trace_status = (
+        TRACE_COMPUTED
+        if match_search is not None
+        else TRACE_STORED
+        if stored
+        else TRACE_NOT_RUN
+    )
 
     case_evidence = list(
         session.execute(
@@ -439,7 +493,11 @@ def reconstruct_case(
     ]
 
     origin = _origin(nodes)
-    _persist_timeline(session, case_id=case.id, timeline=timeline)
+    # Rewriting the case's timeline rows is a write, and a read must not perform
+    # one. The timeline returned below is computed either way; only its
+    # persistence is conditional.
+    if record:
+        _persist_timeline(session, case_id=case.id, timeline=timeline)
 
     public_nodes = [
         {k: v for k, v in node.items() if not k.startswith("_")} for node in nodes
@@ -455,11 +513,22 @@ def reconstruct_case(
             "expansion was possible."
         )
     if not matched:
-        notes.append(
-            "No near-duplicate candidates were found in the index, so the "
-            "reconstruction covers only this case's own evidence. That is not "
-            "evidence that no other copies exist."
-        )
+        # "None were found" and "none were looked for" are different facts, and
+        # only the first is a measurement. Printing the measured wording over an
+        # unmeasured case would report the absence of a search as the absence of
+        # copies.
+        if trace_status == TRACE_NOT_RUN:
+            notes.append(
+                "No near-duplicate retrieval has been run for this case, so the "
+                "reconstruction covers only this case's own evidence. Nothing "
+                "has been measured about copies elsewhere in the corpus."
+            )
+        else:
+            notes.append(
+                "No near-duplicate candidates were found in the index, so the "
+                "reconstruction covers only this case's own evidence. That is not "
+                "evidence that no other copies exist."
+            )
     if truncated:
         notes.append(
             f"Graph expansion stopped at the {MAX_NODES}-node limit; the "
@@ -497,6 +566,14 @@ def reconstruct_case(
         "truncated": truncated,
         "notes": notes,
         "caveats": CAVEATS,
+        # Whether the near-duplicate retrieval this reconstruction rests on
+        # actually happened, and when. The frontend needs it to tell "searched,
+        # found nothing" from "never searched" -- the two produce an identical
+        # empty graph and mean opposite things.
+        "trace_status": trace_status,
+        "trace_status_meaning": TRACE_STATUS_MEANING[trace_status],
+        # Whether this call wrote to the record. False on a page load.
+        "recorded": record,
     }
     if match_search is not None:
         result["match_search"] = {
@@ -504,6 +581,9 @@ def reconstruct_case(
             "total_candidates": match_search["total_candidates"],
             "thresholds": match_search["thresholds"],
         }
+
+    if not record:
+        return result
 
     for evidence in case_evidence:
         analysis_store.store_result(

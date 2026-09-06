@@ -1,43 +1,73 @@
 /*
  * PRAMAAN Digital Forensics Platform - Design System Tokens
- * Pixel-accurate Light and Dark modes matching the provided UI specifications.
+ * Professional Digital Forensics: Dark, Precise, Serious, Technical, Clean, Police/Investigation-Grade.
+ * Centralized design system tokens with restrained steel-blue UI accent and strict semantic statuses.
  */
 
 :root,
 [data-theme="light"] {
-  /* --- Surfaces: Clean Enterprise Light Palette --------------------------- */
-  --bg: #f5f7fb;
-  --sidebar-bg: #ffffff;
-  --surface: #ffffff;
-  --surface-2: #f1f5f9;
-  --surface-3: #e2e8f0;
-  --navy-surface: #0f172a;
-  --navy-border: #e2e8f0;
+  /* --- Central Design System Tokens (Light Mode) --------------------------- */
+  --bg-page: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-surface-elevated: #f1f5f9;
+  --bg-input: #ffffff;
 
-  --border: #e6ecf5;
+  --border-subtle: #e2e8f0;
   --border-strong: #cbd5e1;
-  --border-accent: rgba(37, 99, 235, 0.4);
-  --card-highlight: inset 0 1px 0 rgba(255, 255, 255, 1);
-  --card-glow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.02);
+  --border-focus: rgba(37, 99, 235, 0.5);
 
-  /* --- Typography & Text Contrast ---------------------------------------- */
-  --text: #334155;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
   --text-muted: #64748b;
   --text-faint: #94a3b8;
-  --text-strong: #0f172a;
 
-  /* --- Accents & Platform Colors ----------------------------------------- */
-  --accent: #2563eb;
-  --accent-deep: #1d4ed8;
+  --accent-primary: #2563eb;
+  --accent-hover: #1d4ed8;
   --accent-bright: #3b82f6;
   --accent-wash: rgba(37, 99, 235, 0.08);
   --accent-soft: rgba(37, 99, 235, 0.14);
   --accent-line: rgba(37, 99, 235, 0.35);
 
-  --btn-cta-bg: #2563eb;
-  --btn-cta-border: #1d4ed8;
+  --success: #16a34a;
+  --success-bright: #10b981;
+  --success-wash: #f0fdf4;
+  --success-line: #bbf7d0;
+
+  --warning: #d97706;
+  --warning-bright: #f59e0b;
+  --warning-wash: #fffbeb;
+  --warning-line: #fde68a;
+
+  --danger: #dc2626;
+  --danger-bright: #ef4444;
+  --danger-wash: #fef2f2;
+  --danger-line: #fecaca;
+  --danger-hover: #b91c1c;
+
+  /* --- Backward Compatible Aliases --- */
+  --bg: var(--bg-page);
+  --sidebar-bg: #ffffff;
+  --surface: var(--bg-surface);
+  --surface-2: var(--bg-surface-elevated);
+  --surface-3: #e2e8f0;
+  --navy-surface: #0f172a;
+  --navy-border: #e2e8f0;
+
+  --border: var(--border-subtle);
+  --border-accent: rgba(37, 99, 235, 0.4);
+  --card-highlight: inset 0 1px 0 rgba(255, 255, 255, 1);
+  --card-glow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 2px 8px rgba(0, 0, 0, 0.02);
+
+  --text: var(--text-secondary);
+  --text-strong: var(--text-primary);
+
+  --accent: var(--accent-primary);
+  --accent-deep: #1d4ed8;
+
+  --btn-cta-bg: var(--accent-primary);
+  --btn-cta-border: var(--accent-hover);
   --btn-cta-color: #ffffff;
-  --btn-cta-hover: #1d4ed8;
+  --btn-cta-hover: var(--accent-hover);
 
   --nav-active-bg: rgba(37, 99, 235, 0.08);
   --nav-active-border: rgba(37, 99, 235, 0.5);
@@ -56,47 +86,35 @@
   --status-card-bg: #f0fdf4;
   --status-card-border: #bbf7d0;
 
-  --stat-active-cases-border: #e2e8f0;
+  /* Dashboard specific KPI tokens - semantic alignment */
+  --stat-active-cases-border: #cbd5e1;
   --stat-active-cases-trend: #2563eb;
   --stat-active-cases-icon-bg: #eff6ff;
   --stat-active-cases-icon-color: #2563eb;
   --stat-active-cases-icon-border: #bfdbfe;
 
-  --stat-evidence-border: #e2e8f0;
-  --stat-evidence-trend: #16a34a;
-  --stat-evidence-icon-bg: #f0fdf4;
-  --stat-evidence-icon-color: #10b981;
-  --stat-evidence-icon-border: #bbf7d0;
+  --stat-evidence-border: #cbd5e1;
+  --stat-evidence-trend: #475569;
+  --stat-evidence-icon-bg: #f8fafc;
+  --stat-evidence-icon-color: #334155;
+  --stat-evidence-icon-border: #cbd5e1;
 
-  --stat-flagged-border: #e2e8f0;
+  --stat-flagged-border: #fecaca;
   --stat-flagged-trend: #dc2626;
   --stat-flagged-icon-bg: #fef2f2;
   --stat-flagged-icon-color: #ef4444;
-  --stat-flagged-icon-border: #fecaca;
+  --stat-flagged-icon-border: #fca5a5;
 
-  --stat-pending-border: #e2e8f0;
+  --stat-pending-border: #fde68a;
   --stat-pending-trend: #d97706;
   --stat-pending-icon-bg: #fffbeb;
   --stat-pending-icon-color: #f59e0b;
-  --stat-pending-icon-border: #fde68a;
+  --stat-pending-icon-border: #fcd34d;
 
-  --ok: #16a34a;
-  --ok-bright: #10b981;
-  --warn: #d97706;
-  --warn-bright: #f59e0b;
-  --danger: #dc2626;
-  --danger-bright: #ef4444;
+  --ok: var(--success);
+  --warn: var(--warning);
   --bar: #64748b;
   --info: #2563eb;
-
-  --ok-wash: #f0fdf4;
-  --ok-line: #bbf7d0;
-  --warn-wash: #fffbeb;
-  --warn-line: #fde68a;
-  --danger-wash: #fef2f2;
-  --danger-line: #fecaca;
-  --info-wash: #eff6ff;
-  --info-line: #bfdbfe;
 
   --state-strong-authentic-bg: #f0fdf4;
   --state-strong-authentic-fg: #16a34a;
@@ -143,7 +161,7 @@
 
   --label-size: 10.5px;
   --label-tracking: 0.1em;
-  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  --focus-ring: 0 0 0 2px var(--bg-page), 0 0 0 4px var(--accent-primary);
 
   --brand-subtitle-color: #64748b;
   --kpi-hover-shadow: 0 4px 16px -2px rgba(0, 0, 0, 0.08), 0 2px 6px -1px rgba(0, 0, 0, 0.04);
@@ -154,46 +172,82 @@
 
 /* --- Forensic Command Center Dark Theme ---------------------------------- */
 [data-theme="dark"] {
-  --bg: #090c14;
-  --sidebar-bg: #0a0d16;
-  --surface: #0f1422;
-  --surface-2: #141b2d;
-  --surface-3: #1a233a;
-  --navy-surface: #07090e;
-  --navy-border: #161e31;
+  /* --- Central Design System Tokens (Dark Forensics Theme) ---------------- */
+  --bg-page: #0b0f17;                /* Near-black / charcoal background */
+  --bg-surface: #111726;             /* Dark graphite surface */
+  --bg-surface-elevated: #161f33;    /* Neutral dark panel */
+  --bg-input: #0e1422;               /* Dark input background */
 
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
-  --border-accent: rgba(239, 68, 68, 0.4);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --border-focus: rgba(59, 130, 246, 0.5);
+
+  --text-primary: #f8fafc;           /* Crisp white primary text */
+  --text-secondary: #94a3b8;         /* Muted grey secondary text */
+  --text-muted: #64748b;             /* Neutral muted text */
+  --text-faint: #475569;             /* Faint / caption text */
+
+  /* Primary UI Accent: Restrained Cool Blue / Steel-Blue */
+  --accent-primary: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-bright: #60a5fa;
+  --accent-wash: rgba(59, 130, 246, 0.10);
+  --accent-soft: rgba(59, 130, 246, 0.18);
+  --accent-line: rgba(59, 130, 246, 0.35);
+
+  /* Semantic Statuses: Strict & Subtly Applied */
+  --success: #10b981;                /* Verified / intact / successful / healthy */
+  --success-bright: #34d399;
+  --success-wash: rgba(16, 185, 129, 0.12);
+  --success-line: rgba(16, 185, 129, 0.30);
+
+  --warning: #f59e0b;                /* Warning / inconclusive / insufficient evidence / caution */
+  --warning-bright: #fbbf24;
+  --warning-wash: rgba(245, 158, 11, 0.12);
+  --warning-line: rgba(245, 158, 11, 0.30);
+
+  --danger: #ef4444;                 /* Delete / destructive / failed / tampered / critical errors */
+  --danger-bright: #f87171;
+  --danger-wash: rgba(239, 68, 68, 0.12);
+  --danger-line: rgba(239, 68, 68, 0.30);
+  --danger-hover: #dc2626;
+
+  /* --- Backward Compatible Aliases --- */
+  --bg: var(--bg-page);
+  --sidebar-bg: #090d14;
+  --surface: var(--bg-surface);
+  --surface-2: var(--bg-surface-elevated);
+  --surface-3: #1e283d;
+  --navy-surface: #090d15;
+  --navy-border: #182236;
+
+  --border: var(--border-subtle);
+  --border-accent: rgba(59, 130, 246, 0.4);
   --card-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   --card-glow: 0 4px 16px -2px rgba(0, 0, 0, 0.35);
 
-  --text: #cbd5e1;
-  --text-muted: #8493a8;
-  --text-faint: #4e5d73;
-  --text-strong: #f8fafc;
+  --text: var(--text-secondary);
+  --text-strong: var(--text-primary);
 
-  --accent: #ef4444;
-  --accent-deep: #dc2626;
-  --accent-bright: #f87171;
-  --accent-wash: rgba(239, 68, 68, 0.12);
-  --accent-soft: rgba(239, 68, 68, 0.2);
-  --accent-line: rgba(239, 68, 68, 0.35);
+  --accent: var(--accent-primary);
+  --accent-deep: #1d4ed8;
 
-  --btn-cta-bg: rgba(239, 68, 68, 0.15);
-  --btn-cta-border: #ef4444;
-  --btn-cta-color: #f87171;
-  --btn-cta-hover: #ef4444;
+  /* Primary Action Buttons: Restrained Cool Blue */
+  --btn-cta-bg: #2563eb;
+  --btn-cta-border: #3b82f6;
+  --btn-cta-color: #ffffff;
+  --btn-cta-hover: #1d4ed8;
 
-  --nav-active-bg: rgba(239, 68, 68, 0.12);
-  --nav-active-border: rgba(239, 68, 68, 0.4);
-  --nav-active-color: #f87171;
-  --nav-active-shadow: 0 0 12px -2px rgba(239, 68, 68, 0.18);
+  /* Navigation Active State */
+  --nav-active-bg: rgba(59, 130, 246, 0.10);
+  --nav-active-border: rgba(59, 130, 246, 0.4);
+  --nav-active-color: #93c5fd;
+  --nav-active-shadow: 0 0 12px -2px rgba(59, 130, 246, 0.15);
 
-  --stepper-active-bg: #ef4444;
+  --stepper-active-bg: #2563eb;
   --stepper-active-color: #ffffff;
 
-  --integrity-bg: radial-gradient(circle at 50% 50%, #0d1a33 0%, #080c16 100%);
+  --integrity-bg: radial-gradient(circle at 50% 50%, #0e1a30 0%, #080c16 100%);
   --integrity-border: rgba(56, 189, 248, 0.25);
   --integrity-badge-bg: rgba(0, 0, 0, 0.35);
   --integrity-badge-border: rgba(255, 255, 255, 0.08);
@@ -202,47 +256,35 @@
   --status-card-bg: #0d121f;
   --status-card-border: rgba(16, 185, 129, 0.2);
 
-  --stat-active-cases-border: rgba(239, 68, 68, 0.3);
-  --stat-active-cases-trend: #f87171;
-  --stat-active-cases-icon-bg: rgba(239, 68, 68, 0.12);
-  --stat-active-cases-icon-color: #ef4444;
-  --stat-active-cases-icon-border: rgba(239, 68, 68, 0.4);
+  /* Dashboard specific KPI tokens - semantic alignment */
+  --stat-active-cases-border: rgba(59, 130, 246, 0.25);
+  --stat-active-cases-trend: #60a5fa;
+  --stat-active-cases-icon-bg: rgba(59, 130, 246, 0.12);
+  --stat-active-cases-icon-color: #3b82f6;
+  --stat-active-cases-icon-border: rgba(59, 130, 246, 0.35);
 
-  --stat-evidence-border: rgba(56, 189, 248, 0.25);
-  --stat-evidence-trend: #38bdf8;
-  --stat-evidence-icon-bg: rgba(56, 189, 248, 0.1);
-  --stat-evidence-icon-color: #38bdf8;
-  --stat-evidence-icon-border: rgba(56, 189, 248, 0.4);
+  --stat-evidence-border: rgba(255, 255, 255, 0.08);
+  --stat-evidence-trend: #94a3b8;
+  --stat-evidence-icon-bg: rgba(255, 255, 255, 0.06);
+  --stat-evidence-icon-color: #cbd5e1;
+  --stat-evidence-icon-border: rgba(255, 255, 255, 0.12);
 
-  --stat-flagged-border: rgba(245, 158, 11, 0.3);
-  --stat-flagged-trend: #fbbf24;
-  --stat-flagged-icon-bg: rgba(245, 158, 11, 0.12);
-  --stat-flagged-icon-color: #f59e0b;
-  --stat-flagged-icon-border: rgba(245, 158, 11, 0.4);
+  --stat-flagged-border: rgba(239, 68, 68, 0.3);
+  --stat-flagged-trend: #f87171;
+  --stat-flagged-icon-bg: rgba(239, 68, 68, 0.12);
+  --stat-flagged-icon-color: #ef4444;
+  --stat-flagged-icon-border: rgba(239, 68, 68, 0.4);
 
-  --stat-pending-border: rgba(168, 85, 247, 0.3);
-  --stat-pending-trend: #c084fc;
-  --stat-pending-icon-bg: rgba(168, 85, 247, 0.12);
-  --stat-pending-icon-color: #a855f7;
-  --stat-pending-icon-border: rgba(168, 85, 247, 0.4);
+  --stat-pending-border: rgba(245, 158, 11, 0.3);
+  --stat-pending-trend: #fbbf24;
+  --stat-pending-icon-bg: rgba(245, 158, 11, 0.12);
+  --stat-pending-icon-color: #f59e0b;
+  --stat-pending-icon-border: rgba(245, 158, 11, 0.4);
 
-  --ok: #10b981;
-  --ok-bright: #34d399;
-  --warn: #f59e0b;
-  --warn-bright: #fbbf24;
-  --danger: #ef4444;
-  --danger-bright: #f87171;
+  --ok: var(--success);
+  --warn: var(--warning);
   --bar: #64748b;
   --info: #38bdf8;
-
-  --ok-wash: rgba(16, 185, 129, 0.14);
-  --ok-line: rgba(16, 185, 129, 0.3);
-  --warn-wash: rgba(245, 158, 11, 0.14);
-  --warn-line: rgba(245, 158, 11, 0.3);
-  --danger-wash: rgba(239, 68, 68, 0.14);
-  --danger-line: rgba(239, 68, 68, 0.3);
-  --info-wash: rgba(56, 189, 248, 0.14);
-  --info-line: rgba(56, 189, 248, 0.3);
 
   --state-strong-authentic-bg: rgba(16, 185, 129, 0.16);
   --state-strong-authentic-fg: #34d399;
@@ -260,7 +302,7 @@
 
   --brand-subtitle-color: #4e5d73;
   --kpi-hover-shadow: 0 8px 20px -4px rgba(0, 0, 0, 0.45), 0 2px 6px -2px rgba(0, 0, 0, 0.25);
-  --integrity-scan-color: rgba(239, 68, 68, 0.12);
+  --integrity-scan-color: rgba(59, 130, 246, 0.12);
   --stepper-done-bg: #10b981;
   --stepper-done-color: #ffffff;
 }

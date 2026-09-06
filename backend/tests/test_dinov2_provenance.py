@@ -201,3 +201,73 @@ def test_dinov2_honest_provenance_claims(client: TestClient) -> None:
     assert "original source" not in raw_text or "not established as the absolute real-world origin" in raw_text
     assert "first ever upload" not in raw_text
     assert "true origin" not in raw_text
+
+
+# --------------------------------------------------------------------------- #
+# 5. Staleness: another process rewrote the embedding files
+# --------------------------------------------------------------------------- #
+# ``scripts/build_index.py`` writes dinov2_embeddings.npy from a separate
+# process. A long-lived server that only ever read those files at start-up keeps
+# answering visual-similarity queries from a snapshot taken before the corpus
+# existed, which reads back as "nothing similar found".
+
+
+def _unit_vector(seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    vector = rng.standard_normal(384).astype(np.float32)
+    return vector / np.linalg.norm(vector)
+
+
+def _dinov2_settings(tmp_path: Path):
+    return get_settings().model_copy(update={"data_dir": tmp_path})
+
+
+def test_dinov2_refresh_picks_up_an_out_of_process_rebuild(tmp_path: Path) -> None:
+    settings = _dinov2_settings(tmp_path)
+    reader = DinoV2Index(settings)
+    reader.load()
+    assert reader.count == 0
+
+    writer = DinoV2Index(settings)
+    writer.load()
+    writer.replace_all([("ev_1", _unit_vector(1)), ("ev_2", _unit_vector(2))])
+
+    assert reader.refresh_if_stale() is True
+    assert reader.count == 2
+    hits = reader.query(_unit_vector(1), top_k=1, min_similarity=-1.0)
+    assert hits[0]["evidence_id"] == "ev_1"
+
+    # Nothing changed since, so no further reload.
+    assert reader.refresh_if_stale() is False
+
+
+def test_dinov2_failed_reload_keeps_the_working_index(tmp_path: Path) -> None:
+    settings = _dinov2_settings(tmp_path)
+    writer = DinoV2Index(settings)
+    writer.load()
+    writer.replace_all([("ev_1", _unit_vector(3)), ("ev_2", _unit_vector(4))])
+
+    reader = DinoV2Index(settings)
+    reader.load()
+    assert reader.count == 2
+
+    reader.sidecar_path.write_text('{"ids": ["only-one"]}', encoding="utf-8")
+
+    assert reader.refresh_if_stale() is False
+    assert reader.count == 2
+    assert reader.contains("ev_1") is True
+
+
+def test_get_dinov2_index_reloads_after_an_out_of_process_rebuild(tmp_path: Path) -> None:
+    settings = _dinov2_settings(tmp_path)
+    reset_dinov2_index_singleton()
+    try:
+        assert get_dinov2_index(settings).count == 0
+
+        writer = DinoV2Index(settings)
+        writer.load()
+        writer.replace_all([("ev_1", _unit_vector(5))])
+
+        assert get_dinov2_index(settings).count == 1
+    finally:
+        reset_dinov2_index_singleton()

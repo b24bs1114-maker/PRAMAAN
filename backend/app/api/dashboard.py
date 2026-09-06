@@ -178,19 +178,19 @@ def _case_out(db: Any, case: Case) -> CaseOut:
     evidence_count = db.execute(
         select(func.count()).select_from(Evidence).where(Evidence.case_id == case.id)
     ).scalar_one()
-    latest = (
-        db.execute(
-            select(AnalysisResult)
-            .where(AnalysisResult.case_id == case.id, AnalysisResult.kind == KIND_FUSION)
-            .order_by(AnalysisResult.created_at.desc())
-            .limit(1)
-        )
-        .scalars()
-        .first()
+    # Counted, not inferred from the case's status string: nothing writes a
+    # report state into that column, so a client reading it could never tell a
+    # reported case from an unreported one.
+    payload = ingestion.case_to_dict(
+        case,
+        evidence_count=evidence_count,
+        report_count=ingestion.report_count(db, case.id),
     )
-    payload = ingestion.case_to_dict(case, evidence_count=evidence_count)
-    if latest is not None:
-        payload["latest_verdict"] = latest.verdict
+    # The shared query, so this screen and the case queue cannot disagree about
+    # what a given case's verdict is. They did: this one filtered on fusion rows
+    # and `GET /api/cases` did not, so the same case read INCONCLUSIVE here and
+    # NOT YET ANALYSED there.
+    payload["latest_verdict"] = ingestion.latest_fused_verdict(db, case.id)
     return CaseOut(**payload)
 
 

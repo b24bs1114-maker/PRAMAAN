@@ -69,6 +69,14 @@ EVENT_ANALYSIS_COMPLETED = "ANALYSIS_COMPLETED"
 EVENT_REPORT_GENERATED = "REPORT_GENERATED"
 EVENT_AUDIT_VERIFIED = "AUDIT_CHAIN_VERIFIED"
 EVENT_AUDIT_REPAIRED = "AUDIT_CHAIN_REPAIRED"
+EVENT_PUBLIC_WEB_DISCOVERY = "PUBLIC_WEB_DISCOVERY_RUN"
+EVENT_USER_LOGIN = "USER_LOGIN"
+EVENT_USER_LOGOUT = "USER_LOGOUT"
+#: An administrative revocation of live login sessions -- every operator's, or one
+#: named operator's. Distinct from EVENT_USER_LOGOUT, which is a person choosing to
+#: end their own session: this one happens *to* them, so the trail has to say that
+#: it was done deliberately and by whom rather than looking like a mass logout.
+EVENT_SESSIONS_REVOKED = "AUTH_SESSIONS_REVOKED"
 
 KNOWN_EVENTS = frozenset(
     {
@@ -92,6 +100,10 @@ KNOWN_EVENTS = frozenset(
         EVENT_REPORT_GENERATED,
         EVENT_AUDIT_VERIFIED,
         EVENT_AUDIT_REPAIRED,
+        EVENT_PUBLIC_WEB_DISCOVERY,
+        EVENT_USER_LOGIN,
+        EVENT_USER_LOGOUT,
+        EVENT_SESSIONS_REVOKED,
     }
 )
 

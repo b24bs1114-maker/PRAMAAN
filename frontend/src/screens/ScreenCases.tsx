@@ -16,13 +16,12 @@
  *
  * Structure:
  * 1. PAGE HEADER: "CASES" · "Manage and track investigations" · "+ New Case"
- * 2. FILTER / SEARCH BAR:
- *    - Search (case number, title, examiner, description, complaint reference)
- *    - Status (dynamically derived from data)
- *    - Priority (dynamically derived from data)
- *    - Date (All time, 24h, 7d, 30d)
- *    - Assignment (Lead investigators)
- *    - Verdict (Manipulated, Authentic, Inconclusive, Pending)
+ * 2. SEARCH BAR: one free-text search over case number, title, examiner,
+ *    description and complaint reference, evaluated server-side. The status /
+ *    priority / date / assignee / verdict dropdowns were removed: the queue is
+ *    small enough that search plus the newest-first ordering finds a case
+ *    faster than five stacked selects, and each dropdown cost a facet query
+ *    and a way to hide open cases behind a filter left set.
  * 3. MAIN CASE TABLE:
  *    - Priority | Case ID | Title / Subject | Status | Evidence | Verdict | Updated | Action
  *    - High-priority / urgent cases naturally rise visually with accent borders & badges
@@ -38,18 +37,11 @@ import { Empty, Spinner } from '../components/Feedback'
 import { Icon } from '../components/Icon'
 import { Pill, type PillTone } from '../components/Pill'
 import { deletionSummary, removeCase } from '../lib/casedelete'
-import { NOT_MEASURED, formatTimestampShort } from '../lib/format'
+import { NOT_MEASURED, caseStatusLabel, evidenceCountLabel, formatTimestampShort } from '../lib/format'
 import type { RoutePath } from '../lib/router'
-import { verdictBandLabel } from '../lib/signals'
+import { verdictBandLabel, verdictPillTone } from '../lib/signals'
 import { useCaseDeletion } from '../state/useCaseDeletion'
 import type { Investigation } from '../state/useInvestigation'
-
-function verdictTone(verdict: string | undefined): PillTone {
-  if (!verdict) return 'neutral'
-  if (verdict.includes('MANIPULATED')) return 'error'
-  if (verdict.includes('AUTHENTIC')) return 'ok'
-  return 'warn'
-}
 
 function priorityTone(priority: string | undefined): PillTone {
   if (priority === 'high') return 'error'
@@ -66,25 +58,28 @@ function statusTone(status: string): PillTone {
   return 'accent'
 }
 
-/** "pending_review" → "Pending review" for a human-facing option label. */
-function humanise(value: string): string {
-  const spaced = value.replace(/_/g, ' ')
-  return spaced.charAt(0).toUpperCase() + spaced.slice(1)
-}
+/** Rows fetched per page; the backend applies limit/offset in SQL. */
+const PAGE_SIZE = 25
 
 export function ScreenCases({
-  initialFilter = 'all',
+  investigation,
   initialQuery = '',
   onNavigate,
   onSelectCase,
+  onNewCase,
 }: {
   investigation: Investigation
-  initialFilter?: string
   initialQuery?: string
   onNavigate: (path: RoutePath, params?: { caseId?: string; filter?: string; q?: string }) => void
   onSelectCase: (caseId: string) => void
+  /** Start a fresh case: clears prior case state before landing on intake. */
+  onNewCase: () => void
 }) {
+  const { caseRecord: loadedCase, reset: resetInvestigation } = investigation
+  /* The current page of the server-searched list, plus the server's total count
+     of all rows matching the active search (NOT the page length). */
   const [cases, setCases] = useState<CaseRecord[]>([])
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<unknown>(null)
 
@@ -104,146 +99,142 @@ export function ScreenCases({
     // rather than re-listing: a refetch here would hide a backend that answered
     // 200 while leaving the row in place.
     setCases((current) => removeCase(current, target.case_id))
+    // The server's total is now one smaller; reflect that in "of Y" without a
+    // round-trip. Never below zero.
+    setTotal((n) => Math.max(0, n - 1))
     setRemoved({ result, target })
+    // If the deleted case is the one loaded in the shared investigation
+    // store, its analysis/provenance/report slices now describe evidence
+    // that no longer exists. Reset so the sidebar cannot offer the deleted
+    // case's reports or audit trail.
+    if (loadedCase?.case_id === target.case_id) resetInvestigation()
   })
 
-  // Filters
+  // Free-text search, debounced so typing does not fire a request per keystroke.
   const [search, setSearch] = useState(initialQuery)
-  const [status, setStatus] = useState(initialFilter)
-  const [priority, setPriority] = useState('all')
-  const [dateRange, setDateRange] = useState('all')
-  const [assignment, setAssignment] = useState('all')
+  const [debouncedSearch, setDebouncedSearch] = useState(initialQuery)
+
+  // Server-side filters
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [priorityFilter, setPriorityFilter] = useState('all')
   const [verdictFilter, setVerdictFilter] = useState('all')
+  const [examiner, setExaminer] = useState('')
+  const [debouncedExaminer, setDebouncedExaminer] = useState('')
+  const [dateFilter, setDateFilter] = useState('all')
+
+  // Server-side pagination cursor (rows to skip).
+  const [offset, setOffset] = useState(0)
 
   useEffect(() => {
+    const id = window.setTimeout(() => {
+      setDebouncedSearch(search)
+      setOffset(0)
+    }, 250)
+    return () => window.clearTimeout(id)
+  }, [search])
+
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      setDebouncedExaminer(examiner)
+      setOffset(0)
+    }, 250)
+    return () => window.clearTimeout(id)
+  }, [examiner])
+
+  // Keep the input in sync with the URL's `q` param
+  useEffect(() => {
+    setSearch(initialQuery)
+  }, [initialQuery])
+
+  // Compute ISO lower bound for date filter
+  const createdAfter = useMemo(() => {
+    if (dateFilter === '24h') {
+      return new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    }
+    if (dateFilter === '7d') {
+      return new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+    }
+    if (dateFilter === '30d') {
+      return new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+    }
+    return undefined
+  }, [dateFilter])
+
+  // The authoritative table fetch with server-side query parameters.
+  useEffect(() => {
     let active = true
+    const controller = new AbortController()
     setLoading(true)
+    setError(null)
     api
-      .listCases()
+      .listCases(
+        {
+          q: debouncedSearch.trim() || undefined,
+          status: statusFilter !== 'all' ? statusFilter : undefined,
+          priority: priorityFilter !== 'all' ? priorityFilter : undefined,
+          verdict: verdictFilter !== 'all' ? verdictFilter : undefined,
+          examiner: debouncedExaminer.trim() || undefined,
+          created_after: createdAfter,
+          limit: PAGE_SIZE,
+          offset,
+        },
+        controller.signal,
+      )
       .then((data) => {
         if (active) {
           setCases(data.cases)
+          setTotal(data.count)
           setLoading(false)
         }
       })
       .catch((err) => {
-        if (active) {
+        if (active && !controller.signal.aborted) {
           setError(err)
           setLoading(false)
         }
       })
     return () => {
       active = false
+      controller.abort()
     }
-  }, [])
+  }, [debouncedSearch, statusFilter, priorityFilter, verdictFilter, debouncedExaminer, createdAfter, offset])
 
-  // Keep controls in sync with URL search / filter params
-  useEffect(() => {
-    setSearch(initialQuery)
-  }, [initialQuery])
-  useEffect(() => {
-    setStatus(initialFilter)
-  }, [initialFilter])
-
-  // Extract unique available values from data
-  const statusOptions = useMemo(
-    () => Array.from(new Set(cases.map((c) => c.status).filter(Boolean))).sort(),
-    [cases],
-  )
-  const priorityOptions = useMemo(
-    () => Array.from(new Set(cases.map((c) => c.priority).filter((p): p is string => Boolean(p)))).sort(),
-    [cases],
-  )
-  const assignmentOptions = useMemo(
-    () => Array.from(new Set(cases.map((c) => c.examiner).filter((e): e is string => Boolean(e)))).sort(),
-    [cases],
-  )
-
+  const hasSearch = search.trim() !== ''
   const hasActiveFilters =
-    search.trim() !== '' ||
-    status !== 'all' ||
-    priority !== 'all' ||
-    dateRange !== 'all' ||
-    assignment !== 'all' ||
-    verdictFilter !== 'all'
+    hasSearch ||
+    statusFilter !== 'all' ||
+    priorityFilter !== 'all' ||
+    verdictFilter !== 'all' ||
+    examiner.trim() !== '' ||
+    dateFilter !== 'all'
 
-  const resetFilters = () => {
+  const clearFilters = () => {
     setSearch('')
-    setStatus('all')
-    setPriority('all')
-    setDateRange('all')
-    setAssignment('all')
+    setStatusFilter('all')
+    setPriorityFilter('all')
     setVerdictFilter('all')
+    setExaminer('')
+    setDateFilter('all')
+    setOffset(0)
   }
 
-  // Filter & naturally prioritize cases
-  const filtered = useMemo(() => {
-    const now = Date.now()
-    return cases.filter((c) => {
-      // Status filter
-      if (status !== 'all' && c.status !== status) return false
-
-      // Priority filter
-      if (priority !== 'all' && c.priority !== priority) return false
-
-      // Assignment / Investigator filter
-      if (assignment !== 'all' && c.examiner !== assignment) return false
-
-      // Verdict filter
-      if (verdictFilter !== 'all') {
-        const v = c.latest_verdict?.toUpperCase() || ''
-        if (verdictFilter === 'manipulated' && !v.includes('MANIPULATED')) return false
-        if (verdictFilter === 'authentic' && !v.includes('AUTHENTIC')) return false
-        if (verdictFilter === 'inconclusive' && !v.includes('INCONCLUSIVE') && !v.includes('INSUFFICIENT')) return false
-        if (verdictFilter === 'pending' && v !== '') return false
-      }
-
-      // Date range filter
-      if (dateRange !== 'all') {
-        const updatedTime = new Date(c.updated_at || c.created_at).getTime()
-        const diffHours = (now - updatedTime) / (1000 * 60 * 60)
-        if (dateRange === '24h' && diffHours > 24) return false
-        if (dateRange === '7d' && diffHours > 24 * 7) return false
-        if (dateRange === '30d' && diffHours > 24 * 30) return false
-      }
-
-      // Search query (case ID, title, examiner, description, complaint reference)
-      if (search.trim()) {
-        const q = search.toLowerCase()
-        const matchId = c.case_number.toLowerCase().includes(q)
-        const matchTitle = (c.title || '').toLowerCase().includes(q)
-        const matchExaminer = (c.examiner || '').toLowerCase().includes(q)
-        const matchDesc = (c.description || '').toLowerCase().includes(q)
-        const matchRef = (c.complaint_reference || '').toLowerCase().includes(q)
-        return matchId || matchTitle || matchExaminer || matchDesc || matchRef
-      }
-
-      return true
-    })
-  }, [cases, status, priority, assignment, verdictFilter, dateRange, search])
-
-  // Naturally sort so high-priority & urgent cases rise to top
-  const sortedCases = useMemo(() => {
-    return [...filtered].sort((a, b) => {
-      const priorityWeight: Record<string, number> = { high: 3, medium: 2, low: 1 }
-      const weightA = priorityWeight[a.priority || 'medium'] || 2
-      const weightB = priorityWeight[b.priority || 'medium'] || 2
-      if (weightB !== weightA) return weightB - weightA
-
-      // Then by updated timestamp
-      const timeA = new Date(a.updated_at || a.created_at).getTime()
-      const timeB = new Date(b.updated_at || b.created_at).getTime()
-      return timeB - timeA
-    })
-  }, [filtered])
+  const clearSearch = () => {
+    setSearch('')
+    setOffset(0)
+  }
 
   /*
-   * Every case that survives the filters is displayed. There is no curated
-   * subset: `getFlagshipDemoCases` used to cut the queue to three whenever the
-   * filters were untouched, so cases 4..n were invisible on the default view of
-   * the screen whose entire job is to list them.
+   * The table renders exactly what the server returned for the current page --
+   * `cases` is already searched, filtered, ordered (newest first) and limited by the
+   * backend.
    */
-  const displayCases = sortedCases
+  const displayCases = cases
+
+  // "Showing X of Y" and the pager both read from the server's numbers.
+  const rangeStart = cases.length ? offset + 1 : 0
+  const rangeEnd = offset + cases.length
+  const canPrev = offset > 0
+  const canNext = rangeEnd < total
 
   const openCase = (caseId: string) => {
     onSelectCase(caseId)
@@ -256,151 +247,190 @@ export function ScreenCases({
       <div className="screen__head">
         <div>
           <h1 className="screen__title">CASES</h1>
-          <p className="screen__lead">Manage and track investigations</p>
+          <p className="screen__lead">Investigation queue and active digital evidence worklist</p>
         </div>
 
         <button
           type="button"
-          className="btn-new-case"
-          onClick={() => onNavigate('intake')}
+          className="btn btn--primary"
+          onClick={onNewCase}
           title="Open new case and ingest digital evidence"
+          style={{ gap: 6, padding: '7px 16px', fontSize: 'var(--text-xs)', fontWeight: 700 }}
         >
           <span style={{ fontSize: 16, lineHeight: 1 }}>+</span>
           <span>New Case</span>
         </button>
       </div>
 
-      {/* 2. FILTER / SEARCH CONTROLS CONTAINER */}
+      {/* 2. SEARCH & SERVER-SIDE FILTER BAR */}
       <div className="card stack" style={{ padding: 'var(--space-3) var(--space-4)', gap: 'var(--space-3)' }}>
-        <div className="row row--wrap" style={{ gap: 'var(--space-3)', alignItems: 'center', justifyContent: 'space-between' }}>
-          {/* Main Search Input */}
-          <div className="search-box" style={{ flex: '1 1 300px', minWidth: 240, maxWidth: 540 }}>
-            <Icon name="search" size={14} style={{ color: 'var(--text-faint)' }} />
-            <input
-              id="cases-search"
-              className="search-box__input"
-              type="search"
-              placeholder="Search cases, case IDs, investigators, tags..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-            {search ? (
-              <button
-                type="button"
-                onClick={() => setSearch('')}
-                style={{ background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', padding: 2 }}
-                title="Clear search"
-              >
-                ✕
-              </button>
-            ) : null}
-          </div>
-
-          {/* Filter Dropdowns Grid */}
-          <div className="row row--wrap" style={{ gap: 'var(--space-2)', alignItems: 'center' }}>
-            {/* Status Filter */}
-            <select
-              id="cases-status"
-              className="input"
-              style={{ fontSize: 'var(--text-xs)', height: 34, padding: '4px 8px', minWidth: 125 }}
-              value={status}
-              onChange={(e) => setStatus(e.target.value)}
-              aria-label="Filter by Status"
+        <div className="search-box" style={{ width: '100%' }}>
+          <Icon name="search" size={14} style={{ color: 'var(--text-faint)' }} />
+          <input
+            id="cases-search"
+            className="search-box__input"
+            type="search"
+            aria-label="Search the case queue by case number, subject, examiner or complaint reference"
+            placeholder="Search cases, case numbers, subjects, examiners, complaints..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {search ? (
+            <button
+              type="button"
+              onClick={clearSearch}
+              aria-label="Clear the case search"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-faint)',
+                cursor: 'pointer',
+                padding: 2,
+              }}
+              title="Clear search"
             >
-              <option value="all">Status: All</option>
-              {statusOptions.map((s) => (
-                <option key={s} value={s}>
-                  {humanise(s)}
-                </option>
-              ))}
-            </select>
-
-            {/* Priority Filter */}
-            <select
-              id="cases-priority"
-              className="input"
-              style={{ fontSize: 'var(--text-xs)', height: 34, padding: '4px 8px', minWidth: 125 }}
-              value={priority}
-              onChange={(e) => setPriority(e.target.value)}
-              aria-label="Filter by Priority"
-            >
-              <option value="all">Priority: All</option>
-              {priorityOptions.map((p) => (
-                <option key={p} value={p}>
-                  {humanise(p)} Priority
-                </option>
-              ))}
-            </select>
-
-            {/* Date Filter */}
-            <select
-              id="cases-date"
-              className="input"
-              style={{ fontSize: 'var(--text-xs)', height: 34, padding: '4px 8px', minWidth: 125 }}
-              value={dateRange}
-              onChange={(e) => setDateRange(e.target.value)}
-              aria-label="Filter by Date"
-            >
-              <option value="all">Date: All time</option>
-              <option value="24h">Past 24 hours</option>
-              <option value="7d">Past 7 days</option>
-              <option value="30d">Past 30 days</option>
-            </select>
-
-            {/* Assignment Filter */}
-            {assignmentOptions.length > 0 ? (
-              <select
-                id="cases-assignment"
-                className="input"
-                style={{ fontSize: 'var(--text-xs)', height: 34, padding: '4px 8px', minWidth: 135 }}
-                value={assignment}
-                onChange={(e) => setAssignment(e.target.value)}
-                aria-label="Filter by Investigator"
-              >
-                <option value="all">Assignee: All</option>
-                {assignmentOptions.map((a) => (
-                  <option key={a} value={a}>
-                    {a}
-                  </option>
-                ))}
-              </select>
-            ) : null}
-
-            {/* Verdict Filter */}
-            <select
-              id="cases-verdict"
-              className="input"
-              style={{ fontSize: 'var(--text-xs)', height: 34, padding: '4px 8px', minWidth: 135 }}
-              value={verdictFilter}
-              onChange={(e) => setVerdictFilter(e.target.value)}
-              aria-label="Filter by Verdict"
-            >
-              <option value="all">Verdict: All</option>
-              <option value="manipulated">Manipulated</option>
-              <option value="authentic">Authentic</option>
-              <option value="inconclusive">Inconclusive</option>
-              <option value="pending">Pending Analysis</option>
-            </select>
-
-            {/* Reset Filters CTA */}
-            {hasActiveFilters ? (
-              <button
-                type="button"
-                className="btn btn--ghost btn--sm"
-                onClick={resetFilters}
-                style={{ color: 'var(--accent-bright)', padding: '4px 8px', fontSize: 'var(--text-xs)' }}
-              >
-                Reset Filters
-              </button>
-            ) : null}
-          </div>
+              {/* The icon set, not a literal ✕: a Unicode glyph inherits the
+                  reader's emoji font and lands at a different weight and
+                  baseline from every other control on the row. */}
+              <Icon name="close" size={13} />
+            </button>
+          ) : null}
         </div>
 
-        {/* Filter Summary line */}
+        {/* Filters Row: Status | Priority | Verdict | Analyst | Date | Clear */}
+        <div className="row row--wrap" style={{ gap: 10, alignItems: 'center', fontSize: 'var(--text-xs)' }}>
+          {/* Status */}
+          <div className="row" style={{ gap: 5, alignItems: 'center' }}>
+            <label htmlFor="filter-status" style={{ color: 'var(--text-faint)', fontSize: '10px', textTransform: 'uppercase', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+              Status:
+            </label>
+            <select
+              id="filter-status"
+              className="input input--sm"
+              value={statusFilter}
+              onChange={(e) => {
+                setStatusFilter(e.target.value)
+                setOffset(0)
+              }}
+              style={{ padding: '3px 8px', fontSize: 'var(--text-xs)', height: '28px', background: 'var(--surface-2)' }}
+            >
+              <option value="all">All Statuses</option>
+              <option value="active">Active</option>
+              <option value="open">Open</option>
+              <option value="review">Review</option>
+              <option value="closed">Closed</option>
+            </select>
+          </div>
+
+          {/* Priority */}
+          <div className="row" style={{ gap: 5, alignItems: 'center' }}>
+            <label htmlFor="filter-priority" style={{ color: 'var(--text-faint)', fontSize: '10px', textTransform: 'uppercase', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+              Priority:
+            </label>
+            <select
+              id="filter-priority"
+              className="input input--sm"
+              value={priorityFilter}
+              onChange={(e) => {
+                setPriorityFilter(e.target.value)
+                setOffset(0)
+              }}
+              style={{ padding: '3px 8px', fontSize: 'var(--text-xs)', height: '28px', background: 'var(--surface-2)' }}
+            >
+              <option value="all">All Priorities</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </div>
+
+          {/* Verdict */}
+          <div className="row" style={{ gap: 5, alignItems: 'center' }}>
+            <label htmlFor="filter-verdict" style={{ color: 'var(--text-faint)', fontSize: '10px', textTransform: 'uppercase', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+              Verdict:
+            </label>
+            <select
+              id="filter-verdict"
+              className="input input--sm"
+              value={verdictFilter}
+              onChange={(e) => {
+                setVerdictFilter(e.target.value)
+                setOffset(0)
+              }}
+              style={{ padding: '3px 8px', fontSize: 'var(--text-xs)', height: '28px', background: 'var(--surface-2)' }}
+            >
+              <option value="all">All Verdicts</option>
+              <option value="MANIPULATED">Manipulated</option>
+              <option value="AUTHENTIC">Authentic</option>
+              <option value="INSUFFICIENT_EVIDENCE">Insufficient Evidence</option>
+              <option value="UNANALYSED">Not Yet Analysed</option>
+            </select>
+          </div>
+
+          {/* Analyst */}
+          <div className="row" style={{ gap: 5, alignItems: 'center' }}>
+            <label htmlFor="filter-examiner" style={{ color: 'var(--text-faint)', fontSize: '10px', textTransform: 'uppercase', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+              Analyst:
+            </label>
+            <input
+              id="filter-examiner"
+              type="text"
+              placeholder="Analyst name..."
+              className="input input--sm"
+              value={examiner}
+              onChange={(e) => setExaminer(e.target.value)}
+              style={{ width: 125, padding: '3px 8px', fontSize: 'var(--text-xs)', height: '28px', background: 'var(--surface-2)' }}
+            />
+          </div>
+
+          {/* Date */}
+          <div className="row" style={{ gap: 5, alignItems: 'center' }}>
+            <label htmlFor="filter-date" style={{ color: 'var(--text-faint)', fontSize: '10px', textTransform: 'uppercase', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+              Date:
+            </label>
+            <select
+              id="filter-date"
+              className="input input--sm"
+              value={dateFilter}
+              onChange={(e) => {
+                setDateFilter(e.target.value)
+                setOffset(0)
+              }}
+              style={{ padding: '3px 8px', fontSize: 'var(--text-xs)', height: '28px', background: 'var(--surface-2)' }}
+            >
+              <option value="all">All Dates</option>
+              <option value="24h">Past 24 Hours</option>
+              <option value="7d">Past 7 Days</option>
+              <option value="30d">Past 30 Days</option>
+            </select>
+          </div>
+
+          {/* Clear Button */}
+          {hasActiveFilters ? (
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={clearFilters}
+              style={{ padding: '3px 8px', fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}
+            >
+              Clear Filters
+            </button>
+          ) : null}
+        </div>
+
+        {/* Result count line */}
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
             <span>
-              Showing <strong>{displayCases.length}</strong> of <strong>{cases.length}</strong> investigations
+              {total === 0 ? (
+                <>No matching cases</>
+              ) : (
+                <>
+                  Showing <strong>{rangeStart}–{rangeEnd}</strong> of <strong>{total}</strong> cases
+                </>
+              )}
             </span>
             {hasActiveFilters ? (
               <span className="pill pill--accent" style={{ fontSize: '9.5px', padding: '1px 6px' }}>
@@ -408,6 +438,33 @@ export function ScreenCases({
               </span>
             ) : null}
           </div>
+
+          {/* Server-side pager */}
+          {total > PAGE_SIZE ? (
+            <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                disabled={!canPrev}
+                onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+                style={{ padding: '3px 8px', fontSize: 'var(--text-2xs)' }}
+              >
+                ← Prev
+              </button>
+              <span style={{ fontFamily: 'var(--mono)' }}>
+                Page {Math.floor(offset / PAGE_SIZE) + 1} of {Math.max(1, Math.ceil(total / PAGE_SIZE))}
+              </span>
+              <button
+                type="button"
+                className="btn btn--ghost btn--sm"
+                disabled={!canNext}
+                onClick={() => setOffset((o) => o + PAGE_SIZE)}
+                style={{ padding: '3px 8px', fontSize: 'var(--text-2xs)' }}
+              >
+                Next →
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -464,19 +521,19 @@ export function ScreenCases({
         <ErrorBanner context="Cases" error={error} />
       ) : displayCases.length === 0 ? (
         <Empty>
-          {cases.length === 0 ? (
+          {!hasSearch ? (
             <div className="stack" style={{ gap: 'var(--space-3)', alignItems: 'center' }}>
               <span>No investigations registered in the workspace yet.</span>
-              <button type="button" className="btn btn--primary" onClick={() => onNavigate('intake')}>
+              <button type="button" className="btn btn--primary" onClick={onNewCase}>
                 <Icon name="upload" size={14} />
                 Create First Investigation
               </button>
             </div>
           ) : (
             <div className="stack" style={{ gap: 'var(--space-3)', alignItems: 'center' }}>
-              <span>No cases match your active filters or search term.</span>
-              <button type="button" className="btn btn--ghost" onClick={resetFilters}>
-                Reset all filters
+              <span>No cases match “{search.trim()}”.</span>
+              <button type="button" className="btn btn--ghost" onClick={clearSearch}>
+                Clear search
               </button>
             </div>
           )}
@@ -504,11 +561,18 @@ export function ScreenCases({
                 const pTone = priorityTone(c.priority)
 
                 return (
+                  /*
+                    A row, and it stays one. `role="button"` here told assistive
+                    technology this `<tr>` was a button: the queue stopped being
+                    a navigable table and every row was announced as a single
+                    control named by concatenating all nine of its cells. The
+                    click handler is kept as a mouse convenience; the keyboard
+                    and screen-reader path is the real button on the case number
+                    below.
+                  */
                   <tr
                     key={c.case_id}
                     className="priority-case-tr"
-                    tabIndex={0}
-                    role="button"
                     style={{
                       cursor: 'pointer',
                       borderLeft: isHighPriority
@@ -521,12 +585,6 @@ export function ScreenCases({
                       background: isHighPriority ? 'var(--danger-wash)' : undefined,
                     }}
                     onClick={() => openCase(c.case_id)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        openCase(c.case_id)
-                      }
-                    }}
                   >
                     {/* Priority */}
                     <td>
@@ -553,17 +611,19 @@ export function ScreenCases({
 
                     {/* Case ID */}
                     <td>
-                      <span
-                        style={{
-                          fontFamily: 'var(--mono)',
-                          fontWeight: 700,
-                          fontSize: 'var(--text-xs)',
-                          color: 'var(--text-strong)',
-                          letterSpacing: '-0.01em',
+                      <button
+                        type="button"
+                        className="case-open-btn"
+                        onClick={(e) => {
+                          // The row handles the click too; without this the case
+                          // would be opened twice for one press.
+                          e.stopPropagation()
+                          openCase(c.case_id)
                         }}
+                        title={`Open case ${c.case_number}${c.title ? ` — ${c.title}` : ''}`}
                       >
                         #{c.case_number}
-                      </span>
+                      </button>
                     </td>
 
                     {/* Title / Subject */}
@@ -583,7 +643,7 @@ export function ScreenCases({
                             fontStyle: c.title ? undefined : 'italic',
                           }}
                         >
-                          {c.title || 'No title recorded'}
+                          {c.title || 'Untitled investigation'}
                         </span>
                         {c.examiner ? (
                           <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
@@ -597,7 +657,7 @@ export function ScreenCases({
                     {/* Status */}
                     <td>
                       <Pill variant={statusTone(c.status)}>
-                        {c.status.replace(/_/g, ' ').toUpperCase()}
+                        {caseStatusLabel(c.status)}
                       </Pill>
                     </td>
 
@@ -611,7 +671,7 @@ export function ScreenCases({
                           color: 'var(--text-strong)',
                         }}
                       >
-                        {c.evidence_count} {c.evidence_count === 1 ? 'item' : 'items'}
+                        {evidenceCountLabel(c.evidence_count)}
                       </span>
                     </td>
 
@@ -623,7 +683,7 @@ export function ScreenCases({
                          * the raw token "AUTHENTIC" overstates a finding that is
                          * only ever "no manipulation evidence found".
                          */
-                        <Pill variant={verdictTone(c.latest_verdict)}>
+                        <Pill variant={verdictPillTone(c.latest_verdict)}>
                           {verdictBandLabel(c.latest_verdict)}
                         </Pill>
                       ) : (
@@ -648,17 +708,18 @@ export function ScreenCases({
                           type="button"
                           className="btn btn--ghost btn--sm"
                           style={{
-                            fontSize: '11.5px',
+                            fontSize: '11px',
                             padding: '3px 8px',
                             color: 'var(--accent-bright)',
-                            fontWeight: 600,
+                            fontWeight: 700,
+                            letterSpacing: '0.03em',
                           }}
                           onClick={(e) => {
                             e.stopPropagation()
                             openCase(c.case_id)
                           }}
                         >
-                          Open Case →
+                          OPEN CASE →
                         </button>
                         {/*
                           The destructive control opens a dialog; it never deletes

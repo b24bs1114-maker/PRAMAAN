@@ -59,10 +59,6 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 # --------------------------------------------------------------------------- #
 # Perceptual hashing
 # --------------------------------------------------------------------------- #
@@ -151,15 +147,3 @@ def similarity_from_distance(distance: int | None, bits: int = HASH_BITS) -> flo
     if distance is None:
         return None
     return round(max(0.0, 1.0 - distance / bits), 4)
-
-
-def hash_to_bits(hex_hash: str, bits: int = HASH_BITS) -> np.ndarray:
-    """Expand a hex hash into a uint8 bit vector for index storage."""
-    value = int(hex_hash, 16)
-    return np.array(
-        [(value >> (bits - 1 - i)) & 1 for i in range(bits)], dtype=np.uint8
-    )
-
-
-def bits_to_hash(bits: np.ndarray) -> str:
-    return _bits_to_hex(bits.astype(bool))

@@ -97,6 +97,10 @@ def test_live_pipeline_image_analysis(real_client):
     upload_res = real_client.post(
         "/api/cases/upload",
         files={"file": ("test_scene.jpg", img_bytes, "image/jpeg")},
+        data={
+            "title": "Live image pipeline",
+            "description": "Real image model executed end to end.",
+        },
     )
     assert upload_res.status_code in (200, 201), upload_res.text
     case_id = upload_res.json()["case"]["case_id"]
@@ -137,6 +141,10 @@ def test_live_pipeline_audio_analysis(real_client):
     upload_res = real_client.post(
         "/api/cases/upload",
         files={"file": ("speech_sample.wav", wav_bytes, "audio/wav")},
+        data={
+            "title": "Live audio pipeline",
+            "description": "Real audio model executed end to end.",
+        },
     )
     assert upload_res.status_code in (200, 201), upload_res.text
     case_id = upload_res.json()["case"]["case_id"]
@@ -173,6 +181,10 @@ def test_live_pipeline_video_analysis(real_client):
     upload_res = real_client.post(
         "/api/cases/upload",
         files={"file": ("clip.mp4", vid_bytes, "video/mp4")},
+        data={
+            "title": "Live video pipeline",
+            "description": "Real video model executed end to end.",
+        },
     )
     assert upload_res.status_code in (200, 201), upload_res.text
     case_id = upload_res.json()["case"]["case_id"]
@@ -211,6 +223,10 @@ def test_provenance_honesty_terminology(real_client):
     upload_res = real_client.post(
         "/api/cases/upload",
         files={"file": ("scene1.jpg", img_bytes, "image/jpeg")},
+        data={
+            "title": "Provenance terminology",
+            "description": "Checks the wording the provenance sections use.",
+        },
     )
     assert upload_res.status_code in (200, 201)
     case_id = upload_res.json()["case"]["case_id"]

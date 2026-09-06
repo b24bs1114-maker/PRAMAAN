@@ -1,4 +1,4 @@
-"""Integration tests for Rahul's PRAMAAN AI Detector Engine in PRAMAAN Backend.
+"""Integration tests for the PRAMAAN AI Detector Engine in the PRAMAAN backend.
 
 Verifies:
 1. Image, Video, and Audio detection through app.services.pramaan_detector_adapter
@@ -61,7 +61,7 @@ def _create_test_video(path: Path) -> Path:
 # --------------------------------------------------------------------------- #
 # Direct Adapter Integration Tests (Image, Video, Audio)
 # --------------------------------------------------------------------------- #
-def test_rahul_adapter_image_inference(tmp_path: Path) -> None:
+def test_plugin_adapter_image_inference(tmp_path: Path) -> None:
     img_path = _create_test_image(tmp_path / "test.jpg")
     res = infer_image(img_path)
 
@@ -77,7 +77,7 @@ def test_rahul_adapter_image_inference(tmp_path: Path) -> None:
     assert "heatmap_available" in res
 
 
-def test_rahul_adapter_video_inference(tmp_path: Path) -> None:
+def test_plugin_adapter_video_inference(tmp_path: Path) -> None:
     vid_path = _create_test_video(tmp_path / "test.mp4")
     res = infer_video(vid_path)
 
@@ -92,7 +92,7 @@ def test_rahul_adapter_video_inference(tmp_path: Path) -> None:
     assert "explanation" in res
 
 
-def test_rahul_adapter_audio_inference(tmp_path: Path) -> None:
+def test_plugin_adapter_audio_inference(tmp_path: Path) -> None:
     aud_path = _create_test_audio(tmp_path / "test.wav")
     res = infer_audio(aud_path)
 
@@ -110,7 +110,7 @@ def test_rahul_adapter_audio_inference(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # POST /api/detect Endpoint Tests
 # --------------------------------------------------------------------------- #
-def test_api_detect_image_with_rahul_entrypoint(client: TestClient, tmp_path: Path) -> None:
+def test_api_detect_image_with_plugin_entrypoint(client: TestClient, tmp_path: Path) -> None:
     detector_service.register_inference(
         "image", infer_image, model_name="OwensLab-CommunityForensics-ViT384", model_version="4.0.0"
     )
@@ -134,7 +134,7 @@ def test_api_detect_image_with_rahul_entrypoint(client: TestClient, tmp_path: Pa
     assert "explanation" in body
 
 
-def test_api_detect_video_with_rahul_entrypoint(client: TestClient, tmp_path: Path) -> None:
+def test_api_detect_video_with_plugin_entrypoint(client: TestClient, tmp_path: Path) -> None:
     detector_service.register_inference(
         "video", infer_video, model_name="VideoMAE-DeepFake-Detector", model_version="4.0.0"
     )
@@ -156,7 +156,7 @@ def test_api_detect_video_with_rahul_entrypoint(client: TestClient, tmp_path: Pa
     assert body["latency_ms"] is not None
 
 
-def test_api_detect_audio_with_rahul_entrypoint(client: TestClient, tmp_path: Path) -> None:
+def test_api_detect_audio_with_plugin_entrypoint(client: TestClient, tmp_path: Path) -> None:
     detector_service.register_inference(
         "audio", infer_audio, model_name="AASIST-Audio-Spoof-Detector", model_version="3.0.0"
     )
@@ -181,7 +181,7 @@ def test_api_detect_audio_with_rahul_entrypoint(client: TestClient, tmp_path: Pa
 # --------------------------------------------------------------------------- #
 # Full Pipeline Analysis Test: POST /api/cases/{case_id}/analyse
 # --------------------------------------------------------------------------- #
-def test_full_case_analysis_with_rahul_detector(client: TestClient, tmp_path: Path) -> None:
+def test_full_case_analysis_with_plugin_detector(client: TestClient, tmp_path: Path) -> None:
     detector_service.register_inference(
         "image", infer_image, model_name="OwensLab-CommunityForensics-ViT384", model_version="4.0.0"
     )

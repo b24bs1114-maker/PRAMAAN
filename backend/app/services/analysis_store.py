@@ -83,17 +83,6 @@ def latest_result(
     ).scalars().first()
 
 
-def case_results(session: Session, *, case_id: str, kind: str) -> list[AnalysisResult]:
-    """All stored results of a kind for a case, oldest first."""
-    return list(
-        session.execute(
-            select(AnalysisResult)
-            .where(AnalysisResult.case_id == case_id, AnalysisResult.kind == kind)
-            .order_by(AnalysisResult.created_at)
-        ).scalars()
-    )
-
-
 def result_to_dict(result: AnalysisResult) -> dict[str, Any]:
     """Serialise a stored analysis row for API responses."""
     return {

@@ -52,15 +52,6 @@ fi
 #    model falls back to". That fallback no longer exists: with no trained video
 #    checkpoint the detector builds no model and abstains, so the download only
 #    made a deploy slower and implied a video capability that is not there.
-case ",${PRAMAAN_WEIGHTS_MODALITIES:-image}," in
-  *,audio,*)
-    python3 - <<'PY' || echo "[WARN] could not cache the audio architecture config; audio will report INSUFFICIENT_EVIDENCE"
-from transformers import AutoConfig
-c = AutoConfig.from_pretrained("garystafford/wav2vec2-deepfake-voice-detector")
-print("cached audio architecture config:", c.architectures, c.id2label)
-PY
-    ;;
-  *) echo "[NOTE] audio not provisioned; architecture config not cached" ;;
-esac
-
+#    It also used to cache the retired wav2vec2 audio config; the current AASIST
+#    audio detector builds its configuration locally and needs no hub fetch.
 echo "=== Render Build Step Complete ==="

@@ -1,6 +1,6 @@
 """SQLAlchemy ORM entities for the PRAMAAN case file.
 
-Seven tables, matching the forensic workflow:
+Nine tables, matching the forensic workflow:
 
 * ``cases``            -- an investigation
 * ``evidence``         -- an ingested file (case evidence or indexed corpus item)
@@ -9,6 +9,10 @@ Seven tables, matching the forensic workflow:
 * ``timeline_events``  -- chronological propagation events
 * ``reports``          -- generated forensic PDF reports, with their own hashes
 * ``audit_log``        -- hash-chained, tamper-evident action record
+* ``users``            -- operator accounts that sign in and are recorded as the
+                          examiner on the evidence they ingest
+* ``auth_sessions``    -- bearer-token login sessions (only the token *hash* is
+                          stored, never the token itself)
 """
 
 from __future__ import annotations
@@ -111,6 +115,12 @@ class Evidence(Base):
     observed_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
     transformation: Mapped[str | None] = mapped_column(String(64))
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # --- Chain-of-custody context (operator-supplied at intake, optional) ---
+    #: Free-text account of how/where the evidence was acquired (device seized,
+    #: downloaded from a URL, received from a complainant, ...). Nullable: it is
+    #: an optional intake field, absent for corpus items and older rows.
+    acquisition_context: Mapped[str | None] = mapped_column(Text)
 
     indexed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
@@ -254,3 +264,51 @@ class AuditLog(Base):
     row_hash: Mapped[str] = mapped_column(String(64), index=True)
 
     __table_args__ = (Index("ix_audit_case_seq", "case_id", "seq"),)
+
+
+class User(Base):
+    """An operator account that signs in to the console.
+
+    The signed-in operator is the source of truth for the examiner recorded on
+    ingested evidence -- it is never typed in at intake. Only the PBKDF2 hash of
+    the password is stored (``pbkdf2_sha256$<iterations>$<salt_hex>$<hash_hex>``);
+    the plaintext never touches the database.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(128))
+    role: Mapped[str] = mapped_column(String(64), default="Forensic Examiner")
+    password_hash: Mapped[str] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    sessions: Mapped[list["AuthSession"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class AuthSession(Base):
+    """A bearer-token login session.
+
+    Named ``AuthSession`` (not ``Session``) to avoid colliding with SQLAlchemy's
+    ``Session``. Only the SHA-256 hash of the opaque token is persisted, so a
+    database read never yields a usable credential; the token itself is returned
+    to the client once, at login, and never stored.
+    """
+
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    user: Mapped[User] = relationship(back_populates="sessions")
