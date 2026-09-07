@@ -123,10 +123,14 @@ def reported_case(client) -> dict[str, Any]:
 
     assert client.post("/api/index/rebuild").status_code == 200
 
+    # Examine first, then report: a report is a read over the examinations of
+    # record and runs nothing itself (the refresh=true this fixture used to
+    # pass would now be refused -- see test_report_examination_binding.py).
+    assert client.post(f"/api/cases/{case_id}/verdict").status_code == 200
+
     response = client.post(
         f"/api/cases/{case_id}/report",
         json={"examiner": "D. Jain"},
-        params={"refresh": "true"},
     )
     assert response.status_code == 201, response.text
     body = response.json()
@@ -687,6 +691,8 @@ def test_case_report_count_is_counted_not_read_from_the_status_string(client):
     assert fetched.status_code == 200, fetched.text
     assert fetched.json()["report_count"] == 0
 
+    # A report reads the examinations of record, so examine before reporting.
+    assert client.post(f"/api/cases/{case_id}/verdict").status_code == 200
     first = client.post(f"/api/cases/{case_id}/report", json={})
     assert first.status_code == 201, first.text
     assert client.get(f"/api/cases/{case_id}").json()["report_count"] == 1
@@ -710,6 +716,8 @@ def test_every_endpoint_that_returns_a_case_counts_its_reports(client):
     uploaded = _upload(client, None, "consistent.jpg", jpeg_bytes(seed=72), "image/jpeg")
     case_id = uploaded["case"]["case_id"]
     evidence_id = uploaded["evidence"]["evidence_id"]
+    # A report reads the examinations of record, so examine before reporting.
+    assert client.post(f"/api/cases/{case_id}/verdict").status_code == 200
     assert client.post(f"/api/cases/{case_id}/report", json={}).status_code == 201
 
     # GET /api/cases/{id}

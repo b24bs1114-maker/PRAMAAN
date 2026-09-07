@@ -12,8 +12,10 @@ degrades to a reported status instead of failing the case.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -44,11 +46,54 @@ from app.services import (
     provenance as provenance_service,
     storage,
 )
+from app.utils.canonical import canonical_bytes
 from app.utils.timeutil import iso, utcnow
 
 logger = logging.getLogger("pramaan.pipeline")
 
 ANALYSIS_VERSION = "1.0"
+
+#: The fields a fusion payload carries that constitute *the examination* -- the
+#: question, the answer, the policy that decided it and the configuration it
+#: ran under. The examination digest is taken over exactly these, so a stored
+#: row whose findings were edited no longer matches its recorded digest.
+#: Deliberately excludes volatile/cosmetic keys (``cached``, timestamps,
+#: filename): those describe the *reading*, not the examination.
+EXAMINATION_DIGEST_FIELDS = (
+    "verdict",
+    "manipulation_score",
+    "confidence",
+    "signals_available",
+    "signals_total",
+    "signals_evaluated",
+    "signal_coverage",
+    "primary_signal_available",
+    "signals",
+    "primary_signals",
+    "declared_weights",
+    "thresholds",
+    "arithmetic",
+    "rationale",
+    "fusion_version",
+    "score_semantics",
+    "weights_semantics",
+    "assessment",
+    "exclusion_notes",
+    "evidence_id",
+    "sha256",
+    "media_type",
+)
+
+
+def _examination_digest(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Digest of the examination's recorded findings, and the fields it covers.
+
+    Returns ``(sha256_hex, fields)`` where ``fields`` is exactly what was
+    hashed. The fields are stored next to the digest so a reader can recompute
+    the binding without trusting the payload's own copy of them.
+    """
+    fields = {key: payload[key] for key in EXAMINATION_DIGEST_FIELDS if key in payload}
+    return hashlib.sha256(canonical_bytes(fields)).hexdigest(), fields
 
 # The documented order of the full-case pipeline. Reported in the response so a
 # reader can see exactly which steps ran, in which order.
@@ -513,6 +558,16 @@ def run_fusion(
     payload["cached"] = False
     assessed = payload.get("assessment") or {}
 
+    # The examination's own identity: a fresh uuid per run, plus a digest over
+    # the recorded findings. A re-examination therefore cannot silently become
+    # the previous examination -- it is a distinct row with a distinct identity,
+    # and the previous one remains intact on the record.
+    examination_id = str(uuid.uuid4())
+    examination_digest, digest_fields = _examination_digest(payload)
+    payload["examination_id"] = examination_id
+    payload["examination_digest"] = examination_digest
+    payload["digest_fields"] = digest_fields
+
     stored = analysis_store.store_result(
         session,
         case_id=evidence.case_id,
@@ -534,6 +589,12 @@ def run_fusion(
         actor=actor,
         details={
             "evidence_id": evidence.id,
+            # The exact examination this event records. Without these, a later
+            # re-examination makes it ambiguous which run the audit row refers
+            # to: the event could be read as describing whichever verdict is
+            # newest at reading time.
+            "examination_id": examination_id,
+            "examination_digest": examination_digest,
             "media_type": media_type,
             "applicable_signals": sorted(applicable),
             # The assessment as decided, recorded in the hash chain so an

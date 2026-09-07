@@ -33,6 +33,7 @@ from app.config import Settings
 from app.models import (
     KIND_DETECTOR,
     KIND_FORENSICS,
+    KIND_FUSION,
     KIND_METADATA,
     KIND_PROVENANCE,
     Case,
@@ -45,7 +46,6 @@ from app.services import (
     detector as detector_service,
     fusion as fusion_service,
     matching,
-    pipeline,
     propagation as propagation_service,
 )
 from app.utils import pdf
@@ -56,6 +56,24 @@ logger = logging.getLogger("pramaan.report")
 REPORT_VERSION = "1.0"
 RENDERER_REPORTLAB = "reportlab"
 RENDERER_BUILTIN = "builtin-minipdf"
+
+
+class NoStoredExaminationError(RuntimeError):
+    """A report was requested for a case whose evidence has never been examined.
+
+    Rendering anyway would produce a PDF of empty findings that still looks
+    like an examination report. The operator runs the analysis first; this
+    error says so instead of silently doing it for them.
+    """
+
+    def __init__(self, *, case_id: str) -> None:
+        self.case_id = case_id
+        super().__init__(
+            "No stored examination exists for this case's evidence. Run the "
+            "analysis (POST /api/cases/{case_id}/analyse or .../verdict) "
+            "first; a report describes the examination of record, it does not "
+            "create one."
+        )
 
 # Audit rows printed in the case timeline. Truncation is stated in the document
 # whenever it happens, so a short table is never mistaken for a short history.
@@ -230,9 +248,16 @@ def _collect(
     case: Case,
     settings: Settings,
     actor: str,
-    refresh: bool,
 ) -> dict[str, Any]:
-    """Gather everything the report needs."""
+    """Gather everything the report needs -- from the stored record only.
+
+    The report is a read over finalized examinations. ``run_fusion`` is never
+    called here: it runs the pipeline (detector inference, forensics,
+    retrieval) and writes new analysis rows, which would make the report an
+    *actor* that changes the very record it claims to snapshot. A case whose
+    evidence has not been examined yet is reported as not examined -- the
+    operator runs the analysis first, then reports on it.
+    """
     evidence_rows = list(
         session.execute(
             select(Evidence)
@@ -243,13 +268,7 @@ def _collect(
 
     items: list[dict[str, Any]] = []
     for evidence in evidence_rows:
-        verdict = pipeline.run_fusion(
-            session,
-            evidence=evidence,
-            settings=settings,
-            actor=actor,
-            refresh=refresh,
-        )
+        verdict = _stage(session, evidence, KIND_FUSION)
         items.append(
             {
                 "evidence": evidence,
@@ -261,9 +280,12 @@ def _collect(
             }
         )
 
-    matches = matching.search_case(session, case=case, settings=settings, actor=actor)
+    # Near-duplicate candidates and propagation are read from what is already
+    # on record -- the same stored-match view the analysis screens serve --
+    # never recomputed for the document.
+    matches = matching.stored_case_matches(session, case=case, settings=settings)
     propagation = propagation_service.reconstruct_case(
-        session, case=case, settings=settings, actor=actor, refresh=False
+        session, case=case, settings=settings, actor=actor, refresh=False, record=False
     )
     verification = audit.verify_chain(session, case.id)
 
@@ -1225,12 +1247,30 @@ def generate(
     examiner: str | None = None,
     refresh: bool = False,
 ) -> dict[str, Any]:
-    """Generate the PDF, hash it, persist it and record it in the audit chain."""
-    collected = _collect(
-        session, case=case, settings=settings, actor=actor, refresh=refresh
-    )
+    """Generate the PDF, hash it, persist it and record it in the audit chain.
+
+    ``refresh`` is accepted for call-site compatibility and ignored: a report
+    describes the examinations already on the record. An endpoint that also
+    re-examined would produce a document about an examination the operator never
+    saw on any screen -- re-examine first (``POST .../analyse`` or ``.../verdict``
+    with ``refresh=true``), then report.
+    """
+    collected = _collect(session, case=case, settings=settings, actor=actor)
     report_id = str(uuid.uuid4())
     audit_head = audit.head_hash(session)
+
+    # The examinations this document snapshots, per exhibit. A case with
+    # evidence but no stored verdict is refused rather than rendered over
+    # nothing: a PDF with no findings is not an examination report. A case
+    # with no evidence at all still renders, with the explicit no-evidence
+    # finding.
+    examined = [item for item in collected["items"] if item["verdict"]]
+    if collected["items"] and not examined:
+        raise NoStoredExaminationError(case_id=case.id)
+
+    primary_examination_id = (
+        examined[0]["verdict"].get("examination_id") if examined else None
+    )
 
     blocks = build_blocks(
         case=case,
@@ -1288,6 +1328,11 @@ def generate(
                     "evidence_id": item["evidence"].id,
                     "filename": item["evidence"].filename,
                     "sha256": item["evidence"].sha256,
+                    # The examination this document rendered, per exhibit: its
+                    # identity and digest. After a re-examination these still
+                    # name the row the PDF actually described.
+                    "examination_id": item["verdict"].get("examination_id"),
+                    "examination_digest": item["verdict"].get("examination_digest"),
                     "verdict": item["verdict"].get("verdict"),
                     "assessment_state": _assessment_of(item["verdict"]).get("state"),
                     "assessment_scope": _assessment_of(item["verdict"]).get("scope"),
@@ -1333,6 +1378,17 @@ def generate(
             "audit_head_hash_at_generation": audit_head,
             "audit_chain_valid": bool(verification.get("valid")),
             "evidence_count": len(collected["items"]),
+            # The examinations this document snapshot, per exhibit, so the
+            # audit trail binds the PDF to the exact rows it rendered.
+            "examinations": [
+                {
+                    "evidence_id": item["evidence"].id,
+                    "examination_id": item["verdict"].get("examination_id"),
+                    "examination_digest": item["verdict"].get("examination_digest"),
+                }
+                for item in collected["items"]
+                if item["verdict"]
+            ],
         },
     )
 
@@ -1352,6 +1408,8 @@ def generate(
         "document_status": DOCUMENT_STATUS,
         "renderer_status": renderer_status(),
         "download_url": f"/api/cases/{case.id}/reports/{report_id}",
+        # The primary exhibit's examination: what this report is a report of.
+        "examination_id": primary_examination_id,
     }
 
 

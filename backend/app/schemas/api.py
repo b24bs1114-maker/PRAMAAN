@@ -754,6 +754,10 @@ class ReportResponse(ApiModel):
     document_status: str
     renderer_status: dict[str, Any] = {}
     download_url: str
+    #: The primary exhibit's examination this document is a report of; null
+    #: only for a case with no evidence at all. Every other reader of the
+    #: examination -- the verdict endpoints, the audit rows -- names the same id.
+    examination_id: str | None = None
 
 
 class ReportListResponse(ApiModel):

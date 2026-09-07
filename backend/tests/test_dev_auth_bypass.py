@@ -313,7 +313,9 @@ def test_dev_bypass_full_workflow_case_intake_report_audit_delete() -> None:
         sys_resp = client.get("/api/system/status")
         assert sys_resp.status_code == 200
 
-        # 4. Report generation
+        # 4. Report generation. A report is a read over the examinations of
+        # record, so the case is examined first; the workflow stays intact.
+        assert client.post(f"/api/cases/{case_id}/verdict").status_code == 200
         report_resp = client.post(f"/api/cases/{case_id}/report", json={})
         assert report_resp.status_code == 201, report_resp.text
         report_id = report_resp.json()["report_id"]

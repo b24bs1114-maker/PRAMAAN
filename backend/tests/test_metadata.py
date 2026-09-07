@@ -157,10 +157,13 @@ def test_metadata_is_persisted_and_cached(client: TestClient) -> None:
             )
             .all()
         )
-        # Re-extraction replaces the current row rather than accumulating rows.
-        assert len(rows) == 1
-        assert rows[0].status == "OK"
-        assert rows[0].payload["container"]["format"] == "JPEG"
+        # Re-extraction appends: the previous extraction is a record of what
+        # was found then, and analysis history is never deleted. The API's
+        # read paths surface the newest row.
+        assert len(rows) >= 1
+        newest = max(rows, key=lambda r: (r.created_at, r.id))
+        assert newest.status == "OK"
+        assert newest.payload["container"]["format"] == "JPEG"
     finally:
         session.close()
 

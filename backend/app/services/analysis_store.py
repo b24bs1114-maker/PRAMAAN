@@ -4,6 +4,13 @@ Every analysis stage (metadata, detector, provenance, forensics, fusion,
 propagation) writes an ``AnalysisResult`` row through here so results are
 reproducible from the database without re-running the pipeline, and so the
 report generator has a single place to read from.
+
+Rows are append-only: every run of a stage inserts a *new* row and never
+deletes or overwrites a previous one. A re-examination is a new examination --
+the previous one stays on the record with its own identity, so "what did the
+first examination conclude" remains answerable after any number of later runs.
+``latest_result`` resolves the newest row of a kind; the history is the table,
+not the audit log.
 """
 
 from __future__ import annotations
@@ -30,26 +37,17 @@ def store_result(
     verdict: str | None = None,
     model: str | None = None,
     model_version: str | None = None,
-    replace: bool = True,
+    replace: bool = False,
 ) -> AnalysisResult:
-    """Insert an analysis result, optionally replacing the previous one.
+    """Insert an analysis result. Existing rows are never deleted or modified.
 
-    ``replace=True`` keeps one current row per (evidence, kind) so repeated
-    analysis does not accumulate stale rows. The audit log -- not this table --
-    is the append-only history.
+    ``replace`` is accepted and ignored. It used to delete the previous row for
+    the (evidence, kind) pair, which destroyed the history of every
+    re-examination: a refresh run made the previous examination's findings
+    unrecoverable while the audit trail still referred to them. The parameter
+    stays so call sites need not change; its old behaviour is gone because it
+    contradicted the examination-immutability contract.
     """
-    if replace:
-        stale = session.execute(
-            select(AnalysisResult).where(
-                AnalysisResult.evidence_id == evidence_id,
-                AnalysisResult.kind == kind,
-            )
-        ).scalars().all()
-        for row in stale:
-            session.delete(row)
-        if stale:
-            session.flush()
-
     result = AnalysisResult(
         id=str(uuid.uuid4()),
         case_id=case_id,
@@ -71,14 +69,19 @@ def store_result(
 def latest_result(
     session: Session, *, evidence_id: str, kind: str
 ) -> AnalysisResult | None:
-    """Most recent stored result of a kind for one evidence item."""
+    """Most recent stored result of a kind for one evidence item.
+
+    Newest row wins. Two rows written in the same second (a fast re-run) are
+    ordered by insertion id as a tiebreaker so the winner is deterministic;
+    the earlier row is history, never garbage.
+    """
     return session.execute(
         select(AnalysisResult)
         .where(
             AnalysisResult.evidence_id == evidence_id,
             AnalysisResult.kind == kind,
         )
-        .order_by(AnalysisResult.created_at.desc())
+        .order_by(AnalysisResult.created_at.desc(), AnalysisResult.id.desc())
         .limit(1)
     ).scalars().first()
 

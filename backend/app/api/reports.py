@@ -36,10 +36,14 @@ def generate_report(
         Body(embed=True, description="Examiner name to print on the report."),
     ] = None,
     refresh: bool = Query(
-        False, description="Re-run every analysis stage before reporting."
+        False,
+        description=(
+            "Rejected: a report is a read over the examinations of record. "
+            "Re-examine via POST /api/cases/{case_id}/analyse first."
+        ),
     ),
 ) -> ReportResponse:
-    """Run the case to completion if needed, then render and hash the report.
+    """Render and hash the report from the **stored** examinations.
 
     The PDF records the evidence and its SHA-256, every signal's score, weight and
     contribution, the fused verdict, near-duplicate candidates, the earliest known
@@ -47,17 +51,38 @@ def generate_report(
     model versions used, the audit trail with the chain head hash, the limitations
     that bound every figure, and an examiner sign-off block.
 
+    Nothing is re-analysed here: no detector inference, no fusion, no
+    retrieval. The document describes the examinations already on the record,
+    so the report, the API responses and the audit rows all refer to the same
+    finalized examinations. ``refresh=true`` is refused with 422 -- a report
+    that also re-examined would change the record it claims to snapshot.
+
     The PDF's own SHA-256 is returned here and recorded in the audit chain: a
     document cannot contain its own digest.
     """
-    result = report_service.generate(
-        db,
-        case=case,
-        settings=settings,
-        actor="api",
-        examiner=examiner,
-        refresh=refresh,
-    )
+    if refresh:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "A report describes the examinations of record and re-runs "
+                "nothing. To re-examine first, POST /api/cases/"
+                f"{case.id}/analyse or /api/cases/{case.id}/verdict with "
+                "refresh=true, then generate the report."
+            ),
+        )
+    try:
+        result = report_service.generate(
+            db,
+            case=case,
+            settings=settings,
+            actor="api",
+            examiner=examiner,
+        )
+    except report_service.NoStoredExaminationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     return ReportResponse(**result)
 
 

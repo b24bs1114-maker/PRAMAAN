@@ -40,6 +40,11 @@ def _case(client: TestClient, seed: int, name: str) -> str:
 
 
 def _generate(client: TestClient, case_id: str, **body: Any) -> dict[str, Any]:
+    # A report is a read over the examinations of record, so the case is
+    # examined first. The verdict call is idempotent (a cached read for an
+    # already-examined case), and the report then describes the newest record.
+    verdict = client.post(f"/api/cases/{case_id}/verdict")
+    assert verdict.status_code == 200, verdict.text
     res = client.post(f"/api/cases/{case_id}/report", json=body or None)
     assert res.status_code == 201, res.text
     return res.json()
