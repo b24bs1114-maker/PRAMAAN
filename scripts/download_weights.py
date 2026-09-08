@@ -112,22 +112,50 @@ def load_manifest() -> dict:
         raise SystemExit(f"[ERROR] model manifest is not valid JSON: {exc}") from exc
 
 
-def resolve_url(modality: str, entry: dict, release: dict) -> str:
-    """The URL this modality's checkpoint comes from, or ``""`` if undeclared.
+def resolve_urls(modality: str, entry: dict, release: dict) -> list[str]:
+    """Candidate URLs for this modality's checkpoint in priority order.
 
-    An explicit per-modality env var wins, so a deployment can point at its own
-    mirror or a signed URL without editing the manifest.
+    1. Explicit per-modality env var (PRAMAAN_<MODALITY>_WEIGHTS_URL)
+    2. GitHub release asset URL template
+    3. Hugging Face Hub direct file download URL (using hf_hub_model)
     """
-    explicit = os.getenv(URL_ENV[modality], "").strip()
+    urls: list[str] = []
+    explicit = os.getenv(URL_ENV.get(modality, ""), "").strip()
     if explicit:
-        return explicit
+        urls.append(explicit)
+
     asset = entry.get("release_asset") or entry.get("checkpoint_filename")
     template = release.get("asset_url_template", "")
     repo = os.getenv("PRAMAAN_WEIGHTS_RELEASE_REPO", "").strip() or release.get("repo", "")
     tag = os.getenv("PRAMAAN_WEIGHTS_RELEASE_TAG", "").strip() or release.get("tag", "")
-    if not (asset and template and repo and tag):
-        return ""
-    return template.format(repo=repo, tag=tag, asset=asset)
+    if asset and template and repo and tag:
+        urls.append(template.format(repo=repo, tag=tag, asset=asset))
+
+    # Hugging Face Hub direct fallback
+    hf_hub = entry.get("hf_hub_model", "").strip()
+    if hf_hub:
+        # Pinned source repo files:
+        if modality == "image":
+            urls.append(f"https://huggingface.co/{hf_hub}/resolve/main/model.safetensors")
+        elif modality == "audio":
+            urls.append(f"https://huggingface.co/{hf_hub}/resolve/main/AASIST.pth")
+        elif modality == "video":
+            urls.append(f"https://huggingface.co/{hf_hub}/resolve/main/model.safetensors")
+
+    # De-duplicate while preserving order
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for u in urls:
+        if u and u not in seen:
+            seen.add(u)
+            deduped.append(u)
+    return deduped
+
+
+def resolve_url(modality: str, entry: dict, release: dict) -> str:
+    """The primary URL for this modality's checkpoint, or empty string."""
+    urls = resolve_urls(modality, entry, release)
+    return urls[0] if urls else ""
 
 
 def verify_file(path: Path, entry: dict, *, check_digest: bool = True) -> tuple[bool, str]:
@@ -237,18 +265,23 @@ def provision(modality: str, entry: dict, release: dict, *, args) -> tuple[str, 
         print("    [MISSING] not present (--verify-only, not downloading)")
         return "missing", "not present"
 
-    url = resolve_url(modality, entry, release)
-    if not url:
+    urls = resolve_urls(modality, entry, release)
+    if not urls:
         print(f"    [MISSING] not present and no URL: set {URL_ENV[modality]} or a")
         print("    release repo/tag in the manifest.")
         return "missing", "no URL resolved"
 
-    ok, detail = download(url, dest, entry)
-    if ok:
-        print(f"    [OK] downloaded and verified; {detail}")
-        return "ok", detail
-    print(f"    [FAIL] {detail}")
-    return "failed", detail
+    last_detail = "no candidate URLs succeeded"
+    for url in urls:
+        ok, detail = download(url, dest, entry)
+        if ok:
+            print(f"    [OK] downloaded and verified; {detail}")
+            return "ok", detail
+        print(f"    [WARN] candidate download failed ({url}): {detail}")
+        last_detail = detail
+
+    print(f"    [FAIL] all candidate downloads failed: {last_detail}")
+    return "failed", last_detail
 
 
 def main() -> int:

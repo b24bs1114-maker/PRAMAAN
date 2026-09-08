@@ -117,6 +117,23 @@ pip install --upgrade pip
 pip install -r backend/requirements.txt
 ```
 
+### Model Checkpoints (Git LFS & Provisioning)
+
+PRAMAAN tracks detector weights via Git LFS (`pramaan-detector/weights/`). To pull or verify them:
+
+```bash
+# Pull model checkpoints via Git LFS:
+git lfs install
+git lfs pull
+
+# Or automatically bootstrap & verify against model_manifest.json:
+python scripts/download_weights.py --all --strict
+
+# Verify all model assets and architectures:
+python scripts/verify_model_assets.py
+```
+For detailed architecture, model sizes, class labels, and SHA-256 digests, see [docs/models.md](docs/models.md).
+
 Optionally create a local configuration file (all values have working defaults):
 
 ```bash
