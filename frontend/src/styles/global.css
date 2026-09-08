@@ -3864,6 +3864,11 @@ code,
   flex-direction: column;
   gap: 2px;
   max-width: 520px;
+  /* Long unbroken strings -- filesystem paths, digests, model names -- have no
+     wrap opportunities of their own, so without this the widest one sets the
+     page's scroll width on narrow screens and every other column shifts. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .settings-row-item__label {

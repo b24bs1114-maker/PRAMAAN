@@ -136,30 +136,23 @@ export function useAuth(): AuthState {
     const token = readStoredToken()
     let cancelled = false
     if (token) setAuthToken(token)
-
-    async function resolveIdentity() {
-      try {
-        const confirmed = await api.currentUser()
-        if (!cancelled) setUser(confirmed)
-      } catch {
+    api
+      .currentUser()
+      .then((confirmed) => {
+        if (cancelled) return
+        setUser(confirmed)
+      })
+      .catch(() => {
+        // No identity: the token is expired or revoked, nobody is signed in, or
+        // the backend is unreachable. There is no authenticated operator to name
+        // on evidence, so the session is dropped rather than assumed. The 401
+        // handler above may already have done this.
         if (cancelled) return
         forgetRef.current()
-        // If an invalid or revoked token was stored, clear it and query what identity remains.
-        // In normal mode (Mode A), an unauthenticated request returns 401 and drops to ScreenLogin.
-        // In dev bypass mode (Mode B), it returns 200 with the development operator,
-        // opening the console immediately without forcing a second reload.
-        try {
-          const remaining = await api.currentUser()
-          if (!cancelled) setUser(remaining)
-        } catch {
-          // Genuinely unauthenticated or backend unreachable.
-        }
-      } finally {
+      })
+      .finally(() => {
         if (!cancelled) setRestoring(false)
-      }
-    }
-
-    void resolveIdentity()
+      })
 
     return () => {
       cancelled = true

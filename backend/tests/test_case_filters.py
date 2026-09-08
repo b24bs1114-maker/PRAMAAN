@@ -334,3 +334,45 @@ def test_no_argument_list_is_unfiltered(client: TestClient) -> None:
     # The tagged case is present in an unfiltered listing.
     assert any(c["examiner"] == tag for c in everything["cases"])
     assert everything["count"] >= 1
+
+
+def _searched_case_numbers(client: TestClient, term: str) -> set[str]:
+    listed = client.get("/api/cases", params={"q": term})
+    assert listed.status_code == 200, listed.text
+    return {c["case_number"] for c in listed.json()["cases"]}
+
+
+def test_q_matches_case_fields(client: TestClient) -> None:
+    tag = f"QCase-{uuid.uuid4().hex[:8]}"
+    case = _upload(client, examiner=tag, seed=209)
+
+    # The term matches the case's own examiner field.
+    assert case["case"]["case_number"] in _searched_case_numbers(client, tag)
+    # And the case number itself.
+    assert case["case"]["case_number"] in _searched_case_numbers(
+        client, case["case"]["case_number"]
+    )
+
+
+def test_q_matches_evidence_filename_of_a_case(client: TestClient) -> None:
+    # The header search advertises "evidence" too: a term matching a sealed
+    # exhibit's filename must surface the case that holds it -- as a case row,
+    # never as an evidence row, because this endpoint's contract is a case list.
+    case = _upload(client, examiner=f"QEv-{uuid.uuid4().hex[:8]}", seed=210)
+    filename = case["evidence"]["filename"]
+
+    assert case["case"]["case_number"] in _searched_case_numbers(client, filename)
+
+
+def test_q_matches_evidence_sha256_of_a_case(client: TestClient) -> None:
+    # "hashes" in the same placeholder: a digest (whole or fragment) reaches
+    # the case through its evidence.
+    case = _upload(client, examiner=f"QHash-{uuid.uuid4().hex[:8]}", seed=211)
+    digest = case["evidence"]["sha256"]
+
+    assert case["case"]["case_number"] in _searched_case_numbers(client, digest)
+    assert case["case"]["case_number"] in _searched_case_numbers(client, digest[:16])
+
+
+def test_q_matching_nothing_yields_an_empty_case_list(client: TestClient) -> None:
+    assert _searched_case_numbers(client, f"no-such-term-{uuid.uuid4().hex[:8]}") == set()

@@ -263,12 +263,27 @@ def list_cases(
     if priority_filter and priority_filter.lower() != "all":
         stmt = stmt.where(Case.priority == priority_filter.lower())
     if query:
-        pattern = f"%{query.strip()}%"
+        term = query.strip()
+        pattern = f"%{term}%"
+        # The header search advertises "cases, evidence, hashes, platforms", and
+        # this is what makes that true: a term matches a case when it matches the
+        # case's own fields OR any of that case's evidence -- filename, SHA-256,
+        # evidence id or recorded platform. An evidence hit is reported as the
+        # case that holds it, never as the evidence row itself, so the result
+        # shape of this endpoint stays a case list.
+        evidence_match = select(Evidence.case_id).where(
+            (Evidence.filename.like(pattern))
+            | (Evidence.sha256.like(pattern))
+            | (Evidence.id.like(pattern))
+            | (Evidence.platform.like(pattern))
+        )
         stmt = stmt.where(
             (Case.case_number.like(pattern))
             | (Case.title.like(pattern))
             | (Case.description.like(pattern))
             | (Case.examiner.like(pattern))
+            | (Case.complaint_reference.like(pattern))
+            | (Case.id.in_(evidence_match))
         )
     if verdict_filter and verdict_filter.strip().lower() != "all":
         # The verdict shown in the list is the case's newest *fused* verdict --
