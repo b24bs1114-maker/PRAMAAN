@@ -561,6 +561,12 @@ export function Screen2Analysis({
                 ) : null}
               </div>
 
+              {/* The verdict is the hero: an examiner scanning this panel should
+                  read the outcome (LIKELY MANIPULATED / AUTHENTIC / INCONCLUSIVE)
+                  first, in the band colour. The task-qualified assessment state
+                  ("Indicators detected") is the honest qualifier and sits just
+                  under it -- it is what the verdict is derived from, not a weaker
+                  synonym for it. */}
               <div
                 style={{
                   fontSize: 'var(--text-xl)',
@@ -569,12 +575,14 @@ export function Screen2Analysis({
                   letterSpacing: '0.04em',
                 }}
               >
-                {assessment ? assessment.stateLabel : verdictBandLabel(verdict.verdict)}
+                {verdictBandLabel(verdict.verdict)}
               </div>
 
-              {/* Legacy verdict projection and scope */}
+              {/* Assessment state and scope: the qualifier behind the verdict. */}
               <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', color: 'var(--text-muted)', flexWrap: 'wrap', gap: 4 }}>
-                <span className="mono">Legacy verdict: <strong>{verdictBandLabel(verdict.verdict)}</strong></span>
+                {assessment ? (
+                  <span className="mono">Assessment: <strong>{assessment.stateLabel}</strong></span>
+                ) : null}
                 {assessment?.taskScope ? (
                   <span className="mono" style={{ fontSize: '10px' }}>Scope: {assessment.taskScope}</span>
                 ) : null}

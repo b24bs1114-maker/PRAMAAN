@@ -33,17 +33,27 @@ import {
 /**
  * Where the token is kept between page loads.
  *
- * localStorage, not sessionStorage: an examiner who reloads mid-case, or reopens
- * the console after closing the tab, should not be signed out and lose the case
- * they were working on. The stored value is the token only -- never the password,
- * and never the user record, which is re-fetched from the server on every load so
- * a renamed or revoked account cannot linger in a cache.
+ * Two stores, chosen by the sign-in screen's "Keep me signed in" box:
+ *
+ *   remember = true   localStorage: survives closing the tab and reopening the
+ *                     console, so an examiner mid-case is not signed out by a
+ *                     reload. This is the default and the historical behaviour.
+ *   remember = false  sessionStorage: cleared when the tab closes, for a shared
+ *                     or public machine. A reload still keeps the session --
+ *                     sessionStorage outlives a refresh, only not the tab.
+ *
+ * Either way the stored value is the token only -- never the password, and never
+ * the user record, which is re-fetched from the server on every load so a
+ * renamed or revoked account cannot linger in a cache.
  */
 const TOKEN_KEY = 'pramaan_auth_token'
 
 function readStoredToken(): string | null {
   try {
-    const saved = localStorage.getItem(TOKEN_KEY)
+    // localStorage first (a "remembered" session), then sessionStorage. A token
+    // only ever lives in one at a time; writeStoredToken clears the other.
+    const saved =
+      localStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(TOKEN_KEY)
     return saved && saved.trim() ? saved : null
   } catch {
     // Private-browsing modes can throw on access. No stored session, then.
@@ -51,10 +61,15 @@ function readStoredToken(): string | null {
   }
 }
 
-function writeStoredToken(token: string | null): void {
+function writeStoredToken(token: string | null, remember = true): void {
   try {
-    if (token) localStorage.setItem(TOKEN_KEY, token)
-    else localStorage.removeItem(TOKEN_KEY)
+    // Always clear both stores first, so switching "remember" off cannot leave a
+    // stale copy behind in localStorage, and signing out clears either home.
+    localStorage.removeItem(TOKEN_KEY)
+    sessionStorage.removeItem(TOKEN_KEY)
+    if (token) {
+      ;(remember ? localStorage : sessionStorage).setItem(TOKEN_KEY, token)
+    }
   } catch {
     // Storage unavailable: the session still works, it just will not survive a
     // reload. Failing the sign-in over this would be worse.
@@ -72,7 +87,13 @@ export interface AuthState {
   signingOut: boolean
   /** Why the last sign-in attempt failed, in the backend's words. */
   error: string | null
-  signIn: (username: string, password: string) => Promise<boolean>
+  /**
+   * Sign in with real credentials. `remember` chooses where the token is kept:
+   * true (default) persists it in localStorage across tab close; false keeps it
+   * in sessionStorage, cleared when the tab closes. It never changes what the
+   * backend accepts -- only how long this browser holds the resulting session.
+   */
+  signIn: (username: string, password: string, remember?: boolean) => Promise<boolean>
   signOut: () => Promise<void>
 }
 
@@ -159,7 +180,11 @@ export function useAuth(): AuthState {
     }
   }, [])
 
-  const signIn = useCallback(async (username: string, password: string): Promise<boolean> => {
+  const signIn = useCallback(async (
+    username: string,
+    password: string,
+    remember = true,
+  ): Promise<boolean> => {
     setSigningIn(true)
     setError(null)
     try {
@@ -167,7 +192,7 @@ export function useAuth(): AuthState {
       // Install before setting state: the token has to be attachable by the time
       // anything reacts to a signed-in operator and starts fetching.
       setAuthToken(session.token)
-      writeStoredToken(session.token)
+      writeStoredToken(session.token, remember)
       setUser(session.user)
       return true
     } catch (cause) {
@@ -198,19 +223,15 @@ export function useAuth(): AuthState {
     }
     forget()
     setError(null)
-    try {
-      // Ask the server what identity remains. Normally none, and this 401s
-      // straight to the login screen. Under the development bypass the answer is
-      // the development operator, and honouring it keeps the console open --
-      // pinning the UI to the login screen would demand a password that the
-      // server is currently configured not to require.
-      const remaining = await api.currentUser()
-      setUser(remaining)
-    } catch {
-      // No identity left. `forget` already cleared it; nothing more to do.
-    } finally {
-      setSigningOut(false)
-    }
+    setSigningOut(false)
+    // Signing out ends at the sign-in screen, full stop. We deliberately do NOT
+    // re-ask `/api/auth/me` here: under the development bypass the server would
+    // answer with the development operator again and silently sign the console
+    // back in, so the Log Out button would appear to do nothing. `forget` has
+    // already cleared the user, which drops the app to ScreenLogin. A page reload
+    // still restores the bypass identity via the mount effect -- the bypass is
+    // not disabled, it is simply not honoured as an *implicit* re-login on an
+    // explicit sign-out.
   }, [forget])
 
   return { user, restoring, signingIn, signingOut, error, signIn, signOut }

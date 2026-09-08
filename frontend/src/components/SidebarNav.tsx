@@ -212,10 +212,6 @@ export function SidebarNav({
 
   return (
     <aside className="sidebar-nav" aria-label="Workstation navigation">
-      <div className="sidebar-nav__brand-header" style={{ padding: '16px 16px 12px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
-        <div style={{ fontSize: '13px', fontWeight: 800, letterSpacing: '0.08em', color: 'var(--text-primary)' }}>PRAMAAN</div>
-        <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontWeight: 500 }}>Investigation Console</div>
-      </div>
       <div className="sidebar-nav__scroll">
         <nav className="sidebar-nav__group" aria-label="Workspace navigation">
           <span className="sidebar-nav__label">WORKSPACE</span>
@@ -256,6 +252,12 @@ export function SidebarNav({
       </div>
 
       <div className="sidebar-nav__footer">
+        {/* A SAFER CHANDIGARH motto */}
+        <div style={{ padding: '6px 8px 4px 8px', borderBottom: '1px solid rgba(201,162,39,0.08)', marginBottom: 4 }}>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 8, fontWeight: 700, letterSpacing: '0.18em', color: 'rgba(201,162,39,0.35)', textTransform: 'uppercase', lineHeight: 1.5 }}>
+            A SAFER CHANDIGARH<br />THROUGH EVIDENCE
+          </div>
+        </div>
         <div style={{ marginBottom: 8 }}>
           <span className="sidebar-nav__label" style={{ padding: '0 8px 4px 8px', display: 'block' }}>SYSTEM</span>
           <button

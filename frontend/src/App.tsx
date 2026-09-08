@@ -12,7 +12,7 @@
  * here invents an identity to stand in for one.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { API_BASE_URL, API_BASE_URL_IS_EXPLICIT } from './api'
 import { Banner } from './components/Banner'
 import { CaseContextBar } from './components/CaseWorkflowStepper'
@@ -45,6 +45,29 @@ export function App() {
   const theme = useTheme()
   const auth = useAuth()
   const { caseRecord, health, healthError, recheckHealth, selectCase, runAnalysis, reset } = investigation
+
+  // The header user pill is a menu: click it to reveal Log Out. This works in
+  // every auth mode, including the development bypass -- which used to show only
+  // a "DEV" badge and left no way to end the session from the header.
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const userMenuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!userMenuOpen) return
+    const onPointerDown = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false)
+      }
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setUserMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [userMenuOpen])
 
   // "New Case" is a state reset, not merely a route change: the investigation
   // store is shared across screens, so navigating to intake without clearing it
@@ -170,7 +193,7 @@ export function App() {
   // to the account that opened it, so the gate is the first thing, not a setting.
   if (!auth.user) {
     return (
-      <ScreenLogin auth={auth} health={health} theme={theme} onRetryHealth={recheckHealth} />
+      <ScreenLogin auth={auth} health={health} onRetryHealth={recheckHealth} />
     )
   }
 
@@ -178,6 +201,7 @@ export function App() {
     <div className="app">
       {/* Top Header Bar */}
       <header className="workstation-bar">
+        {/* LEFT: Ashoka emblem + brand block */}
         <div
           className="workstation-bar__brand"
           onClick={() => navigate('dashboard')}
@@ -187,28 +211,30 @@ export function App() {
             if (e.key === 'Enter' || e.key === ' ') navigate('dashboard')
           }}
           title="PRAMAAN | प्रमाण - Return to Dashboard"
+          style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', flexShrink: 0, minWidth: 'auto' }}
         >
-          <picture className="workstation-bar__brand-picture">
-            <source
-              media="(max-width: 768px)"
-              srcSet="/assets/pramaan-emblem.png"
-            />
-            <img
-              src={theme.resolved === 'light' ? '/assets/pramaan-logo-light.png' : '/assets/pramaan-logo-dark.png'}
-              alt="PRAMAAN | प्रमाण - Digital Evidence Examination & Provenance"
-              className="workstation-bar__brand-img"
-            />
-          </picture>
+          <img
+            src="/assets/ashoka-emblem-gold.png"
+            alt="Ashoka Emblem"
+            style={{ height: 40, width: 'auto', objectFit: 'contain', flexShrink: 0 }}
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: '0.14em', color: 'rgba(201,162,39,0.7)', textTransform: 'uppercase', fontFamily: 'var(--mono)', lineHeight: 1.2 }}>
+              CHANDIGARH POLICE
+            </div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+              <span style={{ fontSize: 17, fontWeight: 800, color: 'var(--text-primary)', letterSpacing: '-0.01em', lineHeight: 1.1 }}>PRAMAAN</span>
+              <span style={{ fontSize: 12, fontWeight: 400, color: 'rgba(201,162,39,0.55)', letterSpacing: '0.02em' }}>| प्रमाण</span>
+            </div>
+            <div style={{ fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--mono)', letterSpacing: '0.06em', lineHeight: 1 }}>
+              Digital Forensics &amp; Evidence Investigation
+            </div>
+          </div>
         </div>
 
-        <div className="search-box">
-          <Icon name="search" size={14} style={{ color: 'var(--text-faint)' }} />
-          {/* A placeholder is not a label: it is announced inconsistently and
-              disappears the moment anyone types. This field has no visible
-              caption by design -- the magnifier and its position in the header
-              carry the meaning for a sighted reader -- so the name it is
-              missing is supplied here, and it says what pressing Enter does,
-              because that is the only way to run this search. */}
+        {/* CENTER: Search box */}
+        <div className="search-box" style={{ flex: 1, maxWidth: 480 }}>
+          <Icon name="search" size={14} style={{ color: 'var(--text-faint)', flexShrink: 0 }} />
           <input
             className="search-box__input"
             type="search"
@@ -218,14 +244,79 @@ export function App() {
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={handleGlobalSearchKeyDown}
           />
+          <span className="search-box__shortcut" aria-hidden="true">⌘ K</span>
         </div>
 
+        {/* RIGHT: Datetime + User pill */}
         <div className="workstation-bar__right">
-          {/* Live Datetime Stamp */}
           <div className="workstation-bar__datetime">
             <div className="workstation-bar__date">{dateStr}</div>
             <div className="workstation-bar__time">{timeStr}</div>
           </div>
+          {auth.user && (
+            <div ref={userMenuRef} style={{ position: 'relative', flexShrink: 0 }}>
+              <button
+                type="button"
+                className="header-user-pill"
+                aria-haspopup="menu"
+                aria-expanded={userMenuOpen}
+                title={`Signed in as ${auth.user.username} · ${auth.user.role}`}
+                onClick={() => setUserMenuOpen((open) => !open)}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 32, padding: '5px 10px 5px 5px', cursor: 'pointer' }}
+              >
+                <div style={{ width: 28, height: 28, borderRadius: '50%', background: 'var(--gold)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: '1.5px solid rgba(201,162,39,0.5)' }}>
+                  <span style={{ fontSize: 11, fontWeight: 800, color: '#040608', letterSpacing: '-0.01em' }}>
+                    {auth.user.display_name.slice(0, 2).toUpperCase()}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 1, lineHeight: 1.2, textAlign: 'left' }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-primary)' }}>{auth.user.display_name}</span>
+                  <span style={{ fontSize: 9.5, color: 'var(--text-muted)', fontFamily: 'var(--mono)', letterSpacing: '0.04em' }}>{auth.user.role}</span>
+                </div>
+                {auth.user.dev_bypass && (
+                  <span
+                    style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.08em', color: 'var(--warning)', background: 'var(--warning-wash)', border: '1px solid var(--warning-line)', borderRadius: 4, padding: '2px 6px', marginLeft: 2 }}
+                    title="Local development auth bypass is active. Not a real authenticated operator."
+                  >
+                    DEV
+                  </span>
+                )}
+                <span aria-hidden="true" style={{ marginLeft: 2, fontSize: 9, color: 'var(--text-faint)', transform: userMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 150ms ease' }}>▾</span>
+              </button>
+
+              {userMenuOpen && (
+                <div
+                  role="menu"
+                  style={{ position: 'absolute', top: 'calc(100% + 8px)', right: 0, minWidth: 200, background: 'var(--surface-1, #10141a)', border: '1px solid rgba(255,255,255,0.10)', borderRadius: 10, boxShadow: '0 12px 32px rgba(0,0,0,0.5)', padding: 6, zIndex: 100 }}
+                >
+                  <div style={{ padding: '6px 10px 8px', borderBottom: '1px solid rgba(255,255,255,0.06)', marginBottom: 4 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-primary)' }}>{auth.user.display_name}</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>{auth.user.username}</div>
+                  </div>
+                  {auth.user.dev_bypass && (
+                    <div style={{ padding: '4px 10px 8px', fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                      Development auth bypass is active. Logging out returns to the bypass identity, not a login prompt.
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setUserMenuOpen(false)
+                      handleSignOut()
+                    }}
+                    disabled={auth.signingOut}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 10px', background: 'transparent', border: 'none', borderRadius: 6, color: 'rgba(239,68,68,0.9)', fontSize: 12, fontWeight: 600, cursor: 'pointer', textAlign: 'left', transition: 'background 150ms ease' }}
+                    onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'rgba(239,68,68,0.12)' }}
+                    onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
+                  >
+                    <Icon name="lock" size={13} />
+                    <span>{auth.signingOut ? 'Logging out…' : 'Log Out'}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </header>
 
@@ -293,6 +384,7 @@ export function App() {
             {route.path === 'dashboard' ? (
             <ScreenDashboard
               investigation={investigation}
+              operator={auth.user}
               onNavigate={navigate}
               onSelectCase={selectCase}
               onNewCase={handleNewCase}
@@ -361,6 +453,7 @@ export function App() {
           ) : (
             <ScreenDashboard
               investigation={investigation}
+              operator={auth.user}
               onNavigate={navigate}
               onSelectCase={selectCase}
               onNewCase={handleNewCase}

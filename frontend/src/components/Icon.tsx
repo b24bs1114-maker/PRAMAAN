@@ -29,6 +29,7 @@ export type IconName =
   | 'arrow-left'
   | 'chevron-left'
   | 'chevron-right'
+  | 'chevron-down'
   | 'refresh'
   | 'external'
   | 'lock'
@@ -49,6 +50,10 @@ export type IconName =
   | 'audio'
   | 'zoom-in'
   | 'zoom-out'
+  | 'eye'
+  | 'eye-off'
+  | 'mail'
+  | 'user'
   | 'diamond'
   | 'square'
   | 'dot'
@@ -88,6 +93,7 @@ const PATHS: Partial<Record<IconName, string>> = {
   'arrow-left': 'M19 12H5M11 18l-6-6 6-6',
   'chevron-left': 'M15 18l-6-6 6-6',
   'chevron-right': 'M9 6l6 6-6 6',
+  'chevron-down': 'M6 9l6 6 6-6',
   refresh: 'M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6',
   external: 'M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6',
   lock: 'M7 10V7a5 5 0 0 1 10 0v3M12 15v2',
@@ -112,6 +118,13 @@ const PATHS: Partial<Record<IconName, string>> = {
   audio: 'M4 10v4M8 6v12M12 3v18M16 7v10M20 11v2',
   'zoom-in': 'M18 11a7 7 0 1 1-14 0 7 7 0 0 1 14 0M21 21l-4.3-4.3M11 8v6M8 11h6',
   'zoom-out': 'M18 11a7 7 0 1 1-14 0 7 7 0 0 1 14 0M21 21l-4.3-4.3M8 11h6',
+  // Password reveal toggle. `eye-off` adds the diagonal cut-through and breaks
+  // the lid/pupil so the two states read differently in greyscale, not by colour.
+  eye: 'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6',
+  'eye-off':
+    'M9.88 5.09A9.6 9.6 0 0 1 12 5c6.5 0 10 7 10 7a13.8 13.8 0 0 1-2.16 3.19M6.61 6.61A13.63 13.63 0 0 0 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.11-1.39M14.12 14.12A3 3 0 1 1 9.88 9.88M3 3l18 18',
+  mail: 'M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zM22 6l-10 7L2 6',
+  user: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8',
 }
 
 export function Icon({

@@ -28,7 +28,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
-import type { DashboardSummary, Evidence } from '../api/types'
+import type { AuthUser, DashboardSummary, Evidence } from '../api/types'
 import { ErrorBanner } from '../components/Banner'
 import { Empty, Spinner } from '../components/Feedback'
 import { Icon, mediaIcon } from '../components/Icon'
@@ -61,16 +61,24 @@ const DISPOSITION_BANDS = [
 
 export function ScreenDashboard({
   investigation,
+  operator,
   onNavigate,
   onSelectCase,
   onNewCase,
 }: {
   investigation: Investigation
+  /** The signed-in operator — used for the personalised greeting only. */
+  operator?: AuthUser | null
   onNavigate: (path: RoutePath, params?: { caseId?: string; filter?: string }) => void
   onSelectCase: (caseId: string) => void
   /** Start a fresh case: clears prior case state before landing on intake. */
   onNewCase: () => void
 }) {
+  // Extract first name for the personalised greeting from the authenticated operator.
+  const firstName = useMemo(() => {
+    const full = operator?.display_name ?? ''
+    return full.split(' ')[0] || 'Investigator'
+  }, [operator?.display_name])
   const [summary, setSummary] = useState<DashboardSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<unknown>(null)
@@ -182,15 +190,11 @@ export function ScreenDashboard({
       {/* 1. Header Row */}
       <div className="dashboard-welcome-row">
         <div>
-          <h1
-            className="dashboard-welcome-title"
-            style={{ letterSpacing: '0.04em', textTransform: 'uppercase' }}
-          >
-            INVESTIGATION COMMAND CENTER
+          <h1 className="dashboard-welcome-title">
+            Welcome back, {firstName}
           </h1>
           <p className="dashboard-welcome-subtitle">
-            Case load, evidence disposition and system state — all counts read from the case
-            database
+            Continue your investigations. Here's what's happening across your cases.
           </p>
         </div>
 
@@ -203,14 +207,14 @@ export function ScreenDashboard({
       {/* 2. Top 4 Metric Cards. No fallback literals: 0 means zero rows matched. */}
       <div className="dashboard-stat-row">
         <StatCard
-          label="ACTIVE CASES"
+          label="Active Cases"
           value={summary?.active_investigations_count}
           tone="red"
           icon="layers"
         />
-        <StatCard label="EVIDENCE ITEMS" value={summary?.evidence_items_count} tone="cyan" icon="evidence" />
-        <StatCard label="FLAGGED EVIDENCE" value={summary?.flagged_media_count} tone="amber" icon="flag" />
-        <StatCard label="PENDING REVIEW" value={summary?.pending_review_count} tone="purple" icon="clock" />
+        <StatCard label="Evidence Items" value={summary?.evidence_items_count} tone="cyan" icon="evidence" />
+        <StatCard label="Flagged Evidence" value={summary?.flagged_media_count} tone="amber" icon="flag" />
+        <StatCard label="Pending Review" value={summary?.pending_review_count} tone="purple" icon="clock" />
       </div>
 
       {/* 3. QUICK ACTIONS */}
@@ -228,30 +232,26 @@ export function ScreenDashboard({
           <QuickAction
             tone="blue"
             icon="document"
-            name="Generate Forensic Report"
+            name="Generate Report"
             desc={
               openCaseNumber
-                ? `Backend-rendered PDF for #${openCaseNumber}`
-                : 'Choose a case first — a report covers one case'
+                ? `Create an official report for #${openCaseNumber}`
+                : 'Create an official report'
             }
             onClick={goCaseScoped('reports')}
           />
           <QuickAction
             tone="purple"
-            icon="lock"
-            name="Review Custody Chain"
-            desc={
-              openCaseNumber
-                ? `Recorded custody events for #${openCaseNumber}`
-                : 'Choose a case first — the chain is per case'
-            }
-            onClick={goCaseScoped('audit')}
+            icon="shield"
+            name="New Case"
+            desc="Start an investigation"
+            onClick={onNewCase}
           />
           <QuickAction
             tone="green"
             icon="search"
-            name="Browse Cases"
-            desc="Open the full case list"
+            name="Search &amp; Trace"
+            desc="Find related instances"
             onClick={() => onNavigate('cases')}
           />
         </div>

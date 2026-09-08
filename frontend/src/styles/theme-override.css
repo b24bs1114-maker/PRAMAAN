@@ -1,0 +1,1468 @@
+/*
+ * PRAMAAN — Chandigarh Police Command-Center Theme Override
+ * =========================================================
+ * Imported AFTER global.css. All rules here override the base
+ * styles to produce the cinematic dark forensics aesthetic
+ * shown in the reference dashboard design.
+ *
+ * Design language:
+ *   - Deep navy-black base (#070b14)
+ *   - Glass card surfaces with subtle blur and thin borders
+ *   - Gold (#c9a227) institutional accent — sidebar active, CTAs, header border
+ *   - Cyan (#38bdf8) informational states
+ *   - Red (#ef4444) critical/manipulation
+ *   - Green (#10b981) operational/verified
+ *   - Amber (#f59e0b) inconclusive/pending
+ *   - Open Hand / Chandigarh skyline composited in sidebar
+ *   - Inter 400-800 for text, JetBrains Mono for data
+ *
+ * Rules below use specificity and cascade to win over global.css.
+ * Every class name is preserved — zero TSX changes required.
+ */
+
+/* ============================================================
+   1. BODY & PAGE LEVEL
+   ============================================================ */
+
+[data-theme="dark"] body {
+  background: var(--bg-page);
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(56,189,248,0.04) 0%, transparent 60%),
+    radial-gradient(ellipse 40% 60% at 90% 80%, rgba(201,162,39,0.03) 0%, transparent 50%);
+  background-attachment: fixed;
+}
+
+/* App root */
+[data-theme="dark"] .app {
+  background: var(--bg-page);
+}
+
+/* Grain texture overlay for depth */
+[data-theme="dark"] .app::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+  background-size: 256px 256px;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.6;
+}
+
+/* ============================================================
+   2. TOP HEADER BAR
+   ============================================================ */
+
+[data-theme="dark"] .workstation-bar {
+  background: rgba(6, 10, 19, 0.96);
+  border-bottom: 1px solid rgba(201, 162, 39, 0.14);
+  height: 64px;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 1px 0 rgba(201, 162, 39, 0.08), 0 4px 20px -4px rgba(0,0,0,0.5);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+[data-theme="dark"] .workstation-bar__brand {
+  min-width: 260px;
+  gap: 12px;
+}
+
+[data-theme="dark"] .workstation-bar__brand-img {
+  height: 52px;
+  filter: none;
+}
+
+/* Search bar */
+[data-theme="dark"] .search-box {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 8px;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+[data-theme="dark"] .search-box:hover {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.22);
+}
+
+[data-theme="dark"] .search-box:focus-within {
+  border-color: rgba(201,162,39,0.5);
+  background: rgba(255,255,255,0.07);
+  box-shadow: 0 0 0 3px rgba(201,162,39,0.10);
+}
+
+[data-theme="dark"] .search-box__input {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+[data-theme="dark"] .search-box__input::placeholder {
+  color: rgba(148,163,184,0.7);
+}
+
+[data-theme="dark"] .search-box__shortcut {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: rgba(201,162,39,0.7);
+  background: rgba(201,162,39,0.08);
+  border: 1px solid rgba(201,162,39,0.2);
+  border-radius: 4px;
+  padding: 2px 7px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Datetime */
+[data-theme="dark"] .workstation-bar__datetime {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+  padding: 6px 12px;
+}
+
+[data-theme="dark"] .workstation-bar__date {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+}
+
+[data-theme="dark"] .workstation-bar__time {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-family: var(--mono);
+  letter-spacing: 0.02em;
+}
+
+/* User avatar pill in header */
+[data-theme="dark"] .header-user-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 32px;
+  padding: 5px 12px 5px 5px;
+  cursor: pointer;
+  transition: all 160ms ease;
+}
+
+[data-theme="dark"] .header-user-pill:hover {
+  background: rgba(255,255,255,0.07);
+  border-color: rgba(201,162,39,0.25);
+}
+
+/* ============================================================
+   3. SIDEBAR
+   ============================================================ */
+
+[data-theme="dark"] .sidebar-nav {
+  background: var(--sidebar-bg);
+  border-right: 1px solid rgba(201, 162, 39, 0.10);
+  width: 220px;
+  position: sticky;
+  top: 64px;
+  height: calc(100vh - 64px);
+  overflow: hidden;
+}
+
+/* Open Hand monument background at bottom of sidebar */
+[data-theme="dark"] .sidebar-nav::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 260px;
+  background:
+    linear-gradient(to bottom, var(--sidebar-bg) 0%, transparent 30%),
+    url('/assets/open-hand-monument.png') center bottom / contain no-repeat;
+  opacity: 0.08;
+  pointer-events: none;
+  z-index: 0;
+}
+
+
+/* Section labels */
+[data-theme="dark"] .sidebar-nav__label {
+  color: rgba(201,162,39,0.5);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+/* Nav items */
+[data-theme="dark"] .sidebar-nav__item {
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 8px 10px;
+  position: relative;
+  border: 1px solid transparent;
+  transition: all 160ms ease;
+}
+
+[data-theme="dark"] .sidebar-nav__item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 0;
+  background: var(--gold);
+  border-radius: 0 3px 3px 0;
+  transition: height 160ms cubic-bezier(0.16,1,0.3,1);
+}
+
+[data-theme="dark"] .sidebar-nav__item:hover {
+  background: rgba(255,255,255,0.04);
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .sidebar-nav__item--active {
+  background: rgba(201,162,39,0.07);
+  color: var(--gold-bright);
+  border-color: rgba(201,162,39,0.15);
+  font-weight: 600;
+}
+
+[data-theme="dark"] .sidebar-nav__item--active::before {
+  height: 60%;
+}
+
+[data-theme="dark"] .sidebar-nav__item:disabled {
+  opacity: 0.3;
+}
+
+/* Sidebar footer */
+[data-theme="dark"] .sidebar-nav__footer {
+  border-top: 1px solid rgba(201,162,39,0.10);
+  background: var(--sidebar-bg);
+  position: relative;
+  z-index: 1;
+}
+
+/* System status card */
+[data-theme="dark"] .sidebar-status-card {
+  background: rgba(16,185,129,0.05);
+  border: 1px solid rgba(16,185,129,0.15);
+  border-radius: 8px;
+}
+
+[data-theme="dark"] .sidebar-status-card__title {
+  color: var(--success);
+}
+
+[data-theme="dark"] .sidebar-status-card__dot {
+  background: var(--success);
+  box-shadow: 0 0 8px var(--success);
+}
+
+/* User pill */
+[data-theme="dark"] .sidebar-user-pill {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px;
+}
+
+/* Theme toggle */
+[data-theme="dark"] .sidebar-theme-segmented {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+}
+
+[data-theme="dark"] .sidebar-theme-tab--active {
+  background: rgba(201,162,39,0.12);
+  color: var(--gold-bright);
+}
+
+/* Scope label (case number) */
+[data-theme="dark"] .sidebar-nav__scope {
+  color: var(--gold-dim);
+  font-size: 9.5px;
+}
+
+/* ============================================================
+   4. MAIN CONTENT AREA
+   ============================================================ */
+
+[data-theme="dark"] .app__main {
+  padding: var(--space-4) var(--space-5) var(--space-6);
+  position: relative;
+  z-index: 1;
+}
+
+/* ============================================================
+   5. CARD SYSTEM (GLASS)
+   ============================================================ */
+
+[data-theme="dark"] .card {
+  background: rgba(13, 20, 36, 0.80);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+  box-shadow:
+    0 4px 24px -4px rgba(0,0,0,0.5),
+    inset 0 1px 0 rgba(255,255,255,0.04);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+[data-theme="dark"] .card--elevated {
+  background: rgba(17, 29, 53, 0.90);
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow:
+    0 8px 32px -4px rgba(0,0,0,0.6),
+    inset 0 1px 0 rgba(255,255,255,0.05);
+}
+
+/* ============================================================
+   6. DASHBOARD — KPI STAT CARDS
+   ============================================================ */
+
+[data-theme="dark"] .dashboard-stat-card {
+  background: rgba(13, 20, 36, 0.85);
+  border-radius: 10px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow:
+    0 4px 20px -4px rgba(0,0,0,0.5),
+    inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+[data-theme="dark"] .dashboard-stat-card:hover {
+  transform: translateY(-3px);
+  box-shadow:
+    0 8px 32px -4px rgba(0,0,0,0.6),
+    inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+/* Active Cases — cyan accent */
+[data-theme="dark"] .dashboard-stat-card--red {
+  border-color: rgba(56,189,248,0.20);
+  border-bottom: 2px solid rgba(56,189,248,0.35);
+}
+
+/* Evidence — muted border */
+[data-theme="dark"] .dashboard-stat-card--cyan {
+  border-color: rgba(255,255,255,0.07);
+  border-bottom: 2px solid rgba(255,255,255,0.15);
+}
+
+/* Flagged — red accent */
+[data-theme="dark"] .dashboard-stat-card--amber {
+  border-color: rgba(239,68,68,0.20);
+  border-bottom: 2px solid rgba(239,68,68,0.35);
+}
+
+/* Pending — amber accent */
+[data-theme="dark"] .dashboard-stat-card--purple {
+  border-color: rgba(245,158,11,0.20);
+  border-bottom: 2px solid rgba(245,158,11,0.35);
+}
+
+[data-theme="dark"] .dashboard-stat-card__label {
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0.10em;
+}
+
+[data-theme="dark"] .dashboard-stat-card__val-num {
+  font-size: 32px;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+/* ============================================================
+   7. DASHBOARD — QUICK ACTIONS
+   ============================================================ */
+
+[data-theme="dark"] .dashboard-quick-actions-box {
+  background: rgba(13,20,36,0.80);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 4px 20px -4px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+[data-theme="dark"] .dashboard-quick-actions-box__title {
+  color: rgba(201,162,39,0.6);
+  letter-spacing: 0.12em;
+}
+
+[data-theme="dark"] .quick-action-card {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px;
+  transition: all 180ms cubic-bezier(0.16,1,0.3,1);
+}
+
+[data-theme="dark"] .quick-action-card:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(201,162,39,0.25);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px -4px rgba(0,0,0,0.4);
+}
+
+/* Primary quick action (upload) */
+[data-theme="dark"] .quick-action-card--primary {
+  border-color: rgba(239,68,68,0.25);
+  background: linear-gradient(135deg, rgba(239,68,68,0.06) 0%, rgba(13,20,36,0.9) 80%);
+}
+
+[data-theme="dark"] .quick-action-card--primary:hover {
+  border-color: rgba(239,68,68,0.40);
+}
+
+[data-theme="dark"] .quick-action-card__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .quick-action-card__desc {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* Quick action icon boxes */
+[data-theme="dark"] .quick-action-card__icon--red   { background: rgba(239,68,68,0.12);  color: #ef4444; border: 1px solid rgba(239,68,68,0.20); }
+[data-theme="dark"] .quick-action-card__icon--blue  { background: rgba(56,189,248,0.10); color: #38bdf8; border: 1px solid rgba(56,189,248,0.20); }
+[data-theme="dark"] .quick-action-card__icon--purple { background: rgba(139,92,246,0.10); color: #a78bfa; border: 1px solid rgba(139,92,246,0.20); }
+[data-theme="dark"] .quick-action-card__icon--green { background: rgba(16,185,129,0.10); color: #10b981; border: 1px solid rgba(16,185,129,0.20); }
+[data-theme="dark"] .quick-action-card__icon--cyan  { background: rgba(56,189,248,0.10); color: #38bdf8; border: 1px solid rgba(56,189,248,0.20); }
+
+/* ============================================================
+   8. DASHBOARD — CASE QUEUE TABLE
+   ============================================================ */
+
+[data-theme="dark"] .dashboard-card {
+  background: rgba(13,20,36,0.80);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 4px 20px -4px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+[data-theme="dark"] .dashboard-card__title {
+  color: rgba(201,162,39,0.55);
+  letter-spacing: 0.12em;
+  font-size: 10px;
+}
+
+[data-theme="dark"] .dashboard-card__view-all {
+  color: var(--accent-primary);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+[data-theme="dark"] .dashboard-card__view-all:hover {
+  color: var(--accent-bright);
+}
+
+/* Case table header */
+[data-theme="dark"] .priority-cases-table th {
+  background: rgba(255,255,255,0.03);
+  color: var(--text-faint);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+/* Case table rows */
+[data-theme="dark"] .priority-case-tr {
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  transition: background 140ms ease;
+}
+
+[data-theme="dark"] .priority-case-tr:last-child {
+  border-bottom: none;
+}
+
+[data-theme="dark"] .priority-case-tr:hover {
+  background: rgba(201,162,39,0.04);
+}
+
+[data-theme="dark"] .priority-case-tr td {
+  padding: 9px 10px;
+}
+
+/* Case number button */
+[data-theme="dark"] .case-open-btn {
+  color: var(--accent-bright);
+  font-size: 11.5px;
+  transition: color 120ms ease;
+}
+
+[data-theme="dark"] .case-open-btn:hover {
+  color: #7dd3fc;
+  text-decoration: none;
+}
+
+/* Status badge — OPEN */
+[data-theme="dark"] .priority-status-text {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+/* Verdict text */
+[data-theme="dark"] .priority-verdict-text {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+[data-theme="dark"] .priority-sla-text {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+[data-theme="dark"] .priority-row-chevron {
+  color: var(--text-faint);
+}
+
+/* ============================================================
+   9. BADGES & PILLS
+   ============================================================ */
+
+[data-theme="dark"] .badge-risk--high {
+  background: rgba(239,68,68,0.14);
+  color: #f87171;
+  border-color: rgba(239,68,68,0.30);
+  font-size: 9px;
+  padding: 2px 6px;
+  letter-spacing: 0.06em;
+}
+
+[data-theme="dark"] .badge-risk--medium {
+  background: rgba(245,158,11,0.14);
+  color: #fbbf24;
+  border-color: rgba(245,158,11,0.30);
+}
+
+[data-theme="dark"] .badge-risk--low {
+  background: rgba(16,185,129,0.10);
+  color: #34d399;
+  border-color: rgba(16,185,129,0.25);
+}
+
+/* Status open pill */
+[data-theme="dark"] .case-status-open,
+[data-theme="dark"] .pill--accent {
+  background: rgba(56,189,248,0.12);
+  color: #38bdf8;
+}
+
+/* Status circles */
+[data-theme="dark"] .status-circle--green { background: #10b981; box-shadow: 0 0 6px rgba(16,185,129,0.5); }
+[data-theme="dark"] .status-circle--amber { background: #f59e0b; box-shadow: 0 0 6px rgba(245,158,11,0.4); }
+[data-theme="dark"] .status-circle--red   { background: #ef4444; box-shadow: 0 0 6px rgba(239,68,68,0.5); }
+[data-theme="dark"] .status-circle--blue  { background: #38bdf8; box-shadow: 0 0 6px rgba(56,189,248,0.4); }
+
+/* ============================================================
+   10. BUTTONS
+   ============================================================ */
+
+[data-theme="dark"] .btn {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.10);
+  color: var(--text-primary);
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  transition: all 160ms cubic-bezier(0.16,1,0.3,1);
+}
+
+[data-theme="dark"] .btn:hover:not(:disabled) {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.15);
+}
+
+[data-theme="dark"] .btn--primary {
+  background: var(--gold);
+  border-color: var(--gold-bright);
+  color: #040608;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+[data-theme="dark"] .btn--primary:hover:not(:disabled) {
+  background: var(--gold-bright);
+  border-color: var(--gold-bright);
+  box-shadow: 0 4px 16px -2px rgba(201,162,39,0.35);
+}
+
+[data-theme="dark"] .btn--ghost {
+  background: transparent;
+  border-color: rgba(255,255,255,0.10);
+  color: var(--text-muted);
+}
+
+[data-theme="dark"] .btn--ghost:hover:not(:disabled) {
+  background: rgba(255,255,255,0.04);
+  border-color: rgba(255,255,255,0.16);
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .btn--secondary {
+  background: rgba(255,255,255,0.04);
+  border-color: rgba(255,255,255,0.10);
+  color: var(--text-secondary);
+}
+
+/* New Case button */
+[data-theme="dark"] .btn-new-case {
+  background: var(--gold);
+  border-color: var(--gold-bright);
+  color: #040608;
+  font-weight: 700;
+  border-radius: 7px;
+  font-size: 12.5px;
+  transition: all 160ms cubic-bezier(0.16,1,0.3,1);
+}
+
+[data-theme="dark"] .btn-new-case:hover {
+  background: var(--gold-bright);
+  border-color: var(--gold-bright);
+  color: #040608;
+  box-shadow: 0 4px 16px -2px rgba(201,162,39,0.35);
+}
+
+/* ============================================================
+   11. EVIDENCE DONUT / RISK OVERVIEW
+   ============================================================ */
+
+[data-theme="dark"] .risk-donut-box__num {
+  color: var(--gold-bright);
+  font-size: 34px;
+  font-weight: 800;
+}
+
+[data-theme="dark"] .risk-donut-box__label {
+  color: var(--text-muted);
+  letter-spacing: 0.1em;
+}
+
+[data-theme="dark"] .risk-overview-footer {
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+
+[data-theme="dark"] .risk-legend-row__val {
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .risk-color-box {
+  border-radius: 2px;
+}
+
+/* ============================================================
+   12. RECENT EVIDENCE TILES
+   ============================================================ */
+
+[data-theme="dark"] .recent-activity-tile {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 8px;
+  transition: all 160ms ease;
+}
+
+[data-theme="dark"] .recent-activity-tile:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(201,162,39,0.20);
+}
+
+[data-theme="dark"] .recent-activity-tile__icon--cyan {
+  background: rgba(56,189,248,0.10);
+  color: #38bdf8;
+  border-radius: 8px;
+}
+
+[data-theme="dark"] .recent-activity-tile__desc {
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+
+[data-theme="dark"] .recent-activity-tile__time {
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   13. CASE WORKFLOW STEPPER (CONTEXT BAR)
+   ============================================================ */
+
+[data-theme="dark"] .case-persistent-bar {
+  background: rgba(6,10,19,0.90);
+  border: 1px solid rgba(201,162,39,0.12);
+  border-radius: 8px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 2px 12px -2px rgba(0,0,0,0.4);
+}
+
+[data-theme="dark"] .case-persistent-bar__id {
+  background: rgba(56,189,248,0.10);
+  border: 1px solid rgba(56,189,248,0.20);
+  color: #38bdf8;
+  font-size: 11px;
+}
+
+[data-theme="dark"] .case-persistent-bar__title {
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .case-persistent-bar__step {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+[data-theme="dark"] .case-persistent-bar__step:hover {
+  background: rgba(255,255,255,0.04);
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .case-persistent-bar__step--active {
+  background: rgba(201,162,39,0.10);
+  color: var(--gold-bright);
+  border-color: rgba(201,162,39,0.25);
+}
+
+[data-theme="dark"] .case-persistent-bar__step-num {
+  background: rgba(255,255,255,0.06);
+  color: var(--text-muted);
+}
+
+[data-theme="dark"] .case-persistent-bar__step--active .case-persistent-bar__step-num {
+  background: var(--gold);
+  color: #040608;
+}
+
+[data-theme="dark"] .case-persistent-bar__step--done .case-persistent-bar__step-num {
+  background: var(--success);
+  color: #ffffff;
+}
+
+/* ============================================================
+   14. FORENSIC DROPZONE (INTAKE)
+   ============================================================ */
+
+[data-theme="dark"] .forensic-dropzone {
+  background: rgba(13,20,36,0.70);
+  border: 2px dashed rgba(201,162,39,0.20);
+  border-radius: 12px;
+  transition: all 200ms ease;
+}
+
+[data-theme="dark"] .forensic-dropzone:hover {
+  border-color: rgba(201,162,39,0.40);
+  background: rgba(201,162,39,0.04);
+}
+
+[data-theme="dark"] .forensic-dropzone--active {
+  border-color: var(--gold);
+  border-style: solid;
+  background: rgba(201,162,39,0.06);
+  box-shadow: 0 0 32px -4px rgba(201,162,39,0.20);
+}
+
+[data-theme="dark"] .forensic-dropzone__icon-wrap {
+  background: rgba(201,162,39,0.08);
+  border: 1px solid rgba(201,162,39,0.20);
+  color: var(--gold);
+}
+
+[data-theme="dark"] .forensic-dropzone:hover .forensic-dropzone__icon-wrap {
+  background: rgba(201,162,39,0.12);
+}
+
+/* Reticle corners — gold tinted */
+[data-theme="dark"] .forensic-dropzone__reticle--tl,
+[data-theme="dark"] .forensic-dropzone__reticle--tr,
+[data-theme="dark"] .forensic-dropzone__reticle--bl,
+[data-theme="dark"] .forensic-dropzone__reticle--br {
+  border-color: rgba(201,162,39,0.25);
+}
+
+[data-theme="dark"] .forensic-dropzone:hover .forensic-dropzone__reticle {
+  border-color: rgba(201,162,39,0.50);
+}
+
+/* ============================================================
+   15. FORENSIC EVIDENCE CARD (INTAKE SEALED)
+   ============================================================ */
+
+[data-theme="dark"] .forensic-evidence-card {
+  background: rgba(13,20,36,0.85);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 10px;
+  box-shadow: 0 4px 24px -4px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+[data-theme="dark"] .forensic-custody-banner {
+  background: rgba(16,185,129,0.07);
+  border-bottom: 1px solid rgba(16,185,129,0.15);
+}
+
+/* ============================================================
+   16. ANALYSIS — VERDICT CARDS & SIGNALS
+   ============================================================ */
+
+/* Verdict tone overrides */
+[data-theme="dark"] .verdict-card--manipulated {
+  background: rgba(239,68,68,0.07);
+  border-color: rgba(239,68,68,0.25) !important;
+  border-left: 3px solid #ef4444 !important;
+}
+
+[data-theme="dark"] .verdict-card--authentic {
+  background: rgba(16,185,129,0.07);
+  border-color: rgba(16,185,129,0.25) !important;
+  border-left: 3px solid #10b981 !important;
+}
+
+[data-theme="dark"] .verdict-card--inconclusive,
+[data-theme="dark"] .verdict-card--insufficient {
+  background: rgba(245,158,11,0.07);
+  border-color: rgba(245,158,11,0.25) !important;
+  border-left: 3px solid #f59e0b !important;
+}
+
+/* State pills */
+[data-theme="dark"] .pill--ok,
+[data-theme="dark"] .pill--success {
+  background: rgba(16,185,129,0.12);
+  color: #34d399;
+}
+
+[data-theme="dark"] .pill--warn,
+[data-theme="dark"] .pill--warning {
+  background: rgba(245,158,11,0.12);
+  color: #fbbf24;
+}
+
+[data-theme="dark"] .pill--error,
+[data-theme="dark"] .pill--danger {
+  background: rgba(239,68,68,0.12);
+  color: #f87171;
+}
+
+[data-theme="dark"] .pill--neutral {
+  background: rgba(255,255,255,0.06);
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   17. GENERIC TABLE SYSTEM
+   ============================================================ */
+
+[data-theme="dark"] .table-wrapper {
+  background: rgba(13,20,36,0.80);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+[data-theme="dark"] .table th {
+  background: rgba(255,255,255,0.03);
+  color: var(--text-faint);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+[data-theme="dark"] .table td {
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+[data-theme="dark"] .table tbody tr:hover {
+  background: rgba(201,162,39,0.04);
+}
+
+[data-theme="dark"] .table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* ============================================================
+   18. INTEGRITY / AUDIT CHAIN BANNER
+   ============================================================ */
+
+[data-theme="dark"] .evidence-integrity-banner {
+  background: rgba(6,10,19,0.85);
+  border: 1px solid rgba(201,162,39,0.15);
+  border-radius: 10px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+[data-theme="dark"] .evidence-integrity-banner__title {
+  color: rgba(201,162,39,0.7);
+  letter-spacing: 0.12em;
+}
+
+[data-theme="dark"] .integrity-badge {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px;
+}
+
+/* ============================================================
+   19. SIGN-IN SCREEN
+   ============================================================ */
+
+/* The signin scene is self-contained — override for dark gold */
+.signin-scene {
+  background: #070b14;
+}
+
+.signin-scene__bg {
+  background-image: url('/assets/signin-cinematic-bg.jpg');
+  background-size: cover;
+  background-position: center;
+}
+
+.signin-scene__scrim {
+  background: linear-gradient(
+    to right,
+    rgba(7,11,20,0.15) 0%,
+    rgba(7,11,20,0.30) 50%,
+    rgba(7,11,20,0.80) 75%,
+    rgba(7,11,20,0.97) 100%
+  );
+}
+
+/* Glassmorphism signin card */
+.signin-scene .signin-card,
+.signin-card {
+  background: rgba(9, 14, 28, 0.92) !important;
+  border: 1px solid rgba(201,162,39,0.20) !important;
+  border-top: 2px solid rgba(201,162,39,0.40) !important;
+  border-radius: 14px !important;
+  backdrop-filter: blur(24px) !important;
+  -webkit-backdrop-filter: blur(24px) !important;
+  box-shadow:
+    0 24px 64px -12px rgba(0,0,0,0.7),
+    0 4px 20px -4px rgba(0,0,0,0.5),
+    inset 0 1px 0 rgba(201,162,39,0.15) !important;
+}
+
+.signin-card__pramaan {
+  color: var(--gold-bright) !important;
+}
+
+.signin-card__hindi {
+  color: rgba(201,162,39,0.55) !important;
+}
+
+.signin-card__dept {
+  color: var(--text-primary) !important;
+}
+
+.signin-card__subdept {
+  color: var(--text-muted) !important;
+}
+
+.signin-card__access-banner {
+  background: rgba(239,68,68,0.08) !important;
+  border: 1px solid rgba(239,68,68,0.20) !important;
+  color: #fca5a5 !important;
+}
+
+.signin-input {
+  background: rgba(255,255,255,0.04) !important;
+  border: 1px solid rgba(255,255,255,0.10) !important;
+  color: var(--text-primary) !important;
+  border-radius: 8px !important;
+  transition: border-color 160ms ease, background 160ms ease !important;
+}
+
+.signin-input:focus {
+  border-color: rgba(201,162,39,0.40) !important;
+  background: rgba(255,255,255,0.06) !important;
+  box-shadow: 0 0 0 3px rgba(201,162,39,0.08) !important;
+}
+
+.signin-submit {
+  background: var(--gold) !important;
+  border-color: var(--gold-bright) !important;
+  color: #040608 !important;
+  font-weight: 700 !important;
+  border-radius: 8px !important;
+  letter-spacing: 0.02em !important;
+  transition: all 160ms cubic-bezier(0.16,1,0.3,1) !important;
+}
+
+.signin-submit:not(:disabled):hover {
+  background: var(--gold-bright) !important;
+  box-shadow: 0 4px 20px -4px rgba(201,162,39,0.45) !important;
+}
+
+.signin-submit:disabled {
+  opacity: 0.5 !important;
+  cursor: not-allowed !important;
+}
+
+.signin-label {
+  color: var(--text-secondary) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+}
+
+.signin-alert {
+  background: rgba(239,68,68,0.10) !important;
+  border: 1px solid rgba(239,68,68,0.25) !important;
+  border-radius: 8px !important;
+}
+
+.signin-security-badge {
+  background: rgba(255,255,255,0.03) !important;
+  border: 1px solid rgba(255,255,255,0.07) !important;
+  border-radius: 8px !important;
+}
+
+.signin-sso {
+  background: rgba(255,255,255,0.04) !important;
+  border: 1px solid rgba(255,255,255,0.09) !important;
+  color: var(--text-muted) !important;
+  border-radius: 8px !important;
+}
+
+/* ============================================================
+   20. DASHBOARD WELCOME ROW
+   ============================================================ */
+
+[data-theme="dark"] .dashboard-welcome-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  text-transform: none !important;
+}
+
+[data-theme="dark"] .dashboard-welcome-subtitle {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ============================================================
+   21. SETTINGS SCREEN
+   ============================================================ */
+
+[data-theme="dark"] .settings-section-header {
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+[data-theme="dark"] .settings-section-icon {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+[data-theme="dark"] .settings-status-card {
+  background: rgba(13,20,36,0.80);
+  border: 1px solid rgba(255,255,255,0.06);
+}
+
+[data-theme="dark"] .settings-status-card--ok {
+  border-left-color: #10b981;
+}
+
+[data-theme="dark"] .settings-status-card--warn {
+  border-left-color: #f59e0b;
+}
+
+[data-theme="dark"] .settings-status-card--error {
+  border-left-color: #ef4444;
+}
+
+[data-theme="dark"] .settings-theme-btn {
+  background: rgba(255,255,255,0.04);
+  border: 1.5px solid rgba(255,255,255,0.09);
+  color: var(--text-muted);
+}
+
+[data-theme="dark"] .settings-theme-btn:hover:not(.settings-theme-btn--active) {
+  background: rgba(255,255,255,0.07);
+  color: var(--text-primary);
+}
+
+[data-theme="dark"] .settings-theme-btn--active {
+  background: rgba(201,162,39,0.10);
+  border-color: rgba(201,162,39,0.30);
+  color: var(--gold-bright);
+}
+
+/* ============================================================
+   22. PIPELINE STEPPER (INTAKE)
+   ============================================================ */
+
+[data-theme="dark"] .forensic-pipeline-stepper {
+  background: rgba(13,20,36,0.80);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+}
+
+[data-theme="dark"] .pipeline-step {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+}
+
+[data-theme="dark"] .pipeline-step--active {
+  border-color: rgba(201,162,39,0.35);
+  background: rgba(201,162,39,0.05);
+  box-shadow: 0 0 0 1px rgba(201,162,39,0.15);
+}
+
+[data-theme="dark"] .pipeline-step--active .pipeline-step__num {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: #040608;
+}
+
+[data-theme="dark"] .pipeline-step--active .pipeline-step__title {
+  color: var(--gold-bright);
+}
+
+/* ============================================================
+   23. GLOBAL FORM INPUTS
+   ============================================================ */
+
+[data-theme="dark"] input[type="text"],
+[data-theme="dark"] input[type="search"],
+[data-theme="dark"] input[type="email"],
+[data-theme="dark"] input[type="password"],
+[data-theme="dark"] input[type="number"],
+[data-theme="dark"] textarea,
+[data-theme="dark"] select {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  color: var(--text-primary);
+  border-radius: 7px;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+[data-theme="dark"] input:focus,
+[data-theme="dark"] textarea:focus,
+[data-theme="dark"] select:focus {
+  border-color: rgba(201,162,39,0.35);
+  background: rgba(255,255,255,0.05);
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(201,162,39,0.08);
+}
+
+[data-theme="dark"] select option {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+/* ============================================================
+   24. REPORT SCREEN
+   ============================================================ */
+
+/* Reports list items */
+[data-theme="dark"] .report-list-item,
+[data-theme="dark"] .report-row {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px;
+  transition: all 160ms ease;
+}
+
+[data-theme="dark"] .report-list-item:hover,
+[data-theme="dark"] .report-row:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(201,162,39,0.20);
+}
+
+/* Generate report button */
+[data-theme="dark"] .report-generate-btn,
+[data-theme="dark"] .btn--generate {
+  background: var(--gold);
+  border-color: var(--gold-bright);
+  color: #040608;
+}
+
+/* ============================================================
+   25. BANNER / ALERT COMPONENTS
+   ============================================================ */
+
+[data-theme="dark"] .banner--error {
+  background: rgba(239,68,68,0.08);
+  border: 1px solid rgba(239,68,68,0.20);
+  border-left: 3px solid #ef4444;
+  border-radius: 8px;
+  color: #fca5a5;
+}
+
+[data-theme="dark"] .banner--warn {
+  background: rgba(245,158,11,0.08);
+  border: 1px solid rgba(245,158,11,0.20);
+  border-left: 3px solid #f59e0b;
+  border-radius: 8px;
+  color: #fde68a;
+}
+
+[data-theme="dark"] .banner--ok {
+  background: rgba(16,185,129,0.08);
+  border: 1px solid rgba(16,185,129,0.20);
+  border-left: 3px solid #10b981;
+  border-radius: 8px;
+  color: #6ee7b7;
+}
+
+[data-theme="dark"] .banner--info {
+  background: rgba(56,189,248,0.08);
+  border: 1px solid rgba(56,189,248,0.20);
+  border-left: 3px solid #38bdf8;
+  border-radius: 8px;
+  color: #7dd3fc;
+}
+
+/* ============================================================
+   26. PROPAGATION GRAPH PANEL
+   ============================================================ */
+
+[data-theme="dark"] .graph-panel,
+[data-theme="dark"] .propagation-panel {
+  background: rgba(6,10,19,0.90);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+}
+
+/* ============================================================
+   27. AUDIT SCREEN
+   ============================================================ */
+
+[data-theme="dark"] .audit-chain-row {
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  transition: background 120ms ease;
+}
+
+[data-theme="dark"] .audit-chain-row:hover {
+  background: rgba(201,162,39,0.03);
+}
+
+[data-theme="dark"] .audit-hash-text {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+/* ============================================================
+   28. SCREEN TRANSITIONS
+   ============================================================ */
+
+@keyframes screenEnter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+[data-theme="dark"] .screen {
+  animation: screenEnter 220ms cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+
+/* ============================================================
+   29. FOOTER BAR
+   ============================================================ */
+
+[data-theme="dark"] .app-footer-bar {
+  background: rgba(6,10,19,0.95);
+  border-top: 1px solid rgba(201,162,39,0.12);
+  padding: 10px var(--space-5);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  letter-spacing: 0.06em;
+}
+
+/* ============================================================
+   30. SCROLLBARS (DARK)
+   ============================================================ */
+
+[data-theme="dark"] * {
+  scrollbar-color: rgba(201,162,39,0.15) transparent;
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-thumb {
+  background: rgba(201,162,39,0.15);
+}
+
+[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(201,162,39,0.25);
+}
+
+/* ============================================================
+   31. LOADING SPINNER — GOLD RING
+   ============================================================ */
+
+[data-theme="dark"] .spinner,
+[data-theme="dark"] .signin-submit__spin {
+  border-color: rgba(201,162,39,0.25) !important;
+  border-top-color: var(--gold) !important;
+}
+
+/* ============================================================
+   32. FOCUS RING — GOLD
+   ============================================================ */
+
+[data-theme="dark"] :focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg-page), 0 0 0 4px rgba(201,162,39,0.50);
+  border-radius: var(--radius-sm);
+}
+
+/* ============================================================
+   33. TABS
+   ============================================================ */
+
+[data-theme="dark"] .tab {
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+
+[data-theme="dark"] .tab--active {
+  color: var(--gold-bright);
+  border-bottom-color: var(--gold);
+}
+
+[data-theme="dark"] .tab:hover:not(.tab--active) {
+  color: var(--text-primary);
+  border-bottom-color: rgba(255,255,255,0.10);
+}
+
+/* ============================================================
+   34. MISC IMPROVEMENTS
+   ============================================================ */
+
+/* Page section headers use gold line */
+[data-theme="dark"] .section__title {
+  color: var(--text-primary);
+}
+
+/* Monospace hash/id text */
+[data-theme="dark"] .mono,
+[data-theme="dark"] code {
+  color: var(--accent-bright);
+  background: rgba(56,189,248,0.06);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 0.9em;
+}
+
+/* Analyst block in intake */
+[data-theme="dark"] .intake-analyst {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+}
+
+[data-theme="dark"] .intake-analyst__mark {
+  background: rgba(201,162,39,0.10);
+  color: var(--gold-bright);
+}
+
+/* Pill for unavailable / neutral */
+[data-theme="dark"] .pill--unavailable {
+  background: rgba(255,255,255,0.04);
+  color: var(--text-faint);
+}
+
+/* ============================================================
+   35. RESPONSIVE TWEAKS (DARK ONLY)
+   ============================================================ */
+
+@media (max-width: 960px) {
+  [data-theme="dark"] .sidebar-nav {
+    display: none;
+  }
+}
+
+/* ============================================================
+   36. CASE STATE PANELS (ANALYSIS RESULT COLORS)
+   ============================================================ */
+
+[data-theme="dark"] .case-state-panel {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
+}
+
+[data-theme="dark"] .case-state-panel--error {
+  border-left: 3px solid var(--danger-bright);
+  background: rgba(239,68,68,0.05);
+}
+
+[data-theme="dark"] .case-state-panel--ok {
+  border-left: 3px solid var(--success-bright);
+  background: rgba(16,185,129,0.05);
+}
+
+[data-theme="dark"] .case-state-panel--warn {
+  border-left: 3px solid var(--warning-bright);
+  background: rgba(245,158,11,0.05);
+}
+
+[data-theme="dark"] .case-state-panel--info {
+  border-left: 3px solid var(--accent-primary);
+  background: rgba(56,189,248,0.05);
+}
+
+/* ============================================================
+   37. HASH BAR (FORENSIC EVIDENCE)
+   ============================================================ */
+
+[data-theme="dark"] .forensic-hash-bar {
+  background: rgba(6,10,19,0.80);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px;
+}
+
+[data-theme="dark"] .forensic-hash-bar__label {
+  background: rgba(56,189,248,0.08);
+  color: var(--accent-bright);
+  border-radius: 4px;
+}
+
+[data-theme="dark"] .forensic-hash-bar__code {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+/* ============================================================
+   38. RESTORE SCREEN (SESSION LOADING)
+   ============================================================ */
+
+[data-theme="dark"] .login-shell {
+  background: var(--bg-page);
+}
+
+.login-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--bg-page);
+}
+
+.login-restore {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  color: var(--text-muted);
+  font-size: 14px;
+}

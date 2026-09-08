@@ -135,7 +135,7 @@ code,
   position: sticky;
   top: 0;
   z-index: 100;
-  height: 78px;
+  height: 64px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   display: flex;
@@ -315,8 +315,8 @@ code,
   flex-direction: column;
   flex: none;
   position: sticky;
-  top: 78px;
-  height: calc(100vh - 78px);
+  top: 64px;
+  height: calc(100vh - 64px);
   overflow: hidden;
   transition: background-color 160ms ease, border-color 160ms ease;
 }
@@ -4338,88 +4338,620 @@ code,
 
 /* --- Sign in -------------------------------------------------------------- */
 /*
- * The gate in front of the console. Deliberately plain: one card, two fields,
- * one button. Nothing here is decorative enough to distract from the fact that
- * whoever signs in is the name that will be recorded on evidence.
+ * The institutional front door. The whole command-centre scene behind the card
+ * -- the Chandigarh Police masthead, the PRAMAAN wordmark and gold motto, the
+ * examination workstation and the physical evidence dossier -- is a single
+ * baked cinematic still (public/assets/signin-cinematic-bg.jpg). Only the card
+ * on the right is live. The palette is fixed gold-on-navy and self-contained on
+ * `.signin-scene`, deliberately independent of the console's light/dark theme,
+ * so a reload can never flash steel-blue chrome onto the sign-in screen and the
+ * card keeps its livery whatever the photograph renders behind it.
+ */
+.signin-scene {
+  /* Self-contained institutional palette (shared with the card below). */
+  --si-navy-0: #040714;
+  --si-navy-1: #070d1e;
+  --si-navy-2: #0b142c;
+  --si-card: #0b1226;
+  --si-card-surface: #0e1730;
+  --si-input: #070d1d;
+  --si-gold: #c8a24a;
+  --si-gold-bright: #e6c86e;
+  --si-gold-deep: #9c7a2f;
+  --si-gold-glow: rgba(200, 162, 74, 0.25);
+  --si-line: rgba(200, 162, 74, 0.2);
+  --si-line-subtle: rgba(255, 255, 255, 0.07);
+  --si-line-strong: rgba(200, 162, 74, 0.42);
+  --si-ink: #f7f5ef;
+  --si-text: #c2cbe0;
+  --si-muted: #8895b3;
+  --si-faint: #596582;
+  --si-danger: #f87171;
+  --si-danger-line: rgba(248, 113, 113, 0.4);
+  --si-danger-bg: rgba(248, 113, 113, 0.08);
+  --si-ok: #34d399;
+  --si-warn: #fbbf24;
+  --si-focus: 0 0 0 2px var(--si-navy-1), 0 0 0 4px var(--si-gold);
+
+  position: relative;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: clamp(16px, 2.4vh, 40px) clamp(16px, 2.8vw, 56px);
+  background: var(--si-navy-0);
+  color: var(--si-text);
+  font-family: var(--sans);
+  overflow: hidden;
+}
+
+/* The baked command-centre still, full-bleed behind everything. */
+.signin-scene__bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-image: url('/assets/signin-cinematic-bg.jpg');
+  background-position: center center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+/* Right-edge scrim: deepens the navy under the card so its text stays legible
+   over whatever the photograph puts there once `cover` crops it. */
+.signin-scene__scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    rgba(4, 7, 20, 0) 50%,
+    rgba(4, 7, 20, 0.5) 72%,
+    rgba(4, 7, 20, 0.84) 100%
+  );
+}
+
+/* The card is the only live element: float it over the scene, docked right,
+   and never let it stretch to the full height of the flex row. */
+.signin-scene .signin-card {
+  position: relative;
+  z-index: 2;
+  align-self: center;
+  width: clamp(340px, 27vw, 420px);
+  max-width: 100%;
+  max-height: calc(100dvh - clamp(28px, 4.8vh, 80px));
+  overflow-y: auto;
+  background:
+    linear-gradient(180deg, rgba(200, 162, 74, 0.06) 0%, transparent 42%),
+    linear-gradient(180deg, rgba(14, 23, 48, 0.94) 0%, rgba(8, 13, 28, 0.96) 100%);
+  backdrop-filter: blur(7px);
+  -webkit-backdrop-filter: blur(7px);
+  box-shadow: 0 30px 80px rgba(2, 4, 12, 0.62);
+}
+
+/* "Keep me signed in" and the forgot-password affordance share one row. */
+.signin-options-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+/* ---- Right: Sign-in Card ------------------------------------------------- */
+.signin-card {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: clamp(var(--space-5), 3.2vw, 36px);
+  background:
+    linear-gradient(180deg, rgba(200, 162, 74, 0.04) 0%, transparent 40%),
+    linear-gradient(180deg, #0f1833 0%, var(--si-card) 100%);
+  border: 1px solid rgba(200, 162, 74, 0.28);
+  border-radius: 18px;
+  box-shadow:
+    0 32px 64px -24px rgba(0, 0, 0, 0.85),
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.signin-card__head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 3px;
+  padding-bottom: var(--space-2);
+}
+
+.signin-card__welcome {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--si-muted);
+}
+
+.signin-card__brand-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 10px;
+  margin: 2px 0;
+}
+
+.signin-card__pramaan {
+  font-size: clamp(26px, 3.2vw, 32px);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  color: var(--si-ink);
+}
+
+.signin-card__hindi {
+  font-size: clamp(22px, 2.8vw, 26px);
+  font-weight: 700;
+  color: var(--si-gold);
+}
+
+.signin-card__dept {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--si-text);
+  letter-spacing: 0.02em;
+}
+
+.signin-card__subdept {
+  margin: 0;
+  font-size: 11px;
+  color: var(--si-muted);
+  letter-spacing: 0.02em;
+}
+
+.signin-card__access-banner {
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--si-faint);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.signin-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--si-muted);
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+}
+
+.signin-status__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--si-faint);
+}
+
+.signin-status--up .signin-status__dot {
+  background: var(--si-ok);
+  box-shadow: 0 0 8px var(--si-ok);
+}
+
+.signin-status--unknown .signin-status__dot {
+  background: var(--si-gold);
+}
+
+.signin-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.signin-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.signin-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.signin-label {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: #cbd5e6;
+  font-weight: 500;
+}
+
+.signin-forgot-link {
+  font-size: 11px;
+  color: var(--si-gold);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: rgba(200, 162, 74, 0.4);
+  transition: color 140ms ease;
+}
+
+.signin-forgot-link:hover {
+  color: var(--si-gold-bright);
+}
+
+.signin-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.signin-input-icon {
+  position: absolute;
+  left: 14px;
+  display: grid;
+  place-items: center;
+  color: var(--si-muted);
+  pointer-events: none;
+}
+
+.signin-input {
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--si-input);
+  border: 1px solid rgba(200, 162, 74, 0.25);
+  border-radius: 9px;
+  color: var(--si-ink);
+  font-size: var(--text-base);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.signin-input--with-icon {
+  padding-left: 42px;
+}
+
+.signin-input::placeholder {
+  color: #4b5874;
+}
+
+.signin-input:hover:not(:disabled) {
+  border-color: rgba(200, 162, 74, 0.5);
+}
+
+.signin-input:focus-visible {
+  outline: none;
+  border-color: var(--si-gold);
+  box-shadow: 0 0 0 3px rgba(200, 162, 74, 0.22);
+}
+
+.signin-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.signin-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--si-faint);
+}
+
+.signin-input--password {
+  padding-right: 44px;
+}
+
+.signin-reveal {
+  position: absolute;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  background: transparent;
+  color: var(--si-muted);
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.signin-reveal:hover:not(:disabled) {
+  color: var(--si-gold-bright);
+  background: rgba(200, 162, 74, 0.1);
+}
+
+.signin-reveal:focus-visible {
+  outline: none;
+  box-shadow: var(--si-focus);
+  color: var(--si-gold-bright);
+}
+
+.signin-reveal:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.signin-remember {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.signin-remember__box {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--si-gold);
+  cursor: pointer;
+  flex: none;
+}
+
+.signin-remember__box:focus-visible {
+  outline: none;
+  box-shadow: var(--si-focus);
+  border-radius: 4px;
+}
+
+.signin-remember__text {
+  font-size: 12.5px;
+  color: var(--si-text);
+}
+
+.signin-submit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 13px 20px;
+  border: 1px solid var(--si-gold-deep);
+  border-radius: 9px;
+  background: linear-gradient(180deg, #e4be6b 0%, #c4993d 100%);
+  color: #1a1304;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: filter 140ms ease, transform 80ms ease, box-shadow 140ms ease;
+  box-shadow: 0 8px 24px -8px rgba(200, 162, 74, 0.7);
+}
+
+.signin-submit:hover:not(:disabled) {
+  filter: brightness(1.08);
+  box-shadow: 0 10px 28px -6px rgba(200, 162, 74, 0.85);
+}
+
+.signin-submit:active:not(:disabled) {
+  transform: translateY(0.5px) scale(0.995);
+}
+
+.signin-submit:focus-visible {
+  outline: none;
+  box-shadow: var(--si-focus);
+}
+
+.signin-submit:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.signin-submit__spin {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 2px solid rgba(26, 19, 4, 0.35);
+  border-top-color: #1a1304;
+  animation: spin 600ms linear infinite;
+}
+
+.signin-alert {
+  display: flex;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--si-danger-line);
+  border-radius: 10px;
+  background: var(--si-danger-bg);
+}
+
+.signin-alert__icon {
+  color: var(--si-danger);
+  flex: none;
+  margin-top: 1px;
+}
+
+.signin-alert__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.signin-alert__title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: #ffd9d9;
+}
+
+.signin-alert__detail {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: #f2c9c9;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.signin-alert__meta {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--si-muted);
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.signin-retry {
+  align-self: flex-start;
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid var(--si-line-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--si-ink);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.signin-retry:hover {
+  border-color: var(--si-gold);
+  color: var(--si-gold-bright);
+}
+
+.signin-retry:focus-visible {
+  outline: none;
+  box-shadow: var(--si-focus);
+}
+
+.signin-alt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.signin-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--si-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
+.signin-divider::before,
+.signin-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(200, 162, 74, 0.18);
+}
+
+.signin-sso {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid rgba(200, 162, 74, 0.3);
+  border-radius: 9px;
+  background: rgba(14, 23, 48, 0.5);
+  color: #cbd5e6;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: not-allowed;
+}
+
+.signin-security-badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: var(--space-2);
+  padding: 10px 14px;
+  background: rgba(8, 14, 30, 0.5);
+  border: 1px solid rgba(200, 162, 74, 0.18);
+  border-radius: 10px;
+}
+
+.signin-security-badge__icon {
+  color: var(--si-gold-bright);
+  flex: none;
+}
+
+.signin-security-badge__text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.signin-security-badge__text strong {
+  font-size: 11.5px;
+  color: var(--si-ink);
+  font-weight: 600;
+}
+
+.signin-security-badge__text span {
+  font-size: 10.5px;
+  color: var(--si-muted);
+}
+
+/* Responsive queries */
+@media (max-width: 1180px) {
+  /* The baked scene is composed for a wide canvas; once the card would crowd
+     the workstation, centre it and lean on the scrim for legibility. */
+  .signin-scene {
+    justify-content: center;
+    padding: clamp(16px, 3vh, 40px) clamp(16px, 4vw, 44px);
+  }
+  .signin-scene__bg {
+    background-position: 32% center;
+  }
+  .signin-scene__scrim {
+    background: linear-gradient(
+      180deg,
+      rgba(4, 7, 20, 0.42) 0%,
+      rgba(4, 7, 20, 0.82) 100%
+    );
+  }
+  .signin-scene .signin-card {
+    width: min(460px, 100%);
+  }
+}
+
+@media (max-width: 560px) {
+  .signin-scene {
+    padding: 12px;
+  }
+  .signin-scene .signin-card {
+    width: 100%;
+    max-height: none;
+    padding: var(--space-4) var(--space-3);
+  }
+}
+
+/*
+ * The restore splash, shown by the shell only while a stored token is being
+ * verified against /api/auth/me. Kept in the same navy livery as the sign-in
+ * page so a reload does not flash a light box before the console appears.
  */
 .login-shell {
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: var(--space-5);
-  background: var(--bg-page);
+  background: linear-gradient(160deg, #0a1030 0%, #05081a 100%);
 }
 
-.login-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  width: 100%;
-  max-width: 380px;
-  padding: var(--space-6) var(--space-5);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--card-glow);
-}
-
-.login-card__brand {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: var(--space-2);
-}
-
-.login-card__logo {
-  height: 34px;
-  width: auto;
-  object-fit: contain;
-}
-
-.login-card__tagline {
-  margin: 0;
-  font-size: var(--text-2xs);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-  text-align: center;
-}
-
-.login-card__notice {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  font-size: var(--text-2xs);
-  line-height: 1.5;
-  color: var(--text-muted);
-}
-
-.login-card__notice svg {
-  flex-shrink: 0;
-  margin-top: 1px;
-  color: var(--accent);
-}
-
-.login-card__foot {
-  margin: 0;
-  text-align: center;
-  font-size: var(--text-2xs);
-  color: var(--text-faint);
-}
-
-/* Shown only while a stored token is being verified against /api/auth/me. */
 .login-restore {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  font-size: var(--text-xs);
-  color: var(--text-muted);
+  font-size: var(--text-sm);
+  color: #cbd2e6;
+}
+
+.login-restore .spinner {
+  border-color: rgba(200, 162, 74, 0.3);
+  border-top-color: #c8a24a;
 }
 
 /* --- Motion keyframes referenced by components above --- */
